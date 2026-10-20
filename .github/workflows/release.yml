@@ -78,9 +78,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "geoip_week=$(date -u +%g%V)" >> "$GITHUB_ENV"
-          # 发布在独立 job，经 outputs 把周次带给 release notes。
-          echo "geoip_week=$(date -u +%g%V)" >> "$GITHUB_OUTPUT"
           bash script/fetch-geoip.sh -o resource/geoip.db
           test -s resource/geoip.db
 
@@ -162,11 +159,16 @@ jobs:
       - name: Checksum
         run: sha256sum ./bin/*.zip | awk -F" |/" '{print $1, $NF}' > checksums.txt
 
+      # 矩阵 job 的 outputs 不会透传到 needs；周次在发布 job 现算。
+      - name: GeoIP week
+        id: geoip
+        run: echo "week=$(date -u +%g%V)" >> "$GITHUB_OUTPUT"
+
       - name: Publish tag release
         uses: ncipollo/release-action@v1
         with:
           artifacts: "checksums.txt,bin/*.zip"
-          body: "GeoIP week: ${{ needs.build.outputs.geoip_week }}"
+          body: "GeoIP week: ${{ steps.geoip.outputs.week }}"
           generateReleaseNotes: true
 
   image:
