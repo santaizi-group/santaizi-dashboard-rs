@@ -1,0 +1,1196 @@
+[SantaiziMonitoring]
+other = "Santaizi Monitoring"
+
+[Server]
+other = "Servers"
+
+[Services]
+other = "Services"
+
+[Notification]
+other = "Notifications"
+
+[Settings]
+other = "Settings"
+
+[Home]
+other = "Home"
+
+[BackToHomepage]
+other = "Back to Homepage"
+
+[AdminPanel]
+other = "Dashboard"
+
+[Logout]
+other = "Log out"
+
+[Login]
+other = "Log in"
+
+[ConfirmLogout]
+other = "Confirm Logging Out?"
+
+[AfterLoggingOutYouHaveToLoginAgain]
+other = "You will need to log in again to continue"
+
+[Cancel]
+other = "Cancel"
+
+[Confirm]
+other = "Confirm"
+
+[Name]
+other = "Name"
+
+[BackUp]
+other = "Backup"
+
+[3amDaily]
+other = "(At 3 AM)"
+
+[Coverage]
+other = "Coverage"
+
+[IgnoreAllAndExecuteOnlyThroughSpecificServers]
+other = "Ignore All, Execute Only on Specific Servers"
+
+[AllIncludedOnlySpecificServersAreNotExecuted]
+other = "Cover All, Except Specific Servers"
+
+[SpecificServers]
+other = "Specific Servers"
+
+[EnterIdAndNameToSearch]
+other = "Enter ID/Name to search"
+
+[NotificationMethodGroup]
+other = "Notification Method Group"
+
+[AddMonitor]
+other = "Add Service Monitor"
+
+[Blog]
+other = "Blog"
+
+[Target]
+other = "Target"
+
+[Type]
+other = "Type"
+
+[SslExpirationOrChange]
+other = "(Certificate Expiration and Changes)"
+
+[Duration]
+other = "Interval"
+
+[Seconds]
+other = "Seconds"
+
+[EnableFailureNotification]
+other = "Enable Failure Notification"
+
+[FailureNotification]
+other = "Failure Notification"
+
+[MaxLatency]
+other = "Maximum Latency (ms)"
+
+[MinLatency]
+other = "Minimum Latency (ms)"
+
+[EnableLatencyNotification]
+other = "Enable Latency Notification"
+
+[LatencyNotification]
+other = "Latency Notification"
+
+[IntroductionOfMonitor]
+other = """
+For type <b>HTTP-GET</b>, enter URL (with http/https scheme, HTTPS protocol will also monitor SSL certificate);<br>
+For type <b>ICMP-Ping</b>, enter domain/IP without port: example.com;<br>
+For type <b>TCP-Ping</b>, enter domain/IP + port number: example.com:22"""
+
+[AddNotificationMethod]
+other = "Add Notification Method"
+
+[Tag]
+other = "Notification Group"
+
+[DoNotSendTestMessages]
+other = "Do Not Send Test Message"
+
+[RequestMethod]
+other = "Request Method"
+
+[RequestType]
+other = "Request Type"
+
+[VerifySSL]
+other = "Verify SSL"
+
+[AddNotificationRule]
+other = "Add Notification Rule"
+
+[Rules]
+other = "Rules"
+
+[NotificationTriggerMode]
+other = "Notification Trigger Mode"
+
+[ModeAlwaysTrigger]
+other = "Always Trigger"
+
+[ModeOnetimeTrigger]
+other = "Trigger Once"
+
+[Enable]
+other = "Enable"
+
+[AddServer]
+other = "Add Server"
+
+[BatchEditServerGroup]
+other = "Batch Edit Server Group"
+
+[BatchDeleteServer]
+other = "Batch Delete Server"
+
+[InputServerGroupName]
+other = "Input Server Group Name"
+
+[ServerGroup]
+other = "Server Group"
+
+[EinsteinLightspeed1]
+other = "Einstein Lightspeed 1"
+
+[DisplayIndex]
+other = "Display Index"
+
+[TheLargerTheNumberTheHigherThePriority]
+other = "Greater Number, Higher Priority"
+
+[Secret]
+other = "Secret"
+
+[Note]
+other = "Note"
+
+[PublicNote]
+other = "Public Note"
+
+[LinuxOneKeyInstall]
+other = "Linux Installation Command"
+
+[NoDomainAlert]
+other = "Please set the IP (or a domain pointed to it) of the original server in settings"
+
+[PushSuccessfully]
+other = "Send Success Notification"
+
+[LastExecution]
+other = "Last Execution"
+
+[LastResult]
+other = "Last Result"
+
+[Administration]
+other = "Manage"
+
+[CoverAll]
+other = "Cover All"
+
+[IgnoreAll]
+other = "Ignore All"
+
+[ByTrigger]
+other = "Alarmed Servers"
+
+[AccessDenied]
+other = "Access Denied"
+
+[Use]
+other = "Use"
+
+[AccountToLogin]
+other = "Account Login"
+
+[SignUp]
+other = "Sign up"
+
+[DontHaveAnAccount]
+other = "Don't Have an Account?"
+
+[SSLCertificate]
+other = "HTTP(S)/SSL Certificate"
+
+[TCPPort]
+other = "TCPing"
+
+[DeleteService]
+other = "Remove Service Monitor"
+
+[ConfirmToDeleteThisService]
+other = "Confirm Deleting This Service?"
+
+[DeleteNotificationMethod]
+other = "Delete Notification Method"
+
+[ConfirmToDeleteThisNotificationMethod]
+other = "Confirm Deleting This Notification Method?"
+
+[SelectAll]
+other = "Select All"
+
+[VersionNumber]
+other = "Version"
+
+[OneKeyInstall]
+other = "Installation commands"
+
+[ClickToCopy]
+other = "Click To Copy"
+
+[InstallScriptNotConfigured]
+other = "Install script not configured"
+
+[DeleteServer]
+other = "Delete Server"
+
+[ConfirmToDeleteServer]
+other = "Confirm Deleting This Server?"
+
+[ResetSecret]
+other = "Reset Secret"
+
+[ConfirmToResetSecret]
+other = "Confirm resetting the secret? The old secret will be invalidated immediately and the agent must reconnect using the new secret."
+
+[NoServerSelected]
+other = "No Server Selected"
+
+[ExecutionResults]
+other = "Execute Results"
+
+[SiteTitle]
+other = "Site Title"
+
+[AdministratorList]
+other = "Administrator List"
+
+[Theme]
+other = "Frontend Theme"
+
+[Auto]
+other = "Auto"
+
+[CustomCodes]
+other = "Custom Codes (Style and Script)"
+
+[CustomCodesDashboard]
+other = "Custom Codes for Dashboard"
+
+[AccessPassword]
+other = "Frontend Access Password"
+
+[PanelServerDomainAndIP]
+other = "Dashboard Server Domain/IP without CDN"
+
+[IPChangeAlert]
+other = "IP Change Notification"
+
+[AllIncludedOnlySpecificServersAreNotAlerted]
+other = "Cover All, Only ignore Specific Servers"
+
+[IgnoreAllOnlyAlertSpecificServers]
+other = "Ignore All, Cover only Specific Servers"
+
+[IgnoreAllRequestOnlyThroughSpecificServers]
+other = "Ignore All, Request Only Through Specific Servers"
+
+[AllIncludedOnlySpecificServersAreNotRequest]
+other = "Cover All, Only Specific Servers do not request."
+
+[ServerIDSeparatedByCommas]
+other = "Server IDs Separated by Commas"
+
+[IPChangeNotificationTag]
+other = "Send Notification To Specific Notification Group"
+
+[NotificationMessagesDoNotHideIP]
+other = "Show Full IP Address in Notification Messages"
+
+[Save]
+other = "Save"
+
+[ModifiedSuccessfully]
+other = "Modified successfully"
+
+[Offline]
+other = "Offline"
+
+[Platform]
+other = "System"
+
+[DiskUsed]
+other = "Disk"
+
+[MemUsed]
+other = "RAM"
+
+[CpuUsed]
+other = "CPU"
+
+[Virtualization]
+other = "Virtualization"
+
+[SwapUsed]
+other = "Swap"
+
+[NetTransfer]
+other = "Usage"
+
+[Load]
+other = "Load"
+
+[ProcessCount]
+other = "Process Count"
+
+[ConnCount]
+other = "Connection Count"
+
+[BootTime]
+other = "Boot Time"
+
+[LastActive]
+other = "Last Active"
+
+[Version]
+other = "Version"
+
+[NetSpeed]
+other = "NIC"
+
+[Uptime]
+other = "Uptime"
+
+[ServerIsOffline]
+other = "Server is Offline"
+
+[Day]
+other = "Days"
+
+[RealtimeChannelEstablished]
+other = "Realtime Channel Established"
+
+[GetTheLatestMonitoringDataInRealTime]
+other = "You Can Get the Latest Monitoring Data in Real Time!"
+
+[RealtimeChannelDisconnect]
+other = "Realtime Channel Disconnect"
+
+[CanNotGetTheLatestMonitoringDataInRealTime]
+other = "Cannot Get the Latest Monitoring Data in Real Time!"
+
+[30DaysOnline]
+other = "30-Day Availability"
+
+[Details]
+other = "Details"
+
+[Status]
+other = "Status"
+
+[Availability]
+other = "Availability"
+
+[AverageLatency]
+other = "Average Latency"
+
+[CycleTransferStats]
+other = "Periodic Transfer Stats"
+
+[From]
+other = "From"
+
+[To]
+other = "To"
+
+[NextCheck]
+other = "Next check"
+
+[CurrentUsage]
+other = "Current Usage"
+
+[VerifyPassword]
+other = "Please enter your password"
+
+[LightMode]
+other = "Light Mode"
+
+[DarkMode]
+other = "Dark Mode"
+
+[FollowSystem]
+other = "System Auto"
+
+[GridLayout]
+other = "Grid Layout"
+
+[ListLayout]
+other = "List Layout"
+
+[EnterPassword]
+other = "Enter Password"
+
+[Location]
+other = "Location"
+
+[Running]
+other = "Running"
+
+[UpNetTransfer]
+other = "Outbound"
+
+[DownNetTransfer]
+other = "Inbound"
+
+[TotalUpNetTransfer]
+other = "Total Outbound"
+
+[TotalDownNetTransfer]
+other = "Total Inbound"
+
+[WrongPassword]
+other = "Incorrect Password"
+
+[AnErrorEccurred]
+other = "An Error Occurred"
+
+[SystemError]
+other = "System Error"
+
+[NetworkError]
+other = "Network Error"
+
+[ServicesStatus]
+other = "Services Status"
+
+[ServersManagement]
+other = "Servers"
+
+[ServicesManagement]
+other = "Services"
+
+[ApiManagement]
+other = "API Management"
+
+[IssueNewApiToken]
+other = "Generate New API Token"
+
+[Token]
+other = "Token"
+
+[DeleteToken]
+other = "Delete Token"
+
+[ConfirmToDeleteThisToken]
+other = "Confirm Deleting This Token?"
+
+[YouAreNotAuthorized]
+other = "This Page needs Authorization"
+
+[WrongAccessPassword]
+other = "Wrong Access Password"
+
+[Add]
+other = "Add"
+
+[Edit]
+other = "Edit"
+
+[AlarmRule]
+other = "Alarm Rule"
+
+[NotificationMethod]
+other = "Notification Method"
+
+[Incident]
+other = "Incident"
+
+[Resolved]
+other = "Resolved"
+
+[StatusDown]
+other = "Down"
+
+[StatusNoData]
+other = "No Data"
+
+[StatusGood]
+other = "Good"
+
+[StatusLowAvailability]
+other = "Low Availability"
+
+[IPChanged]
+other = "IP Changed"
+
+[Transleft]
+other = "Remaining Data"
+
+[DashboardTheme]
+other = "Dashboard Theme"
+
+[Info]
+other = "Info"
+
+[HideForGuest]
+other = "Hide from Guest"
+
+[Menu]
+other = "Menu"
+
+[NetworkSpiter]
+other = "Network"
+
+[EnableShowInService]
+other = "Enable Show in Service"
+
+[DDNS]
+other = "Dynamic DNS"
+
+[DDNSProfiles]
+other = "DDNS Profiles"
+
+[AddDDNSProfile]
+other = "New Profile"
+
+[EnableDDNS]
+other = "Enable DDNS"
+
+[EnableIPv4]
+other = "IPv4 Enabled"
+
+[EnableIPv6]
+other = "IPv6 Enabled"
+
+[DDNSDomain]
+other = "Domains"
+
+[DDNSDomains]
+other = "Domains (separate with comma)"
+
+[DDNSProvider]
+other = "DDNS Provider"
+
+[MaxRetries]
+other = "Maximum retry attempts"
+
+[DDNSAccessID]
+other = "Credential 1"
+
+[DDNSAccessSecret]
+other = "Credential 2"
+
+[DDNSTokenID]
+other = "Token ID"
+
+[DDNSTokenSecret]
+other = "Token Secret"
+
+[WebhookURL]
+other = "Webhook URL"
+
+[WebhookMethod]
+other = "Webhook Request Method"
+
+[WebhookRequestType]
+other = "Webhook Request Type"
+
+[WebhookHeaders]
+other = "Webhook Request Headers"
+
+[WebhookRequestBody]
+other = "Webhook Request Body"
+
+[Feature]
+other = "Feature"
+
+[Template]
+other = "Template"
+
+[Stat]
+other = "Asset"
+
+[Temperature]
+other = "Temperature"
+
+[DisableSwitchTemplateInFrontend]
+other = "Disable Switch Template in Frontend"
+
+[ServersOnWorldMap]
+other = "Servers On World Map"
+
+[NAT]
+other = "NAT Traversal"
+
+[LocalService]
+other = "Local service"
+
+[LocalServicePlaceholder]
+other = "192.168.1.1:80 (with port)"
+
+[BindHostname]
+other = "Bind hostname"
+
+[NetworkSpiterList]
+other = "Network Monitor"
+
+[Refresh]
+other = "Refresh"
+
+[CopyPath]
+other = "Copy Path"
+
+[Goto]
+other = "Go to"
+
+[GotoHeadline]
+other = "Go to a Folder"
+
+[GotoGo]
+other = "Go"
+
+[GotoClose]
+other = "Cancel"
+
+[FMError]
+other = "Agent returned an error, please view the console for details. To open a new connection, reopen the FM again."
+
+[Remaining]
+other = "Remaining"
+
+[Lifetime]
+other = "Lifetime"
+
+[Price]
+other = "Price"
+
+[Expired]
+other = "Expired"
+
+[Days]
+other = "d"
+
+[CustomNameservers]
+other = "Custom Public DNS Nameservers for DDNS (separate with comma)"
+
+[Plan]
+other = "Plan"
+
+[PublicNoteEditor]
+other = "Public Note Editor"
+
+[BillingInfo]
+other = "Billing Info"
+
+[PlanInfo]
+other = "Plan Info"
+
+[CustomDataNazhua]
+other = "CustomData (Nazhua)"
+
+[CustomDataAobobo]
+other = "CustomData (AoBoBo)"
+
+[RawJSON]
+other = "Raw JSON"
+
+[FinalJSONPreview]
+other = "Final JSON Preview"
+
+[StartDate]
+other = "Start Date"
+
+[EndDate]
+other = "End Date"
+
+[AutoRenewal]
+other = "Auto Renewal"
+
+[Amount]
+other = "Amount"
+
+[Bandwidth]
+other = "Bandwidth"
+
+[TrafficVol]
+other = "Traffic Volume"
+
+[TrafficType]
+other = "Traffic Type"
+
+[NetworkRoute]
+other = "Network Route"
+
+[Extra]
+other = "Extra"
+
+[LocationCode]
+other = "Location Code"
+
+[Slogan]
+other = "Slogan"
+
+[OrderLink]
+other = "Order Link"
+
+[BuyBtnText]
+other = "Buy Button Text"
+
+[BuyBtnIcon]
+other = "Buy Button Icon"
+
+[Flag]
+other = "Flag"
+
+[Latitude]
+other = "Latitude"
+
+[Longitude]
+other = "Longitude"
+
+[LatLng]
+other = "Lat/Lng"
+
+[LocationLabel]
+other = "Location Label"
+
+[ServerBasicInfo]
+other = "Basic Info"
+
+[AccessAndVisibility]
+other = "Access & Visibility"
+
+[InternalNote]
+other = "Internal Note"
+
+[UnlimitedDuration]
+other = "Unlimited"
+
+[BillingCycle]
+other = "Billing Cycle"
+
+[AmountPlaceholder]
+other = "Examples: $9.99, €19.92, ¥199, 19.99HKD, 9.99USD, 49.99CNY"
+
+[BillingCyclePlaceholder]
+other = "Enter a billing cycle; any value is fine when auto renewal is off"
+
+[BandwidthPlaceholder]
+other = "Examples: 30Mbps, 1Gbps, Unlimited"
+
+[TrafficVolPlaceholder]
+other = "Examples: 1TB/month, 500GB/month, Unlimited"
+
+[NetworkRoutePlaceholder]
+other = "Type a network tag and press Enter"
+
+[ExtraPlaceholder]
+other = "Type an extra tag and press Enter"
+
+[LocationCodePlaceholder]
+other = "Enter a location code"
+
+[FlagPlaceholder]
+other = "Enter a flag code, country/region code, or English name"
+
+[OrderLinkPlaceholder]
+other = "Enter the order link; encodeURIComponent is not needed"
+
+[BuyBtnTextPlaceholder]
+other = "Leave blank to use: Buy"
+
+[BuyBtnIconPlaceholder]
+other = "Use a Remix Icon name"
+
+[SloganPlaceholder]
+other = "A short server slogan; simple HTML is supported"
+
+[TrafficOutboundOnly]
+other = "Outbound only"
+
+[TrafficBidirectional]
+other = "Bidirectional"
+
+[TrafficMaxInOut]
+other = "Max of inbound/outbound"
+
+[AlertRuleEditor]
+other = "Alert Rule Editor"
+
+[AddRule]
+other = "Add Rule"
+
+[RuleType]
+other = "Rule Type"
+
+[MinThreshold]
+other = "Min Threshold"
+
+[MaxThreshold]
+other = "Max Threshold"
+
+[CycleStart]
+other = "Cycle Start"
+
+[CycleInterval]
+other = "Cycle Interval"
+
+[CycleUnit]
+other = "Cycle Unit"
+
+[Rule]
+other = "Rule"
+
+[RuleTypeDesc_cpu]
+other = "CPU usage"
+
+[RuleTypeDesc_memory]
+other = "Memory usage"
+
+[RuleTypeDesc_swap]
+other = "Swap usage"
+
+[RuleTypeDesc_disk]
+other = "Disk usage"
+
+[RuleTypeDesc_net_in_speed]
+other = "Incoming network speed"
+
+[RuleTypeDesc_net_out_speed]
+other = "Outgoing network speed"
+
+[RuleTypeDesc_net_all_speed]
+other = "Total network speed"
+
+[RuleTypeDesc_transfer_in]
+other = "Incoming traffic"
+
+[RuleTypeDesc_transfer_out]
+other = "Outgoing traffic"
+
+[RuleTypeDesc_transfer_all]
+other = "Total traffic"
+
+[RuleTypeDesc_transfer_in_cycle]
+other = "Incoming traffic in cycle"
+
+[RuleTypeDesc_transfer_out_cycle]
+other = "Outgoing traffic in cycle"
+
+[RuleTypeDesc_transfer_all_cycle]
+other = "Total traffic in cycle"
+
+[RuleTypeDesc_offline]
+other = "Offline"
+
+[RuleTypeDesc_load1]
+other = "1-minute load average"
+
+[RuleTypeDesc_load5]
+other = "5-minute load average"
+
+[RuleTypeDesc_load15]
+other = "15-minute load average"
+
+[RuleTypeDesc_tcp_conn_count]
+other = "TCP connection count"
+
+[RuleTypeDesc_udp_conn_count]
+other = "UDP connection count"
+
+[RuleTypeDesc_process_count]
+other = "Process count"
+
+[RuleTypeDesc_temperature_max]
+other = "Maximum temperature"
+
+[RemoveRule]
+other = "Remove Rule"
+
+[EditRawJSON]
+other = "Edit Raw JSON"
+
+[VisualEditor]
+other = "Visual Editor"
+
+[PleaseEnterValidJSON]
+other = "Please enter valid JSON"
+
+[ConfirmCloseModal]
+other = "Are you sure you want to close? Unsaved changes will be lost."
+
+[Month]
+other = "Month"
+
+[Cycle]
+other = "Cycle"
+
+[Yes]
+other = "Yes"
+
+[No]
+other = "No"
+
+[SupportsAllNazhuaFieldsAndExtraLocationFields]
+other = "Supports all Nazhua fields plus extra 3D globe location fields"
+
+[RuleTypeCpu]
+other = "CPU"
+
+[RuleTypeMemory]
+other = "Memory"
+
+[RuleTypeSwap]
+other = "Swap"
+
+[RuleTypeDisk]
+other = "Disk"
+
+[RuleTypeNetInSpeed]
+other = "Net In Speed"
+
+[RuleTypeNetOutSpeed]
+other = "Net Out Speed"
+
+[RuleTypeNetAllSpeed]
+other = "Net All Speed"
+
+[RuleTypeTransferIn]
+other = "Transfer In"
+
+[RuleTypeTransferOut]
+other = "Transfer Out"
+
+[RuleTypeTransferAll]
+other = "Transfer All"
+
+[RuleTypeTransferInCycle]
+other = "Transfer In Cycle"
+
+[RuleTypeTransferOutCycle]
+other = "Transfer Out Cycle"
+
+[RuleTypeTransferAllCycle]
+other = "Transfer All Cycle"
+
+[RuleTypeOffline]
+other = "Offline"
+
+[RuleTypeLoad1]
+other = "Load 1"
+
+[RuleTypeLoad5]
+other = "Load 5"
+
+[RuleTypeLoad15]
+other = "Load 15"
+
+[RuleTypeTcpConnCount]
+other = "TCP Conn Count"
+
+[RuleTypeUdpConnCount]
+other = "UDP Conn Count"
+
+[RuleTypeProcessCount]
+other = "Process Count"
+
+[RuleTypeTemperatureMax]
+other = "Temperature Max"
+
+[CycleUnitHour]
+other = "Hour"
+
+[CycleUnitDay]
+other = "Day"
+
+[CycleUnitWeek]
+other = "Week"
+
+[CycleUnitMonth]
+other = "Month"
+
+[CycleUnitYear]
+other = "Year"
+
+[PleaseSelect]
+other = "Please select"
+
+[Loading]
+other = "Loading"
+
+[NoData]
+other = "No data"
+
+[NoMatch]
+other = "No matching data"
+
+[Telemetry]
+other = "Probe"
+
+[TelemetryReliability]
+other = "Probe Reliability"
+
+[TelemetryReliabilityDescription]
+other = "Review collectors, observation points, agent delivery, incident corrections, and data loss"
+
+[TelemetryCollectors]
+other = "Collectors"
+
+[TelemetryObserverAssignments]
+other = "Observer Assignments"
+
+[TelemetryAgentDelivery]
+other = "Agent Buffer and Delivery"
+
+[TelemetryIncidentRevisions]
+other = "Incident Corrections"
+
+[TelemetryDataLoss]
+other = "Probe Data Loss"
+
+[TelemetryAlerts]
+other = "Probe Alerts"
+
+[TelemetryCollectorID]
+other = "Collector ID"
+
+[TelemetryAddress]
+other = "Address"
+
+[TelemetryGeneration]
+other = "Generation"
+
+[TelemetryConfigVersion]
+other = "Config Version"
+
+[TelemetryObserver]
+other = "Observer"
+
+[TelemetryNodeID]
+other = "Node ID"
+
+[TelemetryEffectiveFrom]
+other = "Effective From"
+
+[TelemetryLocalBufferPressure]
+other = "Local Buffer Pressure"
+
+[TelemetryBufferedData]
+other = "Buffered Data"
+
+[TelemetryPendingRecords]
+other = "Pending Records"
+
+[TelemetryProtocolVersion]
+other = "Protocol Version"
+
+[TelemetryInitialClassification]
+other = "Initial Classification"
+
+[TelemetryCurrentClassification]
+other = "Current Classification"
+
+[TelemetryRevision]
+other = "Revision"
+
+[TelemetryStartedAt]
+other = "Started At"
+
+[TelemetryComponent]
+other = "Component"
+
+[TelemetryLossReason]
+other = "Loss Reason"
+
+[TelemetryLostRecords]
+other = "Lost Records"
+
+[TelemetryAlertType]
+other = "Alert Type"
+
+[TelemetrySeverity]
+other = "Severity"
+
+[TelemetryMessage]
+other = "Message"
+
+[TelemetryNotified]
+other = "Notified"
+
+[TelemetryActive]
+other = "Active"
+
+[TelemetryRevoked]
+other = "Revoked"
+
+[TelemetryYes]
+other = "Yes"
+
+[TelemetryNo]
+other = "No"
+
+[TelemetryUnknown]
+other = "Unknown"
+
+[TelemetryWalHealthy]
+other = "Healthy"
+
+[TelemetryWalDownsampled]
+other = "Low-priority sampling reduced"
+
+[TelemetryWalRollup]
+other = "One-minute rollup enabled"
+
+[TelemetryWalCritical]
+other = "Storage pressure critical"
+
+[TelemetryWalDataLoss]
+other = "Data loss occurred"
+
+[TelemetryLossCompacted]
+other = "Replaced by downsampling or rollup"
+
+[TelemetryLossHardLimit]
+other = "Capacity hard limit reached"
+
+[TelemetryLossCorruption]
+other = "Buffer file corruption"
+
+[TelemetryAlertHostOffline]
+other = "Host Offline"
+
+[TelemetryAlertConnectivityDegraded]
+other = "Connectivity Degraded"
+
+[TelemetryAlertCollectorOffline]
+other = "Collector Offline"
+
+[TelemetryAlertCollectorOnline]
+other = "Collector Online"
+
+[TelemetryAlertDataLoss]
+other = "Probe Data Loss"
+
+[TelemetrySeverityCritical]
+other = "Critical"
+
+[TelemetrySeverityWarning]
+other = "Warning"
+
+[TelemetrySeverityInfo]
+other = "Information"

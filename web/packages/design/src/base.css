@@ -1,0 +1,324 @@
+/* Element Plus + shared control bridge — maps to @santaizi/design tokens */
+
+:root,
+html.dark {
+  --el-color-primary: var(--accent);
+  --el-color-success: var(--success);
+  --el-color-warning: var(--warning);
+  --el-color-danger: var(--danger);
+  --el-color-error: var(--danger);
+  --el-color-info: var(--text-muted);
+  --el-border-radius-base: var(--radius);
+  --el-border-radius-small: var(--radius-sm);
+  --el-dialog-border-radius: var(--radius);
+  --el-font-size-base: var(--font-size-body);
+  --el-font-size-extra-small: var(--font-size-caption);
+  --el-font-size-small: var(--font-size-secondary);
+  --el-font-size-medium: var(--font-size-title);
+  --el-font-size-large: var(--font-size-heading);
+  --el-font-line-height-primary: calc(var(--font-size-heading) * var(--line-height-tight));
+  --el-component-size: var(--control-height);
+  --el-component-size-small: var(--control-height);
+  --el-bg-color: var(--bg-elevated);
+  --el-bg-color-page: var(--bg);
+  --el-bg-color-overlay: var(--bg-elevated);
+  --el-fill-color-blank: var(--bg-elevated);
+  --el-text-color-primary: var(--text);
+  --el-text-color-regular: var(--text);
+  --el-text-color-secondary: var(--text-secondary);
+  --el-text-color-placeholder: var(--text-muted);
+  --el-border-color: var(--border);
+  --el-border-color-light: var(--border-subtle);
+  --el-border-color-lighter: var(--border-subtle);
+  --el-border-color-extra-light: var(--border-subtle);
+  --el-fill-color: var(--bg-muted);
+  --el-fill-color-light: var(--bg-muted);
+  --el-fill-color-lighter: var(--bg);
+  --el-fill-color-extra-light: var(--bg);
+  --el-mask-color: rgba(0, 0, 0, 0.4);
+  --el-mask-color-extra-light: var(--sz-loading-mask);
+  --el-box-shadow: var(--shadow-raised);
+  --el-box-shadow-light: var(--shadow-raised);
+  --el-box-shadow-lighter: var(--shadow);
+  --el-box-shadow-dark: var(--shadow-overlay);
+}
+
+html.dark {
+  --el-color-primary-light-3: color-mix(in srgb, var(--accent) 72%, var(--bg-elevated));
+  --el-color-primary-light-5: color-mix(in srgb, var(--accent) 52%, var(--bg-elevated));
+  --el-color-primary-light-7: color-mix(in srgb, var(--accent) 32%, var(--bg-elevated));
+  --el-color-primary-light-8: color-mix(in srgb, var(--accent) 22%, var(--bg-elevated));
+  --el-color-primary-light-9: color-mix(in srgb, var(--accent) 14%, var(--bg-elevated));
+  --el-color-primary-dark-2: var(--accent-hover);
+  --el-color-success-light-3: color-mix(in srgb, var(--success) 72%, var(--bg-elevated));
+  --el-color-success-light-5: color-mix(in srgb, var(--success) 52%, var(--bg-elevated));
+  --el-color-success-light-7: color-mix(in srgb, var(--success) 32%, var(--bg-elevated));
+  --el-color-success-light-8: color-mix(in srgb, var(--success) 22%, var(--bg-elevated));
+  --el-color-success-light-9: color-mix(in srgb, var(--success) 14%, var(--bg-elevated));
+  --el-color-success-dark-2: color-mix(in srgb, var(--success) 88%, white);
+  --el-color-warning-light-3: color-mix(in srgb, var(--warning) 72%, var(--bg-elevated));
+  --el-color-warning-light-5: color-mix(in srgb, var(--warning) 52%, var(--bg-elevated));
+  --el-color-warning-light-7: color-mix(in srgb, var(--warning) 32%, var(--bg-elevated));
+  --el-color-warning-light-8: color-mix(in srgb, var(--warning) 22%, var(--bg-elevated));
+  --el-color-warning-light-9: color-mix(in srgb, var(--warning) 14%, var(--bg-elevated));
+  --el-color-warning-dark-2: color-mix(in srgb, var(--warning) 88%, white);
+  --el-color-danger-light-3: color-mix(in srgb, var(--danger) 72%, var(--bg-elevated));
+  --el-color-danger-light-5: color-mix(in srgb, var(--danger) 52%, var(--bg-elevated));
+  --el-color-danger-light-7: color-mix(in srgb, var(--danger) 32%, var(--bg-elevated));
+  --el-color-danger-light-8: color-mix(in srgb, var(--danger) 22%, var(--bg-elevated));
+  --el-color-danger-light-9: color-mix(in srgb, var(--danger) 14%, var(--bg-elevated));
+  --el-color-danger-dark-2: color-mix(in srgb, var(--danger) 88%, white);
+  --el-color-error: var(--danger);
+  --el-color-error-light-3: var(--el-color-danger-light-3);
+  --el-color-error-light-5: var(--el-color-danger-light-5);
+  --el-color-error-light-7: var(--el-color-danger-light-7);
+  --el-color-error-light-8: var(--el-color-danger-light-8);
+  --el-color-error-light-9: var(--el-color-danger-light-9);
+  --el-color-error-dark-2: var(--el-color-danger-dark-2);
+  --el-color-info-light-3: color-mix(in srgb, var(--text-muted) 72%, var(--bg-elevated));
+  --el-color-info-light-5: color-mix(in srgb, var(--text-muted) 52%, var(--bg-elevated));
+  --el-color-info-light-7: color-mix(in srgb, var(--text-muted) 32%, var(--bg-elevated));
+  --el-color-info-light-8: color-mix(in srgb, var(--text-muted) 22%, var(--bg-elevated));
+  --el-color-info-light-9: color-mix(in srgb, var(--text-muted) 14%, var(--bg-elevated));
+  --el-color-info-dark-2: var(--text-secondary);
+  --el-fill-color-darker: var(--bg-muted);
+  --el-fill-color-dark: color-mix(in srgb, var(--bg-muted) 88%, var(--bg));
+  --el-border-color-darker: var(--border);
+  --el-border-color-dark: var(--border-subtle);
+  --el-text-color-disabled: color-mix(in srgb, var(--text-muted) 72%, var(--bg-elevated));
+  --el-disabled-text-color: var(--el-text-color-disabled);
+  --el-mask-color: rgba(0, 0, 0, 0.55);
+  --el-mask-color-extra-light: var(--sz-loading-mask);
+  --el-popper-bg-color-light: var(--bg-elevated);
+  --el-table-header-bg-color: var(--bg-muted);
+  --el-table-header-text-color: var(--text-secondary);
+  --el-table-row-hover-bg-color: var(--bg-muted);
+  --el-table-border-color: var(--border-subtle);
+  --el-table-bg-color: var(--bg-elevated);
+  --el-table-tr-bg-color: var(--bg-elevated);
+  --el-table-text-color: var(--text);
+  --el-drawer-bg-color: var(--bg-elevated);
+}
+
+html.dark .el-button {
+  --el-button-hover-text-color: var(--text);
+  --el-button-hover-bg-color: var(--bg-muted);
+  --el-button-hover-border-color: var(--border);
+  --el-button-active-text-color: var(--text);
+  --el-button-active-bg-color: var(--bg-muted);
+  --el-button-active-border-color: var(--border);
+  --el-button-disabled-text-color: color-mix(in srgb, var(--text-muted) 55%, transparent);
+  --el-button-divide-border-color: transparent;
+}
+
+html.dark .el-button-group--horizontal .el-button:not(:last-child) {
+  border-right-color: transparent;
+}
+html.dark .el-button-group--horizontal .el-button:not(:first-child) {
+  border-left-color: transparent;
+}
+
+html.dark .el-select-dropdown,
+html.dark .el-dropdown-menu,
+html.dark .el-popper.is-light {
+  background: var(--bg-elevated);
+  border-color: var(--border-subtle);
+}
+
+.el-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--control-height);
+  min-height: var(--control-height);
+  line-height: 1;
+  font-size: var(--font-size-body);
+  font-weight: 500;
+  padding: 0 var(--control-padding-x);
+  gap: 0;
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast),
+    box-shadow var(--transition-fast);
+}
+.el-button.is-text,
+.el-button.is-link,
+.el-button.is-circle {
+  padding: 0;
+}
+/* 正圆图标钮须宽高相等，避免固定高度后变成竖向胶囊 */
+.el-button.is-circle {
+  width: var(--control-height);
+  min-width: var(--control-height);
+  border-radius: 50%;
+}
+.el-button > span {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--icon-text-gap);
+  line-height: 1;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.el-input__wrapper,
+.el-select__wrapper {
+  min-height: var(--control-height);
+  transition: box-shadow var(--transition-fast);
+}
+
+.el-tag {
+  --el-tag-font-size: var(--font-size-secondary);
+  height: calc(var(--control-height) - 4px);
+  min-height: calc(var(--control-height) - 4px);
+  line-height: 1;
+  padding: 0 var(--tag-padding-x);
+  display: inline-flex;
+  align-items: center;
+}
+
+.el-table .el-table__cell {
+  min-height: 48px;
+}
+
+.el-button--primary:not(.is-text):not(.is-link) {
+  --el-button-hover-bg-color: var(--accent-hover);
+  --el-button-active-bg-color: var(--accent-hover);
+}
+
+.el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.el-select__wrapper.is-focused {
+  box-shadow: 0 0 0 1px var(--accent) inset !important;
+}
+/* Suppress nested focus rings inside wrappers; textarea IS the bordered surface. */
+.el-input__wrapper :focus-visible,
+.el-select__wrapper :focus-visible {
+  box-shadow: none;
+}
+.el-textarea__inner:focus,
+.el-textarea__inner:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.el-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--accent);
+}
+/* outline 不跟 border-radius，开关/滑杆会画出方形蓝框。 */
+.el-switch__input:focus-visible ~ .el-switch__core {
+  outline: none;
+  box-shadow: var(--sz-focus);
+}
+/* EP 只给圆钮 left:1px，不写 top，轨道里会偏上。 */
+.el-switch__core .el-switch__action {
+  top: 1px;
+}
+.el-slider__button-wrapper:focus-visible {
+  box-shadow: none;
+}
+.el-slider__button-wrapper:focus-visible .el-slider__button {
+  box-shadow: var(--sz-focus);
+}
+
+/* 触控 / 粗指针：取消 cursor:pointer（移动端无鼠标手型） */
+@media (hover: none), (pointer: coarse) {
+  .el-button,
+  .el-button:hover,
+  .el-button:focus,
+  .el-button:active,
+  button,
+  a,
+  [role='button'],
+  .el-checkbox,
+  .el-radio,
+  .el-switch,
+  .el-dropdown,
+  .el-select__wrapper,
+  .el-pagination button,
+  .el-pager li {
+    cursor: default;
+  }
+}
+
+.el-dialog.app-dialog {
+  box-shadow: var(--shadow-overlay);
+}
+.el-message {
+  border: none;
+  box-shadow: var(--shadow-overlay);
+}
+
+/* v-loading：盖表面色磨砂，不要 EP 深色近黑幕。 */
+.el-loading-mask {
+  background-color: var(--el-mask-color-extra-light);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.el-loading-spinner {
+  width: auto;
+  left: 50%;
+  margin-top: 0;
+  transform: translate(-50%, -50%);
+  padding: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-raised);
+  line-height: 0;
+}
+.el-loading-spinner .circular {
+  display: none;
+}
+.el-loading-spinner::before {
+  content: "";
+  display: block;
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: sz-loading-spin 0.7s linear infinite;
+}
+@keyframes sz-loading-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .el-loading-spinner::before { animation: none; }
+}
+
+.skeleton-bone {
+  display: block;
+  background: linear-gradient(
+    90deg,
+    var(--skeleton-base) 0%,
+    var(--skeleton-highlight) 50%,
+    var(--skeleton-base) 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer var(--duration-skeleton) ease-in-out infinite;
+}
+@keyframes skeleton-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-bone { animation: none; }
+}
+
+@media (max-width: 720px) {
+  .el-button,
+  .el-input__wrapper,
+  .el-select__wrapper,
+  .el-input-number,
+  .el-date-editor,
+  .el-segmented {
+    min-height: var(--touch-min-mobile);
+  }
+  .el-button.is-circle {
+    width: var(--touch-min-mobile);
+    min-width: var(--touch-min-mobile);
+  }
+}

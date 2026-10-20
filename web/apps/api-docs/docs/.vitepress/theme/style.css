@@ -1,0 +1,366 @@
+/* VitePress ↔ @santaizi/design token bridge */
+
+:root {
+  --vp-c-brand-1: var(--sz-primary);
+  --vp-c-brand-2: var(--sz-primary-hover);
+  --vp-c-brand-3: var(--sz-primary-hover);
+  --vp-c-brand-soft: var(--sz-primary-soft);
+
+  --vp-c-bg: var(--sz-bg);
+  --vp-c-bg-alt: var(--sz-muted);
+  --vp-c-bg-elv: var(--sz-surface);
+  --vp-c-bg-soft: var(--sz-muted);
+
+  --vp-c-border: var(--sz-border);
+  --vp-c-divider: var(--sz-border);
+  --vp-c-gutter: var(--sz-border-subtle);
+
+  --vp-c-text-1: var(--sz-text);
+  --vp-c-text-2: var(--sz-text-secondary);
+  --vp-c-text-3: var(--sz-text-muted);
+
+  --vp-c-default-1: var(--sz-muted);
+  --vp-c-default-2: var(--sz-border);
+  --vp-c-default-3: var(--sz-border);
+  --vp-c-default-soft: var(--sz-muted);
+
+  --vp-button-brand-border: transparent;
+  --vp-button-brand-text: #ffffff;
+  --vp-button-brand-bg: var(--sz-primary);
+  --vp-button-brand-hover-border: transparent;
+  --vp-button-brand-hover-text: #ffffff;
+  --vp-button-brand-hover-bg: var(--sz-primary-hover);
+  --vp-button-brand-active-border: transparent;
+  --vp-button-brand-active-text: #ffffff;
+  --vp-button-brand-active-bg: var(--sz-primary-hover);
+
+  --vp-button-alt-border: var(--sz-border);
+  --vp-button-alt-text: var(--sz-text);
+  --vp-button-alt-bg: var(--sz-surface);
+  --vp-button-alt-hover-border: var(--sz-border);
+  --vp-button-alt-hover-text: var(--sz-text);
+  --vp-button-alt-hover-bg: var(--sz-muted);
+
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(135deg, var(--sz-primary) 0%, #1e40af 100%);
+  --vp-home-hero-image-background-image: none;
+  --vp-home-hero-image-filter: none;
+
+  --vp-font-family-base: var(--sz-font-family);
+  --vp-font-size-body: var(--font-size-body);
+}
+
+html.dark {
+  --vp-button-brand-text: #0b1120;
+  --vp-button-brand-hover-text: #0b1120;
+  --vp-button-brand-active-text: #0b1120;
+}
+
+/* Base readability */
+body {
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-body);
+  color: var(--vp-c-text-1);
+  background: var(--vp-c-bg);
+}
+
+.VPNavBarTitle .logo {
+  width: 28px;
+  height: 28px;
+}
+
+.sz-docs-admin-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--icon-text-gap, 6px);
+  margin-left: 12px;
+  padding: 0 12px;
+  height: var(--control-height, 36px);
+  border-radius: var(--radius-sm, 6px);
+  color: var(--vp-c-text-1);
+  font-size: var(--font-size-body);
+  line-height: 1;
+  text-decoration: none;
+  border: 1px solid var(--vp-c-border);
+  background: var(--vp-c-bg-elv);
+  white-space: nowrap;
+}
+
+.sz-docs-admin-link:hover {
+  color: var(--vp-c-brand-1);
+  border-color: var(--vp-c-brand-1);
+  background: var(--vp-c-brand-soft);
+}
+
+.sz-docs-admin-link i {
+  font-size: var(--icon-size-inline, 14px);
+  line-height: 1;
+}
+
+/* Compact home */
+.VPHome {
+  padding-bottom: 48px !important;
+  margin-bottom: 0 !important;
+}
+
+.VPHomeHero {
+  padding: 48px 0 28px !important;
+}
+
+.VPHomeHero .name {
+  font-size: clamp(28px, 4vw, 36px) !important;
+  line-height: 1.2 !important;
+}
+
+.VPHomeHero .text {
+  font-size: clamp(18px, 2.4vw, 24px) !important;
+  line-height: 1.35 !important;
+  color: var(--vp-c-text-1) !important;
+  max-width: 36rem;
+}
+
+.VPHomeHero .tagline {
+  font-size: var(--font-size-body) !important;
+  line-height: var(--line-height-body) !important;
+  color: var(--vp-c-text-2) !important;
+  max-width: 36rem;
+  padding-top: 8px !important;
+}
+
+.VPHomeHero .actions {
+  padding-top: 20px !important;
+  gap: 10px;
+}
+
+.VPButton {
+  border-radius: var(--radius-sm, 6px) !important;
+  font-size: var(--font-size-body) !important;
+  font-weight: 600;
+  min-height: var(--touch-min, 32px);
+}
+
+.VPHomeFeatures {
+  padding: 12px 0 8px !important;
+  margin: 0 !important;
+}
+
+.VPHomeFeatures .VPFeature {
+  border: 1px solid var(--vp-c-border) !important;
+  background: var(--vp-c-bg-elv) !important;
+  border-radius: var(--radius, 10px) !important;
+  box-shadow: none !important;
+}
+
+.VPHomeFeatures .VPFeature .title {
+  font-size: var(--font-size-title) !important;
+  color: var(--vp-c-text-1) !important;
+  font-weight: 650;
+}
+
+.VPHomeFeatures .VPFeature .details {
+  font-size: var(--font-size-secondary) !important;
+  line-height: var(--line-height-body) !important;
+  color: var(--vp-c-text-2) !important;
+  padding-top: 6px;
+}
+
+.VPHome .vp-doc {
+  max-width: 920px;
+  margin: 20px auto 0;
+  padding: 22px 24px 24px !important;
+  border: 1px solid var(--vp-c-border);
+  border-radius: var(--radius, 10px);
+  background: var(--vp-c-bg-elv);
+}
+
+.VPHome .vp-doc h2 {
+  margin-top: 0;
+  border-top: none;
+  padding-top: 0;
+  font-size: var(--font-size-heading);
+  color: var(--vp-c-text-1);
+}
+
+.VPHome .vp-doc p,
+.VPHome .vp-doc li {
+  color: var(--vp-c-text-2);
+  font-size: var(--font-size-body);
+}
+
+.VPHome .vp-doc a {
+  color: var(--vp-c-brand-1);
+  font-weight: 560;
+}
+
+.VPHome .vp-doc .vp-code-group,
+.VPHome .vp-doc div[class*='language-'] {
+  margin: 14px 0 0;
+  border-radius: var(--radius-sm, 6px);
+}
+
+/* Guide / doc pages */
+.VPDoc .content-container {
+  max-width: 820px;
+}
+
+.VPDoc .vp-doc h1,
+.VPDoc .vp-doc h2,
+.VPDoc .vp-doc h3 {
+  color: var(--vp-c-text-1);
+}
+
+.VPDoc .vp-doc p,
+.VPDoc .vp-doc li {
+  color: var(--vp-c-text-2);
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-relaxed);
+}
+
+.VPSidebarItem .text {
+  font-size: var(--font-size-body);
+  color: var(--vp-c-text-2);
+}
+
+.VPSidebarItem.is-active > .item .text {
+  color: var(--vp-c-brand-1);
+  font-weight: 650;
+}
+
+.VPNavBar .content,
+.VPNavBarMenuLink {
+  font-size: var(--font-size-body);
+}
+
+/* Full-viewport Redoc shell (layout: page → VPPage) */
+.api-reference-page .VPSidebar,
+.api-reference-page .VPLocalNav,
+.api-reference-page .VPDocFooter,
+.api-reference-page .aside,
+.api-reference-page .VPDocAside {
+  display: none !important;
+}
+
+.api-reference-page .VPContent,
+.api-reference-page .VPContent.has-sidebar,
+.api-reference-page .VPPage,
+.api-reference-page .VPDoc,
+.api-reference-page .VPDoc .container,
+.api-reference-page .VPDoc .content,
+.api-reference-page .VPDoc .content-container {
+  max-width: none !important;
+  width: 100% !important;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+.api-reference-page .VPContent.has-sidebar {
+  padding-left: 0 !important;
+}
+
+.api-reference-page {
+  --sz-docs-nav-offset: var(--vp-nav-height, 64px);
+}
+
+.api-reference-page .VPContent {
+  background: var(--vp-c-bg);
+  min-height: calc(100vh - var(--sz-docs-nav-offset));
+  width: 100% !important;
+  max-width: none !important;
+}
+
+.api-reference-shell {
+  position: relative;
+  box-sizing: border-box;
+  min-height: 100vh;
+  width: 100%;
+  max-width: none;
+  padding-top: var(--sz-docs-nav-offset);
+  background: var(--vp-c-bg);
+}
+
+.api-reference-shell .redoc-host {
+  box-sizing: border-box;
+  min-height: calc(100vh - var(--sz-docs-nav-offset));
+  width: 100%;
+  max-width: none;
+}
+
+.api-reference-shell .redoc-wrap,
+.api-reference-shell .redoc-wrap .menu-content,
+.api-reference-shell .api-content,
+.api-reference-shell redoc {
+  min-height: calc(100vh - var(--sz-docs-nav-offset));
+  max-width: none;
+}
+
+/*
+ * Belt-and-suspenders: Redoc stacks below theme.breakpoints.medium via styled
+ * media queries. Keep three-column chrome stable on desktop even if a stale
+ * style sheet briefly disagrees after remount.
+ */
+@media screen and (min-width: 801px) {
+  .api-reference-shell .redoc-wrap {
+    display: flex !important;
+    flex-direction: row !important;
+    width: 100% !important;
+  }
+
+  .api-reference-shell .api-content {
+    width: calc(100% - 260px) !important;
+  }
+
+  /* Dark right-rail background spacer (last child of .redoc-wrap). */
+  .api-reference-shell .redoc-wrap > div:last-child {
+    display: block !important;
+  }
+}
+
+.api-reference-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 28px 24px;
+  color: var(--vp-c-text-1);
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-body);
+}
+
+.api-reference-status.is-overlay {
+  position: absolute;
+  inset: var(--sz-docs-nav-offset) 0 0;
+  z-index: 2;
+  justify-content: center;
+  align-items: center;
+  margin: 0;
+  background: color-mix(in srgb, var(--vp-c-bg) 88%, transparent);
+  pointer-events: none;
+}
+
+.api-reference-status.is-error {
+  position: relative;
+  z-index: 2;
+  color: var(--sz-danger, #dc2626);
+}
+
+.api-reference-status a {
+  color: var(--vp-c-brand-1);
+  font-weight: 560;
+}
+
+@media (max-width: 720px) {
+  .sz-docs-admin-link {
+    margin-left: 8px;
+    padding: 0 10px;
+    min-height: var(--touch-min-mobile, 44px);
+  }
+
+  .VPHomeHero {
+    padding: 32px 0 20px !important;
+  }
+
+  .VPHome .vp-doc {
+    margin: 16px 16px 0;
+    padding: 18px 16px 20px !important;
+  }
+}

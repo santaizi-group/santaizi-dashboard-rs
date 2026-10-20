@@ -1,0 +1,21 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.vue",
+    "../../packages/theme-nazhua/src/**/*.ts",
+    "../../packages/theme-nazhua/src/**/*.vue",
+    "../../packages/theme-server-status/src/**/*.ts",
+    "../../packages/theme-server-status/src/**/*.vue",
+    "../../packages/status-core/src/**/*.ts"
+  ],
+  "exclude": [
+    "../../packages/**/*.test.ts"
+  ]
+}

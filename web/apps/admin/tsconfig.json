@@ -1,0 +1,5 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": { "types": ["vite/client", "vitest/globals"], "baseUrl": ".", "paths": { "@/*": ["src/*"] } },
+  "include": ["src/**/*.ts", "src/**/*.vue"]
+}

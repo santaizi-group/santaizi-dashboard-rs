@@ -1,0 +1,28 @@
+/target
+**/*.rs.bk
+*.pdb
+.env
+.DS_Store
+
+# runtime data
+*.db
+*.db-wal
+*.db-shm
+data/
+# GeoIP 占位 stub 要跟仓（对齐 Go 跟踪 pkg/geoip/geoip.db）；真库只在 release 构建期替换
+!resource/geoip.db
+*.mmdb
+
+# frontend build artifacts are committed under resource/web by script; keep sources out
+web/node_modules/
+web/dist/
+
+# vendored frontend build
+web/node_modules/
+web/**/node_modules/
+web/**/dist/
+resource/web/
+
+# frontend toolchain
+node_modules/
+package-lock.json

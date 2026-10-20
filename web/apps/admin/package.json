@@ -1,0 +1,37 @@
+{
+  "name": "@santaizi/admin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@santaizi/api": "workspace:*",
+    "@santaizi/design": "workspace:*",
+    "@santaizi/geo": "workspace:*",
+    "@santaizi/i18n": "workspace:*",
+    "@santaizi/ui": "workspace:*",
+    "axios": "1.19.0",
+    "d3-geo": "3.1.1",
+    "echarts": "6.1.0",
+    "element-plus": "2.14.4",
+    "pinia": "4.0.2",
+    "remixicon": "4.9.1",
+    "vue": "3.5.41",
+    "vue-i18n": "11.4.8",
+    "vue-router": "5.2.0"
+  },
+  "devDependencies": {
+    "@types/d3-geo": "3.1.1",
+    "@vitejs/plugin-vue": "6.0.8",
+    "@vue/test-utils": "2.4.11",
+    "typescript": "6.0.3",
+    "vite": "8.2.1",
+    "vitest": "4.1.10",
+    "vue-tsc": "3.3.9"
+  }
+}

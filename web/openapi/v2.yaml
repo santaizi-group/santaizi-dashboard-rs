@@ -1,0 +1,6707 @@
+openapi: 3.0.3
+info:
+  title: Santaizi HTTP API
+  version: 2.0.0
+  description: |
+    Santaizi Primary 的公开状态和管理接口。浏览器会话使用 Cookie 与 CSRF，
+    自动化客户端使用 Bearer Token。Telemetry/Replication 可靠链路仍使用 gRPC。
+servers:
+- url: /
+  description: 当前站点（同源）
+- url: https://monitor.example.com
+  description: 示例部署地址
+tags:
+- name: Auth
+  description: 管理会话
+- name: Public
+  description: ServerStatus 公开数据
+- name: Servers
+  description: 服务器管理
+- name: Monitors
+  description: 服务监控
+- name: Notifications
+  description: 通知和告警规则
+- name: Network
+  description: DDNS 与 NAT
+- name: Settings
+  description: 站点设置
+- name: Telemetry
+  description: Collector、Observer 和可靠性
+- name: Probes
+  description: 探测型从端主动探测结果
+- name: Bot
+  description: Telegram 机器人
+security:
+- cookieAuth: []
+- bearerAuth: []
+paths:
+  /api/v2/auth/session:
+    get:
+      tags:
+      - Auth
+      summary: 获取当前会话
+      description: 返回当前管理员会话。浏览器写操作前需读取 `csrf_token`，并放在 `X-CSRF-Token` 请求头。
+      operationId: getSession
+      security: []
+      responses:
+        '200':
+          $ref: '#/components/responses/SessionResponse'
+  /api/v2/auth/logout:
+    post:
+      tags:
+      - Auth
+      summary: 退出登录
+      description: 结束 Cookie 会话。使用 Cookie 鉴权时须携带 CSRF Token。
+      operationId: logout
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Logged out
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/public/bootstrap:
+    get:
+      tags:
+      - Public
+      summary: 公开站点引导信息
+      operationId: getPublicBootstrap
+      security: []
+      responses:
+        '200':
+          $ref: '#/components/responses/BootstrapResponse'
+  /api/v2/public/view-password/session:
+    post:
+      tags:
+      - Public
+      summary: 校验站点访问密码
+      description: 站点启用访问密码时，校验密码并建立查看会话。
+      operationId: createViewPasswordSession
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - password
+              properties:
+                password:
+                  type: string
+                  format: password
+      responses:
+        '204':
+          description: Verified
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/public/servers:
+    get:
+      tags:
+      - Public
+      summary: 公开服务器列表
+      description: 公开 ServerStatus 服务器列表；可通过 `x-websocket` 订阅实时状态。匿名与查看密码会话的 `host` 不含公网 IP；Bearer Token 返回与管理接口相同的明文 `ip` / `ipv4` / `ipv6`。
+      operationId: listPublicServers
+      x-websocket: /ws/v2/public/runtime
+      security: []
+      responses:
+        '200':
+          $ref: '#/components/responses/ServerListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/public/servers/{serverId}:
+    parameters:
+    - $ref: '#/components/parameters/ServerId'
+    get:
+      tags:
+      - Public
+      summary: 公开服务器详情
+      description: 公开 ServerStatus 服务器详情。匿名与查看密码会话的 `host` 不含公网 IP；Bearer Token 返回明文地址。
+      operationId: getPublicServer
+      security: []
+      responses:
+        '200':
+          $ref: '#/components/responses/ServerResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/public/services:
+    get:
+      tags:
+      - Public
+      summary: 公开服务监控列表
+      operationId: listPublicServices
+      security: []
+      responses:
+        '200':
+          $ref: '#/components/responses/ObjectListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/public/network/{serverId}:
+    parameters:
+    - $ref: '#/components/parameters/ServerId'
+    get:
+      tags:
+      - Public
+      summary: 公开网络延迟历史
+      description: 返回该服务器近 24 小时的服务监控延迟点。`data` 为数组，每项含 `monitor_name`、`created_at`（毫秒时间戳）与 `avg_delay`。
+      operationId: getPublicNetworkHistory
+      security: []
+      responses:
+        '200':
+          $ref: '#/components/responses/MonitorHistoryListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/public/cycle-transfer:
+    get:
+      tags:
+      - Public
+      summary: 公开周期流量摘要
+      description: 返回已启用流量策略的当前窗口用量；可按 server_id 过滤。不含通知标签等管理字段。
+      operationId: listPublicCycleTransfer
+      security: []
+      parameters:
+      - name: server_id
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int64
+          minimum: 1
+      responses:
+        '200':
+          $ref: '#/components/responses/CycleTransferListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/public/servers/{serverId}/availability:
+    parameters:
+    - $ref: '#/components/parameters/ServerId'
+    get:
+      tags:
+      - Public
+      summary: 公开服务器可用性摘要
+      description: |
+        对齐上游前台可用性聚合。站点关闭 `show_availability_to_guest` 时，匿名与查看密码会话返回 403；管理员 Cookie 与 Bearer Token 仍可读取。
+        从未上报的服务器 `availability_percent` 为 null。
+      operationId: getPublicServerAvailability
+      security: []
+      parameters:
+      - name: days
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 3660
+          default: 30
+      responses:
+        '200':
+          $ref: '#/components/responses/PublicAvailabilityResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/public/metrics/{serverId}:
+    parameters:
+    - $ref: '#/components/parameters/ServerId'
+    get:
+      tags:
+      - Public
+      summary: 公开资源历史
+      description: |
+        从 StateRollup 读取该服务器当前节点的 CPU / 内存 / 磁盘 / 网速 / 进程数 / TCP / UDP 平均值序列。
+        无节点绑定或无数据时返回空列表，不返回 404。
+        优先使用成对的 `start`/`end`（RFC3339 或 Unix 秒）；跨度超过该分辨率保留期时返回 400，不夹取。
+        未提供起止时，`hours` 为相对回看（默认 24，最小 0.5），超过保留期时夹取。
+      operationId: getPublicMetrics
+      security: []
+      parameters:
+      - name: resolution
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - 1m
+          - 1h
+          default: 1m
+      - name: start
+        in: query
+        required: false
+        description: 窗口开始。RFC3339 或 Unix 秒。须与 end 成对使用，优先于 hours。
+        schema:
+          type: string
+      - name: end
+        in: query
+        required: false
+        description: 窗口结束。RFC3339 或 Unix 秒。须晚于 start。
+        schema:
+          type: string
+      - name: hours
+        in: query
+        required: false
+        description: 相对回看小时数（无 start/end 时）。支持 0.5；超过保留期时夹取。
+        schema:
+          type: number
+          minimum: 0.5
+          default: 24
+      responses:
+        '200':
+          $ref: '#/components/responses/PublicMetricListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/summary:
+    get:
+      tags:
+      - Settings
+      summary: 管理概览摘要
+      operationId: getAdminSummary
+      responses:
+        '200':
+          $ref: '#/components/responses/ObjectResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/servers:
+    get:
+      tags:
+      - Servers
+      summary: 服务器列表
+      description: 管理服务器列表。`host.ip` / `host.ipv4` / `host.ipv6` 为探针上报的明文公网地址，不脱敏。
+      operationId: listServers
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/Search'
+      - $ref: '#/components/parameters/Sort'
+      - $ref: '#/components/parameters/Order'
+      responses:
+        '200':
+          $ref: '#/components/responses/ServerListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags:
+      - Servers
+      summary: 创建服务器
+      description: 可选 `traffic_policies` 与服务器在同一事务写入；缺省不创建策略。
+      operationId: createServer
+      x-ui-route: /admin/servers
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/ServerWrite'
+      responses:
+        '201':
+          $ref: '#/components/responses/ServerResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/servers/export:
+    get:
+      tags:
+      - Servers
+      summary: 导出服务器配置
+      description: 导出全部主机配置、流量策略与探针认证密钥明文。用于灾难恢复与重装；请妥善保管导出文件。不含运行态与流量用量。
+      operationId: exportServers
+      x-ui-route: /admin/servers
+      responses:
+        '200':
+          $ref: '#/components/responses/ServerBackupResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/servers/import/preview:
+    post:
+      tags:
+      - Servers
+      summary: 预览服务器导入
+      description: 按主机名称精确匹配，返回每条建议动作。不写入。
+      operationId: previewServerImport
+      x-ui-route: /admin/servers
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/ServerBackup'
+      responses:
+        '200':
+          $ref: '#/components/responses/ServerImportPreviewResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/servers/import:
+    post:
+      tags:
+      - Servers
+      summary: 导入服务器配置
+      description: 按预览结果执行新建或覆盖。新建时若备份含密钥且未被占用则直接复用；冲突或未带密钥则生成新密钥。覆盖只改配置与流量策略，不改密钥。覆盖时流量策略去掉 id 后全量替换。
+      operationId: importServers
+      x-ui-route: /admin/servers
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/ServerImportWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/ServerImportResultResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/servers/{serverId}:
+    parameters:
+    - $ref: '#/components/parameters/ServerId'
+    get:
+      tags:
+      - Servers
+      summary: 服务器详情
+      description: 管理服务器详情。`host.ip` / `host.ipv4` / `host.ipv6` 为探针上报的明文公网地址，不脱敏。
+      operationId: getServer
+      responses:
+        '200':
+          $ref: '#/components/responses/ServerResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    patch:
+      tags:
+      - Servers
+      summary: 更新服务器
+      description: 可选 `traffic_policies` 按 id upsert、缺席删除；缺省不动既有策略。
+      operationId: updateServer
+      x-ui-route: /admin/servers
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/ServerWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/ServerResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    delete:
+      tags:
+      - Servers
+      summary: 删除服务器
+      operationId: deleteServer
+      x-ui-route: /admin/servers
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Deleted
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/servers/{serverId}/availability:
+    parameters:
+    - $ref: '#/components/parameters/ServerId'
+    get:
+      tags:
+      - Servers
+      summary: 服务器可用性记录
+      operationId: listServerAvailability
+      x-ui-route: /admin/servers
+      parameters:
+      - $ref: '#/components/parameters/From'
+      - $ref: '#/components/parameters/To'
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          $ref: '#/components/responses/ObjectListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/servers/{serverId}/display-index:
+    parameters:
+    - $ref: '#/components/parameters/ServerId'
+    patch:
+      tags:
+      - Servers
+      summary: 更新服务器排序权重
+      operationId: updateServerDisplayIndex
+      x-ui-route: /admin/servers
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/ServerDisplayIndexWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/ServerResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/server-groups:
+    get:
+      tags:
+      - Servers
+      summary: 服务器分组列表
+      operationId: listServerGroups
+      x-ui-route: /admin/servers
+      responses:
+        '200':
+          $ref: '#/components/responses/ServerGroupListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/server-groups/rename:
+    post:
+      tags:
+      - Servers
+      summary: 重命名服务器分组
+      operationId: renameServerGroup
+      x-ui-route: /admin/servers
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/ServerGroupRenameWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/ObjectResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/servers/{serverId}/reset-secret:
+    parameters:
+    - $ref: '#/components/parameters/ServerId'
+    post:
+      tags:
+      - Servers
+      summary: 重置服务器密钥
+      operationId: resetServerSecret
+      x-ui-route: /admin/servers
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          $ref: '#/components/responses/ServerSecretResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/servers/{serverId}/reset-availability:
+    parameters:
+    - $ref: '#/components/parameters/ServerId'
+    post:
+      tags:
+      - Servers
+      summary: 重置服务器可用性统计
+      operationId: resetServerAvailability
+      x-ui-route: /admin/servers
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          $ref: '#/components/responses/ObjectResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/servers/{serverId}/credential:
+    parameters:
+    - $ref: '#/components/parameters/ServerId'
+    get:
+      tags:
+      - Servers
+      summary: 查看服务器密钥
+      operationId: getServerCredential
+      x-ui-route: /admin/servers
+      responses:
+        '200':
+          $ref: '#/components/responses/ServerCredentialResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/servers/{serverId}/install-preview:
+    parameters:
+    - $ref: '#/components/parameters/ServerId'
+    post:
+      tags:
+      - Servers
+      summary: 生成安装命令预览
+      operationId: getServerInstallPreview
+      x-ui-route: /admin/servers
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/InstallPreviewWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/InstallPreviewResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/servers/{serverId}/upgrade-preview:
+    parameters:
+    - $ref: '#/components/parameters/ServerId'
+    post:
+      tags:
+      - Servers
+      summary: 生成探针升级命令
+      description: 按平台返回本机升级脚本命令。不包含密钥，不修改配置、节点身份或 WAL。
+      operationId: getServerUpgradePreview
+      x-ui-route: /admin/servers
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/UpgradePreviewWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/UpgradePreviewResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/probe-capabilities:
+    get:
+      tags:
+      - Servers
+      summary: 探针能力清单
+      operationId: getProbeCapabilities
+      x-ui-route: /admin/servers
+      responses:
+        '200':
+          $ref: '#/components/responses/ProbeCapabilitiesResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/servers/{serverId}/traffic-policies:
+    parameters:
+    - $ref: '#/components/parameters/ServerId'
+    get:
+      tags:
+      - Servers
+      summary: 流量策略列表
+      operationId: listTrafficPolicies
+      x-ui-route: /admin/servers
+      responses:
+        '200':
+          $ref: '#/components/responses/TrafficPolicyListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags:
+      - Servers
+      summary: 创建流量策略
+      operationId: createTrafficPolicy
+      x-ui-route: /admin/servers
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/TrafficPolicyWrite'
+      responses:
+        '201':
+          $ref: '#/components/responses/TrafficPolicyResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/servers/{serverId}/traffic-policies/{policyId}:
+    parameters:
+    - $ref: '#/components/parameters/ServerId'
+    - name: policyId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    get:
+      tags:
+      - Servers
+      summary: 流量策略详情
+      operationId: getTrafficPolicy
+      x-ui-route: /admin/servers
+      responses:
+        '200':
+          $ref: '#/components/responses/TrafficPolicyResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    patch:
+      tags:
+      - Servers
+      summary: 更新流量策略
+      operationId: updateTrafficPolicy
+      x-ui-route: /admin/servers
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/TrafficPolicyWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/TrafficPolicyResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    delete:
+      tags:
+      - Servers
+      summary: 删除流量策略
+      operationId: deleteTrafficPolicy
+      x-ui-route: /admin/servers
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Deleted
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/servers/{serverId}/traffic-history:
+    parameters:
+    - $ref: '#/components/parameters/ServerId'
+    get:
+      tags:
+      - Servers
+      summary: 服务器流量策略历史
+      description: |
+        返回该服务器全部流量策略的当前窗口用量、近 24 小时按小时序列，以及当前窗口内按天序列（最多回溯 90 天）。
+        `tz` 为 IANA 时区，用于按天切日界；非法或空则按 UTC。无节点绑定或无 rollup 时序列为 0，不返回 404。
+      operationId: getServerTrafficHistory
+      x-ui-route: /admin/servers
+      parameters:
+      - name: tz
+        in: query
+        required: false
+        schema:
+          type: string
+          maxLength: 64
+      responses:
+        '200':
+          $ref: '#/components/responses/TrafficHistoryListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/servers/{serverId}/traffic-policies/{policyId}/usage:
+    parameters:
+    - $ref: '#/components/parameters/ServerId'
+    - name: policyId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    get:
+      tags:
+      - Servers
+      summary: 流量策略用量
+      operationId: getTrafficPolicyUsage
+      x-ui-route: /admin/servers
+      responses:
+        '200':
+          $ref: '#/components/responses/TrafficUsageResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/servers/batch/group:
+    post:
+      tags:
+      - Servers
+      summary: 批量更新服务器分组
+      operationId: batchUpdateServerGroup
+      x-ui-route: /admin/servers
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/BatchServerGroupWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/ObjectResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/servers/batch/delete:
+    post:
+      tags:
+      - Servers
+      summary: 批量删除服务器
+      operationId: batchDeleteServers
+      x-ui-route: /admin/servers
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/BatchServerDeleteWrite'
+      responses:
+        '204':
+          description: Deleted
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/monitors:
+    get:
+      tags:
+      - Monitors
+      summary: 服务监控列表
+      operationId: listMonitors
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/Search'
+      - $ref: '#/components/parameters/Sort'
+      - $ref: '#/components/parameters/Order'
+      responses:
+        '200':
+          $ref: '#/components/responses/MonitorListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags:
+      - Monitors
+      summary: 创建服务监控
+      operationId: createMonitor
+      x-ui-route: /admin/services
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/MonitorWrite'
+      responses:
+        '201':
+          $ref: '#/components/responses/MonitorResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/monitors/{id}:
+    parameters:
+    - $ref: '#/components/parameters/Id'
+    get:
+      tags:
+      - Monitors
+      summary: 服务监控详情
+      operationId: getMonitor
+      responses:
+        '200':
+          $ref: '#/components/responses/MonitorResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    patch:
+      tags:
+      - Monitors
+      summary: 更新服务监控
+      operationId: updateMonitor
+      x-ui-route: /admin/services
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/MonitorWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/MonitorResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    delete:
+      tags:
+      - Monitors
+      summary: 删除服务监控
+      operationId: deleteMonitor
+      x-ui-route: /admin/services
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Deleted
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/monitors/{id}/history:
+    parameters:
+    - $ref: '#/components/parameters/Id'
+    get:
+      tags:
+      - Monitors
+      summary: 服务监控历史
+      operationId: listMonitorHistory
+      parameters:
+      - $ref: '#/components/parameters/From'
+      - $ref: '#/components/parameters/To'
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          $ref: '#/components/responses/ObjectListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/notifications:
+    get:
+      tags:
+      - Notifications
+      summary: 通知渠道列表
+      operationId: listNotifications
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/Search'
+      - $ref: '#/components/parameters/Sort'
+      - $ref: '#/components/parameters/Order'
+      responses:
+        '200':
+          $ref: '#/components/responses/NotificationChannelListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags:
+      - Notifications
+      summary: 创建通知渠道
+      operationId: createNotification
+      x-ui-route: /admin/notifications
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/NotificationChannelWrite'
+      responses:
+        '201':
+          $ref: '#/components/responses/NotificationChannelResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/notifications/{id}:
+    parameters:
+    - $ref: '#/components/parameters/Id'
+    get:
+      tags:
+      - Notifications
+      summary: 通知渠道详情
+      operationId: getNotification
+      responses:
+        '200':
+          $ref: '#/components/responses/NotificationChannelResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    patch:
+      tags:
+      - Notifications
+      summary: 更新通知渠道
+      operationId: updateNotification
+      x-ui-route: /admin/notifications
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/NotificationChannelWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/NotificationChannelResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    delete:
+      tags:
+      - Notifications
+      summary: 删除通知渠道
+      operationId: deleteNotification
+      x-ui-route: /admin/notifications
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Deleted
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/notifications/{id}/test:
+    parameters:
+    - $ref: '#/components/parameters/Id'
+    post:
+      tags:
+      - Notifications
+      summary: 测试通知渠道
+      operationId: testNotification
+      x-ui-route: /admin/notifications
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '202':
+          $ref: '#/components/responses/ObjectResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/alert-rules:
+    get:
+      tags:
+      - Notifications
+      summary: 告警规则列表
+      operationId: listAlertRules
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/Search'
+      - $ref: '#/components/parameters/Sort'
+      - $ref: '#/components/parameters/Order'
+      responses:
+        '200':
+          $ref: '#/components/responses/AlertRuleListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags:
+      - Notifications
+      summary: 创建告警规则
+      operationId: createAlertRule
+      x-ui-route: /admin/alert-rules
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/AlertRuleWrite'
+      responses:
+        '201':
+          $ref: '#/components/responses/AlertRuleResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/alert-rules/{id}:
+    parameters:
+    - $ref: '#/components/parameters/Id'
+    get:
+      tags:
+      - Notifications
+      summary: 告警规则详情
+      operationId: getAlertRule
+      responses:
+        '200':
+          $ref: '#/components/responses/AlertRuleResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    patch:
+      tags:
+      - Notifications
+      summary: 更新告警规则
+      operationId: updateAlertRule
+      x-ui-route: /admin/alert-rules
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/AlertRuleWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/AlertRuleResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    delete:
+      tags:
+      - Notifications
+      summary: 删除告警规则
+      operationId: deleteAlertRule
+      x-ui-route: /admin/alert-rules
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Deleted
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/ddns/providers:
+    get:
+      tags:
+      - Network
+      summary: DDNS 提供商列表
+      operationId: listDDNSProviders
+      responses:
+        '200':
+          $ref: '#/components/responses/DDNSProviderListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/ddns:
+    get:
+      tags:
+      - Network
+      summary: DDNS 配置列表
+      operationId: listDDNSProfiles
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/Search'
+      - $ref: '#/components/parameters/Sort'
+      - $ref: '#/components/parameters/Order'
+      responses:
+        '200':
+          $ref: '#/components/responses/DDNSProfileListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags:
+      - Network
+      summary: 创建 DDNS 配置
+      operationId: createDDNSProfile
+      x-ui-route: /admin/ddns
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/DDNSProfileWrite'
+      responses:
+        '201':
+          $ref: '#/components/responses/DDNSProfileResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/ddns/{id}:
+    parameters:
+    - $ref: '#/components/parameters/Id'
+    get:
+      tags:
+      - Network
+      summary: DDNS 配置详情
+      operationId: getDDNSProfile
+      responses:
+        '200':
+          $ref: '#/components/responses/DDNSProfileResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    patch:
+      tags:
+      - Network
+      summary: 更新 DDNS 配置
+      operationId: updateDDNSProfile
+      x-ui-route: /admin/ddns
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/DDNSProfileWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/DDNSProfileResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    delete:
+      tags:
+      - Network
+      summary: 删除 DDNS 配置
+      operationId: deleteDDNSProfile
+      x-ui-route: /admin/ddns
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Deleted
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/nat:
+    get:
+      tags:
+      - Network
+      summary: NAT 隧道列表
+      operationId: listNATTunnels
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/Search'
+      - $ref: '#/components/parameters/Sort'
+      - $ref: '#/components/parameters/Order'
+      responses:
+        '200':
+          $ref: '#/components/responses/NATTunnelListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags:
+      - Network
+      summary: 创建 NAT 隧道
+      operationId: createNATTunnel
+      x-ui-route: /admin/nat
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/NATTunnelWrite'
+      responses:
+        '201':
+          $ref: '#/components/responses/NATTunnelResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/nat/{id}:
+    parameters:
+    - $ref: '#/components/parameters/Id'
+    get:
+      tags:
+      - Network
+      summary: NAT 隧道详情
+      operationId: getNATTunnel
+      responses:
+        '200':
+          $ref: '#/components/responses/NATTunnelResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    patch:
+      tags:
+      - Network
+      summary: 更新 NAT 隧道
+      operationId: updateNATTunnel
+      x-ui-route: /admin/nat
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/NATTunnelWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/NATTunnelResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    delete:
+      tags:
+      - Network
+      summary: 删除 NAT 隧道
+      operationId: deleteNATTunnel
+      x-ui-route: /admin/nat
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Deleted
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/settings:
+    get:
+      tags:
+      - Settings
+      summary: 获取站点设置
+      description: |
+        返回当前站点设置。网络相关字段包括 `grpc_host`（公网地址）、
+        `proxy_grpc_port`（公网 gRPC 端口，0 表示使用监听端口 `grpcport`）、
+        `tls`（探针安装命令是否附加 `--tls` / `-Tls`）。
+        `primary_location` 为主面板在地球上的位置（ISO 国家/地区码或 `lat,lon`）。
+        `plain_ip_in_notification` 控制通知中是否显示完整 IP（默认 false，即脱敏）。
+      operationId: getSettings
+      responses:
+        '200':
+          $ref: '#/components/responses/ObjectResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    patch:
+      tags:
+      - Settings
+      summary: 更新站点设置
+      description: |
+        更新并保存站点设置。可写入 `grpc_host`、`proxy_grpc_port`（0–65535，0 表示使用监听端口）
+        和 `tls`。这两项用于生成探针/从端安装命令中的公网端口与 TLS 标志，不改变本机 gRPC 监听端口。
+        可写入 `primary_location`（ISO 国家/地区码或 `lat,lon`，最多 64 字符）。
+        可写入 `plain_ip_in_notification`（通知中显示完整 IP，默认 false）。
+      operationId: updateSettings
+      x-ui-route: /admin/settings
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/GenericObject'
+      responses:
+        '200':
+          $ref: '#/components/responses/ObjectResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/database:
+    get:
+      tags:
+      - Settings
+      summary: 数据库体积与优化状态
+      operationId: getDatabase
+      x-ui-route: /admin/settings
+      responses:
+        '200':
+          $ref: '#/components/responses/DatabaseStatusResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/database/optimize:
+    post:
+      tags:
+      - Settings
+      summary: 启动数据库优化
+      description: 后台清理过期探测数据；可回收空间达到阈值时压缩文件。进行中再次调用返回 409。
+      operationId: optimizeDatabase
+      x-ui-route: /admin/settings
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          $ref: '#/components/responses/DatabaseStatusResponse'
+        '409':
+          $ref: '#/components/responses/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/script-commands:
+    get:
+      tags:
+      - Settings
+      summary: 列出可复制的无参脚本命令
+      description: 返回主面板、从端、探针的通用安装/升级/卸载命令。脚本地址来自 `installscript` 配置；不含密钥或 Token。
+      operationId: listScriptCommands
+      responses:
+        '200':
+          $ref: '#/components/responses/ScriptCommandsResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/api-tokens:
+    get:
+      tags:
+      - Settings
+      summary: API Token 列表
+      operationId: listApiTokens
+      responses:
+        '200':
+          $ref: '#/components/responses/APITokenListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags:
+      - Settings
+      summary: 创建 API Token
+      operationId: createApiToken
+      x-ui-route: /admin/api-tokens
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/APITokenWrite'
+      responses:
+        '201':
+          $ref: '#/components/responses/APITokenResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/api-tokens/{id}:
+    parameters:
+    - $ref: '#/components/parameters/Id'
+    get:
+      tags:
+      - Settings
+      summary: API Token 详情
+      operationId: getApiToken
+      x-ui-route: /admin/api-tokens
+      responses:
+        '200':
+          $ref: '#/components/responses/APITokenResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    patch:
+      tags:
+      - Settings
+      summary: 启用或禁用 API Token
+      operationId: patchApiToken
+      x-ui-route: /admin/api-tokens
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/APITokenPatch'
+      responses:
+        '200':
+          $ref: '#/components/responses/APITokenResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    delete:
+      tags:
+      - Settings
+      summary: 删除 API Token
+      operationId: deleteApiToken
+      x-ui-route: /admin/api-tokens
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Deleted
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/offline-history:
+    get:
+      tags:
+      - Servers
+      summary: 离线历史列表
+      operationId: listOfflineHistory
+      parameters:
+      - name: server_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          $ref: '#/components/responses/ObjectListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/offline-history/{id}:
+    parameters:
+    - $ref: '#/components/parameters/Id'
+    delete:
+      tags:
+      - Servers
+      summary: 删除离线历史
+      operationId: deleteOfflineHistory
+      x-ui-route: /admin/servers
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Deleted
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/offline-history/cleanup:
+    post:
+      tags:
+      - Servers
+      summary: 清理离线历史
+      operationId: cleanupOfflineHistory
+      x-ui-route: /admin/settings
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/GenericObject'
+      responses:
+        '200':
+          $ref: '#/components/responses/ObjectResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/telemetry/overview:
+    get:
+      tags:
+      - Telemetry
+      summary: 探测概览
+      operationId: getTelemetryOverview
+      responses:
+        '200':
+          $ref: '#/components/responses/ObjectResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/connections/summary:
+    get:
+      tags:
+      - Telemetry
+      summary: 连接观察摘要
+      operationId: getConnectionSummary
+      x-ui-route: /admin/connections
+      responses:
+        '200':
+          $ref: '#/components/responses/ConnectionSummaryResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/connections/paths:
+    get:
+      tags:
+      - Telemetry
+      summary: 节点与观测点连接路径
+      operationId: listConnectionPaths
+      x-ui-route: /admin/connections
+      parameters:
+      - name: server_id
+        in: query
+        schema:
+          type: integer
+          format: int64
+          minimum: 1
+      - name: observer_id
+        in: query
+        schema:
+          type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/ConnectionPathListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/connections/latency:
+    get:
+      tags:
+      - Telemetry
+      summary: 连接延迟历史
+      operationId: listConnectionLatency
+      x-ui-route: /admin/connections
+      parameters:
+      - name: kind
+        in: query
+        schema:
+          type: string
+          enum:
+          - collector_heartbeat
+          - collector_replication
+          - path
+      - name: collector_id
+        in: query
+        schema:
+          type: string
+      - name: server_id
+        in: query
+        schema:
+          type: integer
+          format: int64
+          minimum: 1
+      - name: observer_id
+        in: query
+        schema:
+          type: string
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          $ref: '#/components/responses/ConnectionLatencyListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/probes/summary:
+    get:
+      tags:
+      - Probes
+      summary: 探测从端摘要
+      operationId: getProbeSummary
+      x-ui-route: /admin/probes
+      responses:
+        '200':
+          $ref: '#/components/responses/ProbeSummaryResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/probes/paths:
+    get:
+      tags:
+      - Probes
+      summary: 探测路径
+      operationId: listProbePaths
+      x-ui-route: /admin/probes
+      parameters:
+      - name: server_id
+        in: query
+        schema:
+          type: integer
+          format: int64
+          minimum: 1
+      - name: collector_id
+        in: query
+        schema:
+          type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/ProbePathListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/probes/samples:
+    get:
+      tags:
+      - Probes
+      summary: 探测样本历史
+      operationId: listProbeSamples
+      x-ui-route: /admin/probes
+      parameters:
+      - name: collector_id
+        in: query
+        schema:
+          type: string
+      - name: server_id
+        in: query
+        schema:
+          type: integer
+          format: int64
+          minimum: 1
+      - name: kind
+        in: query
+        schema:
+          type: string
+          enum:
+          - icmp
+          - tcp
+      - name: port
+        in: query
+        schema:
+          type: integer
+          minimum: 0
+          maximum: 65535
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          $ref: '#/components/responses/ProbeSampleListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/probes/trace:
+    get:
+      tags:
+      - Probes
+      summary: 最近一次 MTR
+      operationId: getProbeTrace
+      x-ui-route: /admin/probes
+      parameters:
+      - name: collector_id
+        in: query
+        required: true
+        schema:
+          type: string
+          minLength: 1
+      - name: server_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          format: int64
+          minimum: 1
+      responses:
+        '200':
+          $ref: '#/components/responses/ProbeTraceResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/probes/route:
+    get:
+      tags:
+      - Probes
+      summary: 最近 N 次路由
+      operationId: getProbeRoute
+      x-ui-route: /admin/probes
+      parameters:
+      - name: collector_id
+        in: query
+        required: true
+        schema:
+          type: string
+          minLength: 1
+      - name: server_id
+        in: query
+        required: true
+        schema:
+          type: integer
+          format: int64
+          minimum: 1
+      responses:
+        '200':
+          $ref: '#/components/responses/ProbeRouteResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags:
+      - Probes
+      summary: 按需跑一次路由
+      operationId: createProbeRoute
+      x-ui-route: /admin/probes
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProbeRouteWrite'
+      responses:
+        '202':
+          $ref: '#/components/responses/ProbeRouteJobResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/telemetry/collectors:
+    get:
+      tags:
+      - Telemetry
+      summary: 从端列表
+      operationId: listCollectors
+      responses:
+        '200':
+          $ref: '#/components/responses/CollectorListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags:
+      - Telemetry
+      summary: 创建从端
+      operationId: createCollector
+      x-ui-route: /admin/telemetry
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/CollectorWrite'
+      responses:
+        '201':
+          $ref: '#/components/responses/CollectorCreatedResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/telemetry/collectors/{collectorId}:
+    parameters:
+    - $ref: '#/components/parameters/CollectorId'
+    get:
+      tags:
+      - Telemetry
+      summary: 从端详情
+      operationId: getCollector
+      responses:
+        '200':
+          $ref: '#/components/responses/CollectorResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    patch:
+      tags:
+      - Telemetry
+      summary: 更新从端
+      operationId: updateCollector
+      x-ui-route: /admin/telemetry
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/CollectorWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/CollectorResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    delete:
+      tags:
+      - Telemetry
+      summary: 删除从端
+      operationId: deleteCollector
+      x-ui-route: /admin/telemetry
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Deleted
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/telemetry/collectors/{collectorId}/rotate-token:
+    parameters:
+    - $ref: '#/components/parameters/CollectorId'
+    post:
+      tags:
+      - Telemetry
+      summary: 轮换从端 Token
+      operationId: rotateCollectorToken
+      x-ui-route: /admin/telemetry
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          $ref: '#/components/responses/CollectorTokenResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/telemetry/collectors/{collectorId}/token:
+    parameters:
+    - $ref: '#/components/parameters/CollectorId'
+    get:
+      tags:
+      - Telemetry
+      summary: 查看从端 Token
+      operationId: getCollectorToken
+      x-ui-route: /admin/telemetry
+      responses:
+        '200':
+          $ref: '#/components/responses/CollectorTokenResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/telemetry/collectors/{collectorId}/revoke:
+    parameters:
+    - $ref: '#/components/parameters/CollectorId'
+    post:
+      tags:
+      - Telemetry
+      summary: 撤销从端
+      operationId: revokeCollector
+      x-ui-route: /admin/telemetry
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          $ref: '#/components/responses/CollectorResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/telemetry/collectors/{collectorId}/scope:
+    parameters:
+    - $ref: '#/components/parameters/CollectorId'
+    put:
+      tags:
+      - Telemetry
+      summary: 更新从端范围
+      operationId: updateCollectorScope
+      x-ui-route: /admin/telemetry
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/CollectorScopeWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/CollectorResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/telemetry/collectors/{collectorId}/install-preview:
+    parameters:
+    - $ref: '#/components/parameters/CollectorId'
+    post:
+      tags:
+      - Telemetry
+      summary: 生成从端安装命令预览
+      operationId: getCollectorInstallPreview
+      x-ui-route: /admin/telemetry
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/CollectorInstallPreviewWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/CollectorInstallPreviewResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/telemetry/assignments:
+    get:
+      tags:
+      - Telemetry
+      summary: Observer 分配列表
+      operationId: listObserverAssignments
+      x-ui-route: /admin/telemetry
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          $ref: '#/components/responses/ObserverAssignmentListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/telemetry/agents:
+    get:
+      tags:
+      - Telemetry
+      summary: 探针可靠性列表
+      operationId: listAgentReliability
+      x-ui-route: /admin/telemetry
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          $ref: '#/components/responses/AgentReliabilityListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/telemetry/incidents:
+    get:
+      tags:
+      - Telemetry
+      summary: 事件列表
+      operationId: listIncidents
+      x-ui-route: /admin/telemetry
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - name: open
+        in: query
+        description: 为 true 时只返回尚未结束的连通异常
+        schema:
+          type: boolean
+      responses:
+        '200':
+          $ref: '#/components/responses/IncidentListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/telemetry/incident-revisions:
+    get:
+      tags:
+      - Telemetry
+      summary: 事件修订列表
+      operationId: listIncidentRevisions
+      x-ui-route: /admin/telemetry
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          $ref: '#/components/responses/IncidentRevisionListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/telemetry/data-loss:
+    get:
+      tags:
+      - Telemetry
+      summary: 探测丢数记录
+      operationId: listTelemetryDataLoss
+      x-ui-route: /admin/telemetry
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          $ref: '#/components/responses/TelemetryDataLossListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/telemetry/alerts:
+    get:
+      tags:
+      - Telemetry
+      summary: 探测告警列表
+      operationId: listTelemetryAlerts
+      x-ui-route: /admin/telemetry
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          $ref: '#/components/responses/TelemetryAlertListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/bot/telegram/webhook:
+    post:
+      tags:
+      - Bot
+      summary: Telegram Webhook 入口
+      description: 仅在 `bot.mode=webhook` 时有效。由 Telegram 调用，使用 `X-Telegram-Bot-Api-Secret-Token` 校验，不走管理会话 CSRF。
+      operationId: telegramBotWebhook
+      security: []
+      responses:
+        '200':
+          description: Accepted
+        '404':
+          description: Bot 未启用或未处于 webhook 模式
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/bot/settings:
+    get:
+      tags:
+      - Bot
+      summary: 读取 Telegram Bot 接入配置
+      description: 不回传 Token 原文，只返回 `token_set` 与末 4 位。
+      operationId: getBotSettings
+      x-ui-route: /admin/bot
+      responses:
+        '200':
+          $ref: '#/components/responses/BotSettingsResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    patch:
+      tags:
+      - Bot
+      summary: 更新 Telegram Bot 接入配置
+      operationId: updateBotSettings
+      x-ui-route: /admin/bot
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/BotSettingsWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/BotSettingsResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/bot/test:
+    post:
+      tags:
+      - Bot
+      summary: 测试 Bot Token（getMe）
+      operationId: testBot
+      x-ui-route: /admin/bot
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          $ref: '#/components/responses/BotTestResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/bot/ai/test:
+    post:
+      tags:
+      - Bot
+      summary: 测试 AI 大模型连通性
+      description: 用已保存配置向 base_url 发一次最小 chat completions 请求。
+      operationId: testBotAI
+      x-ui-route: /admin/bot
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          $ref: '#/components/responses/BotAITestResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/bot/chats:
+    get:
+      tags:
+      - Bot
+      summary: 授权会话列表
+      operationId: listBotChats
+      x-ui-route: /admin/bot
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/Search'
+      - $ref: '#/components/parameters/Sort'
+      - $ref: '#/components/parameters/Order'
+      responses:
+        '200':
+          $ref: '#/components/responses/BotChatListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/bot/chats/{id}:
+    parameters:
+    - $ref: '#/components/parameters/Id'
+    get:
+      tags:
+      - Bot
+      summary: 授权会话详情
+      operationId: getBotChat
+      x-ui-route: /admin/bot
+      responses:
+        '200':
+          $ref: '#/components/responses/BotChatResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    patch:
+      tags:
+      - Bot
+      summary: 更新授权会话
+      operationId: updateBotChat
+      x-ui-route: /admin/bot
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/BotChatWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/BotChatResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    delete:
+      tags:
+      - Bot
+      summary: 撤销授权会话
+      operationId: deleteBotChat
+      x-ui-route: /admin/bot
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Deleted
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/bot/bind-codes:
+    get:
+      tags:
+      - Bot
+      summary: 绑定码列表
+      operationId: listBotBindCodes
+      x-ui-route: /admin/bot
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          $ref: '#/components/responses/BotBindCodeListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags:
+      - Bot
+      summary: 生成一次性绑定码
+      operationId: createBotBindCode
+      x-ui-route: /admin/bot
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/BotBindCodeWrite'
+      responses:
+        '201':
+          $ref: '#/components/responses/BotBindCodeResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/bot/bind-codes/{id}:
+    parameters:
+    - $ref: '#/components/parameters/Id'
+    delete:
+      tags:
+      - Bot
+      summary: 删除绑定码
+      operationId: deleteBotBindCode
+      x-ui-route: /admin/bot
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Deleted
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/bot/reports:
+    get:
+      tags:
+      - Bot
+      summary: 周期报告列表
+      operationId: listBotReports
+      x-ui-route: /admin/bot
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/Search'
+      - $ref: '#/components/parameters/Sort'
+      - $ref: '#/components/parameters/Order'
+      responses:
+        '200':
+          $ref: '#/components/responses/BotReportListResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    post:
+      tags:
+      - Bot
+      summary: 创建周期报告
+      operationId: createBotReport
+      x-ui-route: /admin/bot
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/BotReportWrite'
+      responses:
+        '201':
+          $ref: '#/components/responses/BotReportResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/bot/reports/{id}:
+    parameters:
+    - $ref: '#/components/parameters/Id'
+    get:
+      tags:
+      - Bot
+      summary: 周期报告详情
+      operationId: getBotReport
+      x-ui-route: /admin/bot
+      responses:
+        '200':
+          $ref: '#/components/responses/BotReportResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    patch:
+      tags:
+      - Bot
+      summary: 更新周期报告
+      operationId: updateBotReport
+      x-ui-route: /admin/bot
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        $ref: '#/components/requestBodies/BotReportWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/BotReportResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+    delete:
+      tags:
+      - Bot
+      summary: 删除周期报告
+      operationId: deleteBotReport
+      x-ui-route: /admin/bot
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Deleted
+        default:
+          $ref: '#/components/responses/Problem'
+  /api/v2/admin/bot/reports/{id}/run:
+    parameters:
+    - $ref: '#/components/parameters/Id'
+    post:
+      tags:
+      - Bot
+      summary: 立即发送周期报告
+      operationId: runBotReport
+      x-ui-route: /admin/bot
+      security:
+      - cookieAuth: []
+        csrfHeader: []
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '202':
+          $ref: '#/components/responses/BotReportResponse'
+        default:
+          $ref: '#/components/responses/Problem'
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: santaizi-dashboard
+      description: 管理员 OAuth 会话 Cookie
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: 'API Token（Authorization: Bearer）'
+    csrfHeader:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+      description: 浏览器 Cookie 会话写操作必填；值来自 GET /api/v2/auth/session 的 csrf_token
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    ServerId:
+      name: serverId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    CollectorId:
+      name: collectorId
+      in: path
+      required: true
+      schema:
+        type: string
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSize:
+      name: page_size
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Search:
+      name: q
+      in: query
+      schema:
+        type: string
+        maxLength: 200
+    Sort:
+      name: sort
+      in: query
+      schema:
+        type: string
+        maxLength: 64
+    Order:
+      name: order
+      in: query
+      schema:
+        type: string
+        enum:
+        - asc
+        - desc
+        default: desc
+    From:
+      name: from
+      in: query
+      schema:
+        type: string
+        format: date-time
+    To:
+      name: to
+      in: query
+      schema:
+        type: string
+        format: date-time
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000
+        default: 200
+    Cursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
+    CsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: false
+      description: Cookie 会话写操作时必填；Bearer Token 调用可省略
+      schema:
+        type: string
+  schemas:
+    Problem:
+      type: object
+      required:
+      - title
+      - status
+      - code
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+        code:
+          type: string
+        detail:
+          type: string
+        trace_id:
+          type: string
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+    Meta:
+      type: object
+      properties:
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total:
+          type: integer
+          format: int64
+        next_cursor:
+          type: string
+    Session:
+      type: object
+      required:
+      - authenticated
+      - csrf_token
+      - login_url
+      - capabilities
+      - version
+      properties:
+        authenticated:
+          type: boolean
+        csrf_token:
+          type: string
+        login_url:
+          type: string
+        version:
+          type: string
+          description: 当前面板二进制版本，与公开 Bootstrap.version 同义
+        capabilities:
+          type: array
+          items:
+            type: string
+        user:
+          $ref: '#/components/schemas/User'
+    User:
+      type: object
+      required:
+      - id
+      - login
+      - name
+      - super_admin
+      properties:
+        id:
+          type: integer
+          format: int64
+        login:
+          type: string
+        name:
+          type: string
+        avatar_url:
+          type: string
+        super_admin:
+          type: boolean
+    Bootstrap:
+      type: object
+      required:
+      - brand
+      - locale
+      - version
+      - logo_url
+      - requires_view_password
+      - view_password_verified
+      - show_availability
+      - authenticated
+      properties:
+        brand:
+          type: string
+        locale:
+          type: string
+          enum:
+          - zh-CN
+          - zh-TW
+          - en-US
+          - es-ES
+        version:
+          type: string
+        csrf_token:
+          type: string
+        logo_url:
+          type: string
+        footer_text:
+          type: string
+        primary_color:
+          type: string
+        custom_css:
+          type: string
+        requires_view_password:
+          type: boolean
+        view_password_verified:
+          type: boolean
+        show_availability:
+          type: boolean
+        authenticated:
+          type: boolean
+        theme:
+          type: string
+          enum:
+          - server-status
+          - server-grid
+          - nazhua
+        allow_frontend_theme_switch:
+          type: boolean
+    TelemetryPresentation:
+      type: object
+      properties:
+        host:
+          type: string
+          enum:
+          - online
+          - offline
+          - unknown
+        connectivity:
+          type: string
+          enum:
+          - full
+          - partial
+          - unavailable
+          - unknown
+        available:
+          type: boolean
+          nullable: true
+        coverage:
+          type: string
+    PublicNote:
+      type: object
+      additionalProperties: true
+      properties:
+        billingDataMod:
+          $ref: '#/components/schemas/PublicNoteBilling'
+        planDataMod:
+          $ref: '#/components/schemas/PublicNotePlan'
+        customData:
+          $ref: '#/components/schemas/PublicNotePresentation'
+    PublicNoteBilling:
+      type: object
+      additionalProperties: true
+      properties:
+        startDate:
+          type: string
+        endDate:
+          type: string
+          description: Use 0000-00-00 for an unlimited term.
+        autoRenewal:
+          type: string
+          enum:
+          - '0'
+          - '1'
+        cycle:
+          type: string
+        amount:
+          type: string
+    PublicNotePlan:
+      type: object
+      additionalProperties: true
+      properties:
+        bandwidth:
+          type: string
+        trafficVol:
+          type: string
+        trafficType:
+          type: string
+        IPv4:
+          type: string
+          enum:
+          - '0'
+          - '1'
+        IPv6:
+          type: string
+          enum:
+          - '0'
+          - '1'
+        networkRoute:
+          type: string
+        extra:
+          type: string
+    PublicNotePresentation:
+      type: object
+      additionalProperties: true
+      properties:
+        location:
+          type: string
+        flag:
+          type: string
+        orderLink:
+          type: string
+        buyBtnText:
+          type: string
+        buyBtnIcon:
+          type: string
+        slogan:
+          type: string
+        lat:
+          type: string
+        lng:
+          type: string
+        latlng:
+          type: string
+        locationLabel:
+          type: string
+    MonitoringOptions:
+      type: object
+      additionalProperties: false
+      properties:
+        cpu:
+          type: boolean
+        memory:
+          type: boolean
+        disk:
+          type: boolean
+        network:
+          type: boolean
+        connections:
+          type: boolean
+        processes:
+          type: boolean
+        temperature:
+          type: boolean
+        gpu:
+          type: boolean
+        host_info:
+          type: boolean
+        ip_report:
+          type: boolean
+        http_probe:
+          type: boolean
+        icmp_probe:
+          type: boolean
+        tcp_probe:
+          type: boolean
+        nat:
+          type: boolean
+    ServerHost:
+      type: object
+      description: |
+        探针 Host 快照。容量总量（MemTotal / DiskTotal / SwapTotal）与 CPU 型号数组在此对象；用量在 ServerState。
+        管理接口以及带 Bearer Token 的公开服务器接口返回明文公网地址（`ip` / `ipv4` / `ipv6`），不脱敏。
+        匿名或查看密码访问的 `listPublicServers`、`getPublicServer` 与 `/ws/v2/public/runtime` 省略这些字段。
+        探针快照字段保持 PascalCase，与上游 Host JSON 一致。字段集合与 model.Host 完全对应，不接受额外字段。
+      additionalProperties: false
+      properties:
+        Platform:
+          type: string
+        PlatformVersion:
+          type: string
+        CPU:
+          type: array
+          items:
+            type: string
+          description: CPU 型号原文，如 `AMD EPYC 2 Physical Core`。
+        MemTotal:
+          type: integer
+          format: int64
+          description: 内存总量（字节）。用量在 State.MemUsed。
+        DiskTotal:
+          type: integer
+          format: int64
+          description: 磁盘总量（字节）。用量在 State.DiskUsed。
+        SwapTotal:
+          type: integer
+          format: int64
+        Arch:
+          type: string
+        Virtualization:
+          type: string
+        BootTime:
+          type: integer
+          format: int64
+          description: 启动时间 Unix 秒。
+        CountryCode:
+          type: string
+        Version:
+          type: string
+          description: 探针版本。
+        GPU:
+          type: array
+          items:
+            type: string
+        ip:
+          type: string
+          description: 探针上报的公网地址；双栈为 `IPv4/IPv6`。管理接口与 Bearer Token 公开请求返回。
+        ipv4:
+          type: string
+          description: 从 `ip` 拆出的 IPv4。管理接口与 Bearer Token 公开请求返回。
+        ipv6:
+          type: string
+          description: 从 `ip` 拆出的 IPv6。管理接口与 Bearer Token 公开请求返回。
+    SensorTemperature:
+      type: object
+      additionalProperties: false
+      properties:
+        Name:
+          type: string
+        Temperature:
+          type: number
+          format: float
+    ServerState:
+      type: object
+      description: |
+        探针运行态快照（PascalCase，与上游 HostState JSON 一致）。
+        用量字段在此；对应总量在 ServerHost。字段集合与 model.HostState 完全对应，不接受额外字段。
+      additionalProperties: false
+      properties:
+        CPU:
+          type: number
+          format: double
+          description: CPU 占用百分比 0–100。
+        MemUsed:
+          type: integer
+          format: int64
+        SwapUsed:
+          type: integer
+          format: int64
+        DiskUsed:
+          type: integer
+          format: int64
+        NetInTransfer:
+          type: integer
+          format: int64
+        NetOutTransfer:
+          type: integer
+          format: int64
+        NetInSpeed:
+          type: integer
+          format: int64
+        NetOutSpeed:
+          type: integer
+          format: int64
+        Uptime:
+          type: integer
+          format: int64
+        Load1:
+          type: number
+          format: double
+        Load5:
+          type: number
+          format: double
+        Load15:
+          type: number
+          format: double
+        TcpConnCount:
+          type: integer
+          format: int64
+        UdpConnCount:
+          type: integer
+          format: int64
+        ProcessCount:
+          type: integer
+          format: int64
+        Temperatures:
+          type: array
+          items:
+            $ref: '#/components/schemas/SensorTemperature'
+        GPU:
+          type: number
+          format: double
+    MonitorHistory:
+      type: object
+      properties:
+        monitor_id:
+          type: integer
+          format: int64
+        server_id:
+          type: integer
+          format: int64
+        monitor_name:
+          type: string
+        server_name:
+          type: string
+        created_at:
+          type: array
+          items:
+            type: integer
+            format: int64
+          description: 分钟截断的 Unix 毫秒时间戳。
+        avg_delay:
+          type: array
+          items:
+            type: number
+            format: float
+          description: 平均延迟（毫秒）。
+    CycleTransfer:
+      type: object
+      properties:
+        policy_id:
+          type: integer
+          format: int64
+        server_id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        direction:
+          type: string
+        mode:
+          type: string
+        cycle_unit:
+          type: string
+        window_start:
+          type: string
+          format: date-time
+        window_end:
+          type: string
+          format: date-time
+        used_bytes:
+          type: integer
+          format: int64
+        quota_bytes:
+          type: integer
+          format: int64
+        usage_percent:
+          type: number
+          format: double
+        status:
+          type: string
+        warning_percent:
+          type: number
+          format: double
+        warning_bytes:
+          type: integer
+          format: int64
+          description: 预警阈值对应字节，对齐上游 CycleTransferStats.Min。
+        remaining_bytes:
+          type: integer
+          format: int64
+        next_reset_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 周期模式取 window_end；累计模式为 null。对齐上游 NextUpdate。
+    PublicAvailability:
+      type: object
+      required:
+      - server_id
+      - days
+      properties:
+        server_id:
+          type: integer
+          format: int64
+        days:
+          type: integer
+        offline_count:
+          type: integer
+        total_offline_seconds:
+          type: integer
+          format: int64
+        longest_offline_seconds:
+          type: integer
+          format: int64
+        availability_percent:
+          type: number
+          format: double
+          nullable: true
+    PublicMetricPoint:
+      type: object
+      properties:
+        window_start:
+          type: string
+          format: date-time
+        cpu:
+          type: number
+          format: double
+        mem_used:
+          type: integer
+          format: int64
+        disk_used:
+          type: integer
+          format: int64
+        net_in_speed:
+          type: integer
+          format: int64
+        net_out_speed:
+          type: integer
+          format: int64
+        net_in_total:
+          type: integer
+          format: int64
+        net_out_total:
+          type: integer
+          format: int64
+        process_count:
+          type: integer
+          format: int64
+        tcp_conn_count:
+          type: integer
+          format: int64
+        udp_conn_count:
+          type: integer
+          format: int64
+    Server:
+      type: object
+      required:
+      - id
+      - name
+      - tag
+      - display_index
+      - hide_for_guest
+      - enable_ddns
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        tag:
+          type: string
+        secret:
+          type: string
+        note:
+          type: string
+        public_note:
+          $ref: '#/components/schemas/PublicNote'
+        monitoring_options:
+          $ref: '#/components/schemas/MonitoringOptions'
+        display_index:
+          type: integer
+        hide_for_guest:
+          type: boolean
+        enable_ddns:
+          type: boolean
+        ddns_profiles:
+          type: array
+          items:
+            type: integer
+            format: int64
+        host:
+          $ref: '#/components/schemas/ServerHost'
+        state:
+          $ref: '#/components/schemas/ServerState'
+        last_active:
+          type: string
+          format: date-time
+        online:
+          type: boolean
+        telemetry:
+          $ref: '#/components/schemas/TelemetryPresentation'
+        traffic_policies:
+          type: array
+          items:
+            $ref: '#/components/schemas/TrafficPolicy'
+          description: 仅创建/更新响应填充；列表接口不带。
+        traffic_summaries:
+          type: array
+          items:
+            $ref: '#/components/schemas/TrafficSummary'
+          description: 列表接口填充已启用策略的当前窗口用量；无策略时省略或为空数组。
+        probe_target:
+          type: string
+          maxLength: 255
+          description: 可选探测地址（域名或 IP）。空则用探针上报的公网 IP。
+        probe_tcp_ports:
+          type: string
+          maxLength: 64
+          description: 可选探测 TCP 端口，逗号分隔。空则用各探测从端默认端口。
+        probe_enable_icmp:
+          type: boolean
+          default: true
+        probe_enable_tcp:
+          type: boolean
+          default: true
+        probe_enable_mtr:
+          type: boolean
+          default: true
+    ServerWrite:
+      type: object
+      required:
+      - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        tag:
+          type: string
+          maxLength: 100
+        note:
+          type: string
+          maxLength: 2000
+        public_note:
+          $ref: '#/components/schemas/PublicNote'
+        monitoring_options:
+          $ref: '#/components/schemas/MonitoringOptions'
+        display_index:
+          type: integer
+        hide_for_guest:
+          type: boolean
+        enable_ddns:
+          type: boolean
+        ddns_profiles:
+          type: array
+          items:
+            type: integer
+            format: int64
+        traffic_policies:
+          type: array
+          items:
+            $ref: '#/components/schemas/TrafficPolicyUpsert'
+          description: 缺省不动既有策略；传数组则以这份为准（含空数组清空）。
+        probe_target:
+          type: string
+          maxLength: 255
+          description: 可选探测地址（域名或 IP）。空则用探针上报的公网 IP。
+        probe_tcp_ports:
+          type: string
+          maxLength: 64
+          description: 可选探测 TCP 端口，逗号分隔。空则用各探测从端默认端口。
+        probe_enable_icmp:
+          type: boolean
+          default: true
+        probe_enable_tcp:
+          type: boolean
+          default: true
+        probe_enable_mtr:
+          type: boolean
+          default: true
+    ServerBackupItem:
+      type: object
+      additionalProperties: false
+      required:
+      - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        tag:
+          type: string
+          maxLength: 100
+        note:
+          type: string
+          maxLength: 2000
+        public_note:
+          $ref: '#/components/schemas/PublicNote'
+        monitoring_options:
+          $ref: '#/components/schemas/MonitoringOptions'
+        display_index:
+          type: integer
+        hide_for_guest:
+          type: boolean
+        enable_ddns:
+          type: boolean
+        ddns_profiles:
+          type: array
+          items:
+            type: integer
+            format: int64
+        traffic_policies:
+          type: array
+          items:
+            $ref: '#/components/schemas/TrafficPolicyWrite'
+        probe_target:
+          type: string
+          maxLength: 255
+        probe_tcp_ports:
+          type: string
+          maxLength: 64
+        probe_enable_icmp:
+          type: boolean
+          default: true
+        probe_enable_tcp:
+          type: boolean
+          default: true
+        probe_enable_mtr:
+          type: boolean
+          default: true
+        secret:
+          type: string
+          maxLength: 128
+          description: 探针认证密钥明文；新建时若未冲突会直接复用，留空则自动生成。
+    ServerBackup:
+      type: object
+      additionalProperties: false
+      required:
+      - format
+      - servers
+      properties:
+        format:
+          type: string
+          enum:
+          - santaizi.servers.v1
+        exported_at:
+          type: string
+          format: date-time
+        servers:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServerBackupItem'
+    ServerImportMatch:
+      type: string
+      enum:
+      - create
+      - update
+      - unchanged
+      - ambiguous
+    ServerImportAction:
+      type: string
+      enum:
+      - create
+      - overwrite
+      - skip
+    ServerImportPreviewItem:
+      type: object
+      required:
+      - index
+      - name
+      - match
+      - changes
+      - warnings
+      - suggested_action
+      - allowed_actions
+      properties:
+        index:
+          type: integer
+        name:
+          type: string
+        match:
+          $ref: '#/components/schemas/ServerImportMatch'
+        current_id:
+          type: integer
+          format: int64
+        changes:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+        suggested_action:
+          $ref: '#/components/schemas/ServerImportAction'
+        allowed_actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServerImportAction'
+    ServerImportPreview:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServerImportPreviewItem'
+    ServerImportActionItem:
+      type: object
+      required:
+      - index
+      - action
+      properties:
+        index:
+          type: integer
+        action:
+          $ref: '#/components/schemas/ServerImportAction'
+    ServerImportWrite:
+      type: object
+      required:
+      - document
+      - actions
+      properties:
+        document:
+          $ref: '#/components/schemas/ServerBackup'
+        actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServerImportActionItem'
+    ServerImportResult:
+      type: object
+      required:
+      - created
+      - overwritten
+      - skipped
+      properties:
+        created:
+          type: integer
+        overwritten:
+          type: integer
+        skipped:
+          type: integer
+        secrets_reused:
+          type: integer
+        secrets_regenerated:
+          type: integer
+    MonitorScope:
+      type: object
+      required:
+      - mode
+      - server_ids
+      properties:
+        mode:
+          type: string
+          enum:
+          - all
+          - include
+          - exclude
+        server_ids:
+          type: array
+          items:
+            type: integer
+            format: int64
+    MonitorWrite:
+      type: object
+      required:
+      - name
+      - type
+      - target
+      - scope
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        type:
+          type: string
+          enum:
+          - http
+          - icmp
+          - tcp
+        target:
+          type: string
+          minLength: 1
+          maxLength: 2048
+        interval_seconds:
+          type: integer
+          format: int64
+          minimum: 5
+          maximum: 86400
+          default: 30
+        scope:
+          $ref: '#/components/schemas/MonitorScope'
+        notify:
+          type: boolean
+        notification_tag:
+          type: string
+        show_in_service:
+          type: boolean
+        latency_notify:
+          type: boolean
+        min_latency_ms:
+          type: number
+          format: float
+        max_latency_ms:
+          type: number
+          format: float
+    Monitor:
+      allOf:
+      - $ref: '#/components/schemas/MonitorWrite'
+      - type: object
+        required:
+        - id
+        properties:
+          id:
+            type: integer
+            format: int64
+          created_at:
+            type: string
+            format: date-time
+          updated_at:
+            type: string
+            format: date-time
+    KeyValue:
+      type: object
+      required:
+      - key
+      - value
+      properties:
+        key:
+          type: string
+        value:
+          type: string
+    NotificationChannelWrite:
+      type: object
+      required:
+      - name
+      - tag
+      - url
+      - method
+      - request_type
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        tag:
+          type: string
+          minLength: 1
+          maxLength: 100
+        url:
+          type: string
+          format: uri
+        method:
+          type: string
+          enum:
+          - get
+          - post
+        request_type:
+          type: string
+          enum:
+          - json
+          - form
+        headers:
+          type: array
+          items:
+            $ref: '#/components/schemas/KeyValue'
+        body:
+          type: string
+        verify_tls:
+          type: boolean
+    NotificationChannel:
+      allOf:
+      - $ref: '#/components/schemas/NotificationChannelWrite'
+      - type: object
+        required:
+        - id
+        properties:
+          id:
+            type: integer
+            format: int64
+          created_at:
+            type: string
+            format: date-time
+          updated_at:
+            type: string
+            format: date-time
+    AlertCondition:
+      type: object
+      required:
+      - type
+      - duration_seconds
+      - scope
+      properties:
+        type:
+          type: string
+          enum:
+          - cpu
+          - gpu
+          - temperature_max
+          - memory
+          - swap
+          - disk
+          - net_in_speed
+          - net_out_speed
+          - net_all_speed
+          - offline
+          - load1
+          - load5
+          - load15
+          - tcp_conn_count
+          - udp_conn_count
+          - process_count
+        min:
+          type: number
+          nullable: true
+        max:
+          type: number
+          nullable: true
+        duration_seconds:
+          type: integer
+          format: int64
+          minimum: 3
+        scope:
+          $ref: '#/components/schemas/MonitorScope'
+    AlertRuleWrite:
+      type: object
+      required:
+      - name
+      - enabled
+      - trigger_mode
+      - notification_tag
+      - conditions
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        enabled:
+          type: boolean
+        trigger_mode:
+          type: string
+          enum:
+          - always
+          - once
+        notification_tag:
+          type: string
+        conditions:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/AlertCondition'
+    AlertRule:
+      allOf:
+      - $ref: '#/components/schemas/AlertRuleWrite'
+      - type: object
+        required:
+        - id
+        properties:
+          id:
+            type: integer
+            format: int64
+          created_at:
+            type: string
+            format: date-time
+          updated_at:
+            type: string
+            format: date-time
+    DDNSProfileWrite:
+      type: object
+      required:
+      - name
+      - provider
+      - enable_ipv4
+      - enable_ipv6
+      - domains
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        provider:
+          type: string
+        enable_ipv4:
+          type: boolean
+        enable_ipv6:
+          type: boolean
+        max_retries:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 10
+        domains:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        access_id:
+          type: string
+        access_secret:
+          type: string
+          format: password
+        webhook_url:
+          type: string
+        webhook_method:
+          type: string
+          enum:
+          - get
+          - post
+        webhook_request_type:
+          type: string
+          enum:
+          - json
+          - form
+        webhook_body:
+          type: string
+        webhook_headers:
+          type: array
+          items:
+            $ref: '#/components/schemas/KeyValue'
+    DDNSProvider:
+      type: object
+      required:
+      - id
+      - name
+      - access_id
+      - access_secret
+      - webhook_url
+      - webhook_method
+      - webhook_request_type
+      - webhook_request_body
+      - webhook_headers
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        access_id:
+          type: boolean
+        access_secret:
+          type: boolean
+        webhook_url:
+          type: boolean
+        webhook_method:
+          type: boolean
+        webhook_request_type:
+          type: boolean
+        webhook_request_body:
+          type: boolean
+        webhook_headers:
+          type: boolean
+    DDNSProfile:
+      allOf:
+      - $ref: '#/components/schemas/DDNSProfileWrite'
+      - type: object
+        required:
+        - id
+        properties:
+          id:
+            type: integer
+            format: int64
+          created_at:
+            type: string
+            format: date-time
+          updated_at:
+            type: string
+            format: date-time
+    NATTunnelWrite:
+      type: object
+      required:
+      - name
+      - server_id
+      - target
+      - domain
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        server_id:
+          type: integer
+          format: int64
+          minimum: 1
+        target:
+          type: string
+          pattern: ^.+:[0-9]+$
+        domain:
+          type: string
+    NATTunnel:
+      allOf:
+      - $ref: '#/components/schemas/NATTunnelWrite'
+      - type: object
+        required:
+        - id
+        properties:
+          id:
+            type: integer
+            format: int64
+          created_at:
+            type: string
+            format: date-time
+          updated_at:
+            type: string
+            format: date-time
+    BotRole:
+      type: string
+      enum:
+      - blocked
+      - viewer
+      - operator
+      - admin
+    BotSettings:
+      type: object
+      required:
+      - enabled
+      - provider
+      - mode
+      - charts
+      - chart_theme
+      - rate_per_minute
+      - token_set
+      - webhook_secret_set
+      - ai_enabled
+      - ai_api_key_set
+      properties:
+        enabled:
+          type: boolean
+        provider:
+          type: string
+        mode:
+          type: string
+          enum:
+          - polling
+          - webhook
+        api_endpoint:
+          type: string
+        webhook_base_url:
+          type: string
+        charts:
+          type: boolean
+        chart_theme:
+          type: string
+          enum:
+          - light
+          - dark
+        language:
+          type: string
+        rate_per_minute:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 60
+        token_set:
+          type: boolean
+        token_suffix:
+          type: string
+        webhook_secret_set:
+          type: boolean
+        ai_enabled:
+          type: boolean
+        ai_base_url:
+          type: string
+        ai_model:
+          type: string
+        ai_api_key_set:
+          type: boolean
+        ai_api_key_suffix:
+          type: string
+    BotSettingsWrite:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        provider:
+          type: string
+        token:
+          type: string
+          format: password
+        api_endpoint:
+          type: string
+        mode:
+          type: string
+          enum:
+          - polling
+          - webhook
+        webhook_base_url:
+          type: string
+        webhook_secret:
+          type: string
+          format: password
+        charts:
+          type: boolean
+        chart_theme:
+          type: string
+          enum:
+          - light
+          - dark
+        language:
+          type: string
+        rate_per_minute:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 60
+        ai_enabled:
+          type: boolean
+        ai_base_url:
+          type: string
+        ai_model:
+          type: string
+        ai_api_key:
+          type: string
+          format: password
+    BotAITest:
+      type: object
+      required:
+      - ok
+      properties:
+        ok:
+          type: boolean
+        model:
+          type: string
+        elapsed_ms:
+          type: integer
+          format: int64
+    BotTest:
+      type: object
+      required:
+      - ok
+      properties:
+        ok:
+          type: boolean
+        username:
+          type: string
+    BotChat:
+      type: object
+      required:
+      - id
+      - chat_id
+      - role
+      - enabled
+      properties:
+        id:
+          type: integer
+          format: int64
+        chat_id:
+          type: integer
+          format: int64
+        kind:
+          type: string
+        title:
+          type: string
+        role:
+          $ref: '#/components/schemas/BotRole'
+        allowed_user_ids:
+          type: array
+          items:
+            type: integer
+            format: int64
+        subscribe_tags:
+          type: array
+          items:
+            type: string
+        note:
+          type: string
+        bound_by:
+          type: integer
+          format: int64
+        last_seen_at:
+          type: string
+          format: date-time
+        enabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    BotChatWrite:
+      type: object
+      properties:
+        role:
+          $ref: '#/components/schemas/BotRole'
+        allowed_user_ids:
+          type: array
+          items:
+            type: integer
+            format: int64
+        subscribe_tags:
+          type: array
+          items:
+            type: string
+        note:
+          type: string
+        enabled:
+          type: boolean
+    BotBindCode:
+      type: object
+      required:
+      - id
+      - code
+      - role
+      - expires_at
+      properties:
+        id:
+          type: integer
+          format: int64
+        code:
+          type: string
+        role:
+          $ref: '#/components/schemas/BotRole'
+        expires_at:
+          type: string
+          format: date-time
+        used_by_chat_id:
+          type: integer
+          format: int64
+        used_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    BotBindCodeWrite:
+      type: object
+      properties:
+        role:
+          $ref: '#/components/schemas/BotRole'
+        ttl_seconds:
+          type: integer
+          format: int64
+          minimum: 60
+          maximum: 86400
+    BotReport:
+      type: object
+      required:
+      - id
+      - name
+      - period
+      - enabled
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        chat_ids:
+          type: array
+          items:
+            type: integer
+            format: int64
+        period:
+          type: string
+          enum:
+          - daily
+          - weekly
+          - monthly
+        hour_local:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 23
+        minute:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 59
+        weekday:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 6
+        day_of_month:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 31
+        sections:
+          type: array
+          items:
+            type: string
+            enum:
+            - status
+            - servers
+            - traffic
+            - uptime
+            - probes
+            - alerts
+        cover:
+          type: string
+          enum:
+          - all
+          - include
+          - exclude
+        ignore_ids:
+          type: array
+          items:
+            type: integer
+            format: int64
+        with_charts:
+          type: boolean
+        enabled:
+          type: boolean
+        last_period_key:
+          type: string
+        last_run_at:
+          type: string
+          format: date-time
+        last_status:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    BotReportWrite:
+      type: object
+      required:
+      - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        chat_ids:
+          type: array
+          items:
+            type: integer
+            format: int64
+        period:
+          type: string
+          enum:
+          - daily
+          - weekly
+          - monthly
+        hour_local:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 23
+        minute:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 59
+        weekday:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 6
+        day_of_month:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 31
+        sections:
+          type: array
+          items:
+            type: string
+        cover:
+          type: string
+          enum:
+          - all
+          - include
+          - exclude
+        ignore_ids:
+          type: array
+          items:
+            type: integer
+            format: int64
+        with_charts:
+          type: boolean
+        enabled:
+          type: boolean
+    TrafficPolicyWrite:
+      type: object
+      required:
+      - name
+      - direction
+      - mode
+      - quota_bytes
+      - warning_percent
+      - enabled
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        direction:
+          type: string
+          enum:
+          - inbound
+          - outbound
+          - total
+        mode:
+          type: string
+          enum:
+          - cumulative
+          - recurring
+        cycle_start:
+          type: string
+          format: date-time
+          nullable: true
+        cycle_interval:
+          type: integer
+          format: int64
+          minimum: 1
+        cycle_unit:
+          type: string
+          enum:
+          - hour
+          - day
+          - week
+          - month
+          - year
+        quota_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+        warning_percent:
+          type: number
+          minimum: 0
+          maximum: 100
+        notification_tag:
+          type: string
+        enabled:
+          type: boolean
+    TrafficPolicyUpsert:
+      allOf:
+      - $ref: '#/components/schemas/TrafficPolicyWrite'
+      - type: object
+        properties:
+          id:
+            type: integer
+            format: int64
+            description: 已有策略的 ID；缺省视为新建。
+    TrafficPolicy:
+      allOf:
+      - $ref: '#/components/schemas/TrafficPolicyWrite'
+      - type: object
+        required:
+        - id
+        - server_id
+        properties:
+          id:
+            type: integer
+            format: int64
+          server_id:
+            type: integer
+            format: int64
+          usage:
+            $ref: '#/components/schemas/TrafficUsage'
+          created_at:
+            type: string
+            format: date-time
+          updated_at:
+            type: string
+            format: date-time
+    TrafficUsage:
+      type: object
+      required:
+      - policy_id
+      - server_id
+      - direction
+      - mode
+      - window_start
+      - used_bytes
+      - quota_bytes
+      - warning_percent
+      - usage_percent
+      - status
+      - updated_at
+      properties:
+        policy_id:
+          type: integer
+          format: int64
+        server_id:
+          type: integer
+          format: int64
+        direction:
+          type: string
+          enum:
+          - inbound
+          - outbound
+          - total
+        mode:
+          type: string
+          enum:
+          - cumulative
+          - recurring
+        window_start:
+          type: string
+          format: date-time
+        window_end:
+          type: string
+          format: date-time
+          nullable: true
+        used_bytes:
+          type: integer
+          format: int64
+        quota_bytes:
+          type: integer
+          format: int64
+        warning_percent:
+          type: number
+        usage_percent:
+          type: number
+        status:
+          type: string
+          enum:
+          - normal
+          - warning
+          - exceeded
+        updated_at:
+          type: string
+          format: date-time
+    TrafficSummary:
+      type: object
+      required:
+      - policy_id
+      - name
+      - used_bytes
+      - quota_bytes
+      - usage_percent
+      - status
+      properties:
+        policy_id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        used_bytes:
+          type: integer
+          format: int64
+        quota_bytes:
+          type: integer
+          format: int64
+        usage_percent:
+          type: number
+        status:
+          type: string
+          enum:
+          - normal
+          - warning
+          - exceeded
+    TrafficHistoryPoint:
+      type: object
+      required:
+      - window_start
+      - bytes
+      properties:
+        window_start:
+          type: string
+          format: date-time
+        window_end:
+          type: string
+          format: date-time
+          nullable: true
+        bytes:
+          type: integer
+          format: int64
+    TrafficPolicyHistory:
+      type: object
+      required:
+      - policy_id
+      - server_id
+      - name
+      - enabled
+      - direction
+      - usage
+      - hourly
+      - daily
+      properties:
+        policy_id:
+          type: integer
+          format: int64
+        server_id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        enabled:
+          type: boolean
+        direction:
+          type: string
+          enum:
+          - inbound
+          - outbound
+          - total
+        usage:
+          $ref: '#/components/schemas/TrafficUsage'
+        hourly:
+          type: array
+          items:
+            $ref: '#/components/schemas/TrafficHistoryPoint'
+        daily:
+          type: array
+          items:
+            $ref: '#/components/schemas/TrafficHistoryPoint'
+    InstallPreviewWrite:
+      type: object
+      required:
+      - platform
+      - clean_install
+      - options
+      properties:
+        platform:
+          type: string
+          enum:
+          - linux
+          - macos
+          - windows
+        clean_install:
+          type: boolean
+        options:
+          $ref: '#/components/schemas/MonitoringOptions'
+        ip_report_config:
+          $ref: '#/components/schemas/IPReportConfig'
+        implementation:
+          type: string
+          enum:
+          - go
+          - rust
+          default: go
+    InstallPreview:
+      type: object
+      required:
+      - platform
+      - command
+      - clean_install
+      - options
+      properties:
+        platform:
+          type: string
+          enum:
+          - linux
+          - macos
+          - windows
+        command:
+          type: string
+        clean_install:
+          type: boolean
+        options:
+          $ref: '#/components/schemas/MonitoringOptions'
+        ip_report_config:
+          $ref: '#/components/schemas/IPReportConfig'
+        implementation:
+          type: string
+          enum:
+          - go
+          - rust
+    UpgradePreviewWrite:
+      type: object
+      additionalProperties: false
+      required:
+      - platform
+      properties:
+        platform:
+          type: string
+          enum:
+          - linux
+          - macos
+          - windows
+    UpgradePreview:
+      type: object
+      additionalProperties: false
+      required:
+      - platform
+      - command
+      properties:
+        platform:
+          type: string
+          enum:
+          - linux
+          - macos
+          - windows
+        command:
+          type: string
+    ScriptCommand:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - group
+      - platform
+      - command
+      - destructive
+      properties:
+        id:
+          type: string
+          enum:
+          - dashboard_install
+          - dashboard_upgrade
+          - collector_upgrade
+          - collector_remove
+          - agent_upgrade_linux
+          - agent_upgrade_macos
+          - agent_upgrade_windows
+          - agent_uninstall_posix
+          - agent_uninstall_windows
+        group:
+          type: string
+          enum:
+          - dashboard
+          - collector
+          - agent
+        platform:
+          type: string
+          enum:
+          - linux
+          - macos
+          - windows
+          - posix
+        command:
+          type: string
+        destructive:
+          type: boolean
+    ScriptCommands:
+      type: object
+      additionalProperties: false
+      required:
+      - commands
+      properties:
+        commands:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScriptCommand'
+    IPReportConfig:
+      type: object
+      additionalProperties: false
+      properties:
+        interface:
+          type: string
+        country_code:
+          type: string
+        prefer_ipv6:
+          type: boolean
+    ProbeCapability:
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
+        enable_flag:
+          type: string
+        disable_flag:
+          type: string
+    ProbeCapabilities:
+      type: object
+      required:
+      - required
+      - optional
+      - presets
+      properties:
+        required:
+          type: array
+          items:
+            type: string
+        optional:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProbeCapability'
+        presets:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/MonitoringOptions'
+    ServerCredential:
+      type: object
+      required:
+      - server_id
+      - secret
+      - grpc_host
+      - grpc_port
+      properties:
+        server_id:
+          type: integer
+          format: int64
+        secret:
+          type: string
+        grpc_host:
+          type: string
+        grpc_port:
+          type: integer
+    ServerSecret:
+      type: object
+      required:
+      - secret
+      properties:
+        secret:
+          type: string
+    APITokenWrite:
+      type: object
+      required:
+      - note
+      - permission
+      properties:
+        note:
+          type: string
+          minLength: 1
+          maxLength: 200
+        permission:
+          type: string
+          enum:
+          - read
+          - write
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 到期时间；省略或 null 表示永不过期
+    APITokenPatch:
+      type: object
+      required:
+      - enabled
+      properties:
+        enabled:
+          type: boolean
+    APIToken:
+      type: object
+      required:
+      - id
+      - note
+      - permission
+      - enabled
+      - created_at
+      properties:
+        id:
+          type: integer
+          format: int64
+        note:
+          type: string
+        permission:
+          type: string
+          enum:
+          - read
+          - write
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        enabled:
+          type: boolean
+        expired:
+          type: boolean
+        token:
+          type: string
+        token_prefix:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    CollectorToken:
+      type: object
+      required:
+      - collector_id
+      - registration_token
+      - revoked
+      properties:
+        collector_id:
+          type: string
+        registration_token:
+          type: string
+        revoked:
+          type: boolean
+    CollectorInstallPreviewWrite:
+      type: object
+      properties:
+        primary_endpoint:
+          type: string
+        primary_tls:
+          type: boolean
+        primary_insecure_tls:
+          type: boolean
+        grpc_port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+    CollectorInstallPreview:
+      type: object
+      required:
+      - command
+      - primary_endpoint
+      - grpc_port
+      - primary_tls
+      - primary_insecure_tls
+      - default_primary_tls
+      properties:
+        command:
+          type: string
+        primary_endpoint:
+          type: string
+        grpc_port:
+          type: integer
+        primary_tls:
+          type: boolean
+        primary_insecure_tls:
+          type: boolean
+        default_primary_tls:
+          type: boolean
+          description: 主面板当前 grpc_tls.enabled，安装弹窗打开时用此值作为 TLS 默认。
+    CollectorCreated:
+      type: object
+      required:
+      - collector
+      - registration_token
+      properties:
+        collector:
+          $ref: '#/components/schemas/Collector'
+        registration_token:
+          type: string
+    BatchServerGroupWrite:
+      type: object
+      required:
+      - ids
+      - group
+      properties:
+        ids:
+          type: array
+          minItems: 1
+          items:
+            type: integer
+            format: int64
+        group:
+          type: string
+    BatchServerDeleteWrite:
+      type: object
+      required:
+      - ids
+      properties:
+        ids:
+          type: array
+          minItems: 1
+          items:
+            type: integer
+            format: int64
+    ServerDisplayIndexWrite:
+      type: object
+      required:
+      - display_index
+      properties:
+        display_index:
+          type: integer
+    ServerGroup:
+      type: object
+      required:
+      - name
+      - count
+      properties:
+        name:
+          type: string
+        count:
+          type: integer
+          minimum: 0
+    ServerGroupRenameWrite:
+      type: object
+      required:
+      - from
+      - to
+      properties:
+        from:
+          type: string
+          maxLength: 100
+        to:
+          type: string
+          maxLength: 100
+    Collector:
+      type: object
+      required:
+      - id
+      - name
+      - address
+      - tls
+      - insecure_tls
+      - generation
+      - config_version
+      - revoked
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        address:
+          type: string
+          description: 探针访问地址（host:访问端口）
+        listen_port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+          description: 从端进程监听端口。0 表示与 address 中的访问端口相同。
+        tls:
+          type: boolean
+        insecure_tls:
+          type: boolean
+        location:
+          type: string
+          maxLength: 64
+          description: 从端在地球上的位置，ISO 国家/地区码或 `lat,lon`
+        kind:
+          type: string
+          enum:
+          - observer
+          - probe
+          description: 从端类型。创建后不可改。缺省 observer。
+        probe_interval_seconds:
+          type: integer
+          minimum: 1
+        mtr_interval_seconds:
+          type: integer
+          minimum: 1
+        mtr_probes:
+          type: integer
+          minimum: 1
+          maximum: 10
+        tcp_ports:
+          type: string
+          description: 逗号分隔 TCP 端口，如 22,443
+        enable_icmp:
+          type: boolean
+        enable_tcp:
+          type: boolean
+        enable_mtr:
+          type: boolean
+        enable_ipv4:
+          type: boolean
+          default: true
+          description: 探测 IPv4。与 enable_ipv6 至少开一项。
+        enable_ipv6:
+          type: boolean
+          default: true
+          description: 探测 IPv6。与 enable_ipv4 至少开一项。
+        route_interval_seconds:
+          type: integer
+          enum:
+          - 3600
+          - 86400
+          - 604800
+        route_keep:
+          type: integer
+          minimum: 1
+          maximum: 50
+        notify:
+          type: boolean
+        notification_tag:
+          type: string
+        latency_notify:
+          type: boolean
+        min_latency_ms:
+          type: number
+          format: double
+        max_latency_ms:
+          type: number
+          format: double
+        fail_threshold:
+          type: integer
+          minimum: 1
+        generation:
+          type: integer
+          format: int64
+        config_version:
+          type: integer
+          format: int64
+        revoked:
+          type: boolean
+        status:
+          type: string
+          enum:
+          - online
+          - offline
+          - unknown
+        last_seen:
+          type: string
+          format: date-time
+        last_sync:
+          type: string
+          format: date-time
+        last_primary_seen:
+          type: string
+          format: date-time
+        spool_size:
+          type: integer
+          format: int64
+        pending_records:
+          type: integer
+          format: int64
+        oldest_pending:
+          type: string
+          format: date-time
+        replication_cursor:
+          type: integer
+          format: int64
+        connected_agents:
+          type: integer
+          format: int64
+        protocol_version:
+          type: string
+        software_version:
+          type: string
+          description: 从端二进制版本
+        heartbeat_rtt_ms:
+          type: number
+          format: double
+        heartbeat_rtt_sampled_at:
+          type: string
+          format: date-time
+        replication_rtt_ms:
+          type: number
+          format: double
+        replication_rtt_sampled_at:
+          type: string
+          format: date-time
+        scopes:
+          type: array
+          items:
+            $ref: '#/components/schemas/CollectorScope'
+    CollectorScope:
+      type: object
+      required:
+      - type
+      - value
+      properties:
+        type:
+          type: string
+          enum:
+          - all
+          - server
+          - group
+          - tag
+        value:
+          type: string
+    DatabaseOptimizeRun:
+      type: object
+      required:
+      - started_at
+      - deleted
+      - compacted
+      properties:
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+        deleted:
+          type: integer
+          format: int64
+        compacted:
+          type: boolean
+        skipped:
+          type: string
+        error:
+          type: string
+    DatabaseStatus:
+      type: object
+      additionalProperties: false
+      required:
+      - file_bytes
+      - wal_bytes
+      - reclaimable_bytes
+      - running
+      properties:
+        file_bytes:
+          type: integer
+          format: int64
+        wal_bytes:
+          type: integer
+          format: int64
+        reclaimable_bytes:
+          type: integer
+          format: int64
+        running:
+          type: boolean
+        last_run:
+          $ref: '#/components/schemas/DatabaseOptimizeRun'
+    ConnectionSummary:
+      type: object
+      required:
+      - collectors_total
+      - collectors_online
+      - collectors_offline
+      - collectors_unknown
+      - paths_assigned
+      - paths_connected
+      - paths_seen
+      properties:
+        collectors_total:
+          type: integer
+          format: int64
+        collectors_online:
+          type: integer
+          format: int64
+        collectors_offline:
+          type: integer
+          format: int64
+        collectors_unknown:
+          type: integer
+          format: int64
+        paths_assigned:
+          type: integer
+          format: int64
+        paths_connected:
+          type: integer
+          format: int64
+        paths_seen:
+          type: integer
+          format: int64
+    ConnectionPathSink:
+      type: object
+      required:
+      - connected
+      properties:
+        connected:
+          type: boolean
+        pending_events:
+          type: integer
+          format: int64
+        last_error:
+          type: string
+        ack_through:
+          type: integer
+          format: int64
+        last_rtt_ms:
+          type: number
+          format: double
+        rtt_sampled_at:
+          type: string
+          format: date-time
+    ConnectionPath:
+      type: object
+      required:
+      - server_id
+      - server_name
+      - display_index
+      - node_uuid
+      - observer_id
+      - observer_kind
+      - observer_name
+      - assigned
+      - sink
+      properties:
+        server_id:
+          type: integer
+          format: int64
+        server_name:
+          type: string
+        display_index:
+          type: integer
+        tag:
+          type: string
+        node_uuid:
+          type: string
+        observer_id:
+          type: string
+        observer_kind:
+          type: string
+          enum:
+          - primary
+          - collector
+        observer_name:
+          type: string
+        assigned:
+          type: boolean
+        last_seen:
+          type: string
+          format: date-time
+        sink:
+          $ref: '#/components/schemas/ConnectionPathSink'
+    ConnectionLatencyBucket:
+      type: object
+      required:
+      - kind
+      - collector_id
+      - server_id
+      - server_name
+      - node_uuid
+      - observer_id
+      - bucket_start
+      - min_ms
+      - avg_ms
+      - max_ms
+      - count
+      properties:
+        kind:
+          type: string
+          enum:
+          - collector_heartbeat
+          - collector_replication
+          - path
+        collector_id:
+          type: string
+        server_id:
+          type: integer
+          format: int64
+        server_name:
+          type: string
+        node_uuid:
+          type: string
+        observer_id:
+          type: string
+        bucket_start:
+          type: string
+          format: date-time
+        min_ms:
+          type: number
+          format: double
+        avg_ms:
+          type: number
+          format: double
+        max_ms:
+          type: number
+          format: double
+        count:
+          type: integer
+          format: int64
+    ProbeSummary:
+      type: object
+      required:
+      - collectors_total
+      - collectors_online
+      - collectors_offline
+      - collectors_unknown
+      - paths_assigned
+      - paths_reachable
+      - paths_down
+      - paths_no_target
+      properties:
+        collectors_total:
+          type: integer
+          format: int64
+        collectors_online:
+          type: integer
+          format: int64
+        collectors_offline:
+          type: integer
+          format: int64
+        collectors_unknown:
+          type: integer
+          format: int64
+        paths_assigned:
+          type: integer
+          format: int64
+        paths_reachable:
+          type: integer
+          format: int64
+        paths_down:
+          type: integer
+          format: int64
+        paths_no_target:
+          type: integer
+          format: int64
+    ProbeTarget:
+      type: object
+      required:
+      - source
+      properties:
+        source:
+          type: string
+          enum:
+          - host_ip
+          - override
+          - none
+        hostname:
+          type: string
+        ipv4:
+          type: string
+        ipv6:
+          type: string
+    ProbeICMP:
+      type: object
+      required:
+      - ok
+      properties:
+        ok:
+          type: boolean
+        rtt_ms:
+          type: number
+          format: double
+        loss:
+          type: number
+          format: double
+        packets_sent:
+          type: integer
+        packets_received:
+          type: integer
+    ProbeTCP:
+      type: object
+      required:
+      - port
+      - ok
+      properties:
+        port:
+          type: integer
+        ok:
+          type: boolean
+        rtt_ms:
+          type: number
+          format: double
+        error:
+          type: string
+    ProbePath:
+      type: object
+      required:
+      - server_id
+      - server_name
+      - display_index
+      - collector_id
+      - collector_name
+      - target
+      - reachable
+      - has_trace
+      properties:
+        server_id:
+          type: integer
+          format: int64
+        server_name:
+          type: string
+        display_index:
+          type: integer
+        tag:
+          type: string
+        collector_id:
+          type: string
+        collector_name:
+          type: string
+        target:
+          $ref: '#/components/schemas/ProbeTarget'
+        reachable:
+          type: boolean
+        display_rtt_ms:
+          type: number
+          format: double
+        sampled_at:
+          type: string
+          format: date-time
+        last_error:
+          type: string
+        icmp:
+          $ref: '#/components/schemas/ProbeICMP'
+        tcp:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProbeTCP'
+        mtr:
+          $ref: '#/components/schemas/ProbeMTR'
+        has_trace:
+          type: boolean
+        enable_icmp:
+          type: boolean
+        enable_tcp:
+          type: boolean
+    ProbeMTR:
+      type: object
+      properties:
+        loss:
+          type: number
+          format: double
+        hop_count:
+          type: integer
+        sampled_at:
+          type: string
+          format: date-time
+        protocol:
+          type: string
+          enum:
+          - icmp
+          - tcp
+        port:
+          type: integer
+    ProbeSampleBucket:
+      type: object
+      required:
+      - collector_id
+      - server_id
+      - kind
+      - port
+      - bucket_start
+      - min_ms
+      - avg_ms
+      - max_ms
+      - loss
+      - success_count
+      - fail_count
+      properties:
+        collector_id:
+          type: string
+        server_id:
+          type: integer
+          format: int64
+        server_name:
+          type: string
+        kind:
+          type: string
+          enum:
+          - icmp
+          - tcp
+        port:
+          type: integer
+        bucket_start:
+          type: string
+          format: date-time
+        min_ms:
+          type: number
+          format: double
+        avg_ms:
+          type: number
+          format: double
+        max_ms:
+          type: number
+          format: double
+        loss:
+          type: number
+          format: double
+        success_count:
+          type: integer
+        fail_count:
+          type: integer
+    ProbeMTRHop:
+      type: object
+      required:
+      - ttl
+      properties:
+        ttl:
+          type: integer
+        address:
+          type: string
+        loss:
+          type: number
+          format: double
+        avg_ms:
+          type: number
+          format: double
+        sent:
+          type: integer
+        geo:
+          type: string
+        country_code:
+          type: string
+        private:
+          type: boolean
+    ProbeTraceLeg:
+      type: object
+      required:
+      - hops
+      properties:
+        sampled_at:
+          type: string
+          format: date-time
+        destination:
+          type: string
+        port:
+          type: integer
+        hops:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProbeMTRHop'
+    ProbeTrace:
+      type: object
+      required:
+      - collector_id
+      - server_id
+      - sampled_at
+      - hops
+      properties:
+        collector_id:
+          type: string
+        server_id:
+          type: integer
+          format: int64
+        sampled_at:
+          type: string
+          format: date-time
+        destination:
+          type: string
+        protocol:
+          type: string
+          enum:
+          - icmp
+          - tcp
+        port:
+          type: integer
+        hops:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProbeMTRHop'
+        icmp:
+          $ref: '#/components/schemas/ProbeTraceLeg'
+        tcp:
+          $ref: '#/components/schemas/ProbeTraceLeg'
+    ProbeRouteHop:
+      type: object
+      required:
+      - ttl
+      properties:
+        ttl:
+          type: integer
+          minimum: 1
+        address:
+          type: string
+        hostname:
+          type: string
+        rtt_ms:
+          type: number
+          format: double
+        loss:
+          type: number
+          format: double
+        sent:
+          type: integer
+        asn:
+          type: string
+        country:
+          type: string
+        province:
+          type: string
+        city:
+          type: string
+        owner:
+          type: string
+        geo:
+          type: string
+        private:
+          type: boolean
+    ProbeRouteRecord:
+      type: object
+      required:
+      - id
+      - sampled_at
+      - hops
+      properties:
+        id:
+          type: integer
+          format: int64
+        sampled_at:
+          type: string
+          format: date-time
+        destination:
+          type: string
+        port:
+          type: integer
+        error:
+          type: string
+        job_id:
+          type: integer
+          format: int64
+        hops:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProbeRouteHop'
+    ProbeRouteJob:
+      type: object
+      required:
+      - id
+      - protocol
+      - status
+      properties:
+        id:
+          type: integer
+          format: int64
+        protocol:
+          type: string
+          enum:
+          - icmp
+          - tcp
+        port:
+          type: integer
+        status:
+          type: string
+          enum:
+          - pending
+          - done
+          - failed
+        requested_at:
+          type: string
+          format: date-time
+        error:
+          type: string
+    ProbeRouteHistory:
+      type: object
+      required:
+      - collector_id
+      - server_id
+      - enable_icmp
+      - enable_tcp
+      - icmp
+      - tcp
+      properties:
+        collector_id:
+          type: string
+        server_id:
+          type: integer
+          format: int64
+        enable_icmp:
+          type: boolean
+        enable_tcp:
+          type: boolean
+        icmp:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProbeRouteRecord'
+        tcp:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProbeRouteRecord'
+        job:
+          $ref: '#/components/schemas/ProbeRouteJob'
+    ProbeRouteWrite:
+      type: object
+      required:
+      - collector_id
+      - server_id
+      - protocol
+      properties:
+        collector_id:
+          type: string
+          minLength: 1
+        server_id:
+          type: integer
+          format: int64
+          minimum: 1
+        protocol:
+          type: string
+          enum:
+          - icmp
+          - tcp
+    ObserverEvidenceItem:
+      type: object
+      required:
+      - observer_id
+      - healthy
+      - seen
+      properties:
+        observer_id:
+          type: string
+        observer_kind:
+          type: string
+          enum:
+          - primary
+          - collector
+        observer_name:
+          type: string
+        healthy:
+          type: boolean
+        seen:
+          type: boolean
+    AgentSink:
+      type: object
+      required:
+      - endpoint_id
+      - connected
+      properties:
+        endpoint_id:
+          type: string
+        observer_kind:
+          type: string
+          enum:
+          - primary
+          - collector
+        observer_name:
+          type: string
+        connected:
+          type: boolean
+        pending_events:
+          type: integer
+          format: int64
+        last_error:
+          type: string
+        ack_through:
+          type: integer
+          format: int64
+        last_rtt_ms:
+          type: number
+          format: double
+        rtt_sampled_at:
+          type: string
+          format: date-time
+    ObserverAssignmentRecord:
+      type: object
+      required:
+      - node_uuid
+      - observer_id
+      - observer_kind
+      properties:
+        server_id:
+          type: integer
+          format: int64
+        server_name:
+          type: string
+        node_uuid:
+          type: string
+        observer_id:
+          type: string
+        observer_kind:
+          type: string
+          enum:
+          - primary
+          - collector
+        observer_name:
+          type: string
+        valid_from:
+          type: string
+          format: date-time
+        valid_to:
+          type: string
+          format: date-time
+        generation:
+          type: integer
+          format: int64
+        config_version:
+          type: integer
+          format: int64
+    AgentReliabilityRecord:
+      type: object
+      required:
+      - node_uuid
+      - wal_pressure
+      - clock_untrusted
+      - sinks
+      properties:
+        server_id:
+          type: integer
+          format: int64
+        server_name:
+          type: string
+        node_uuid:
+          type: string
+        wal_pressure:
+          type: string
+          enum:
+          - unknown
+          - healthy
+          - downsampled
+          - rollup
+          - critical
+          - telemetry_data_loss
+        wal_bytes:
+          type: integer
+          format: int64
+        pending_events:
+          type: integer
+          format: int64
+        oldest_pending:
+          type: string
+          format: date-time
+        clock_untrusted:
+          type: boolean
+        protocol_version:
+          type: string
+        agent_version:
+          type: string
+          description: 探针二进制版本
+        updated_at:
+          type: string
+          format: date-time
+        sinks:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentSink'
+    IncidentRecord:
+      type: object
+      required:
+      - id
+      - node_uuid
+      - current_classification
+      - observer_evidence
+      properties:
+        id:
+          type: integer
+          format: int64
+        server_id:
+          type: integer
+          format: int64
+        server_name:
+          type: string
+        node_uuid:
+          type: string
+        initial_classification:
+          type: string
+        current_classification:
+          type: string
+        revision:
+          type: integer
+          format: int64
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+        recalculated_at:
+          type: string
+          format: date-time
+        reason:
+          type: string
+        observer_evidence:
+          type: array
+          items:
+            $ref: '#/components/schemas/ObserverEvidenceItem'
+    IncidentRevisionRecord:
+      type: object
+      required:
+      - id
+      - incident_id
+      - classification
+      - observer_evidence
+      properties:
+        id:
+          type: integer
+          format: int64
+        incident_id:
+          type: integer
+          format: int64
+        revision:
+          type: integer
+          format: int64
+        classification:
+          type: string
+        reason:
+          type: string
+        recalculated_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        observer_evidence:
+          type: array
+          items:
+            $ref: '#/components/schemas/ObserverEvidenceItem'
+    TelemetryDataLossRecord:
+      type: object
+      required:
+      - fact_id
+      - reason
+      - lost_records
+      properties:
+        fact_id:
+          type: string
+        component_id:
+          type: string
+        occurred_at:
+          type: string
+          format: date-time
+        reason:
+          type: string
+          enum:
+          - unknown
+          - compacted
+          - hard_limit_data_loss
+          - corruption
+        first_spool_id:
+          type: integer
+          format: int64
+        last_spool_id:
+          type: integer
+          format: int64
+        lost_records:
+          type: integer
+          format: int64
+        detail:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    TelemetryAlertRecord:
+      type: object
+      required:
+      - id
+      - alert_type
+      - notified
+      properties:
+        id:
+          type: integer
+          format: int64
+        alert_type:
+          type: string
+        severity:
+          type: string
+        server_id:
+          type: integer
+          format: int64
+        server_name:
+          type: string
+        node_uuid:
+          type: string
+        component_id:
+          type: string
+        occurred_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        notified:
+          type: boolean
+        message:
+          type: string
+        dedup_key:
+          type: string
+    CollectorWrite:
+      type: object
+      required:
+      - name
+      - scopes
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        kind:
+          type: string
+          enum:
+          - observer
+          - probe
+          description: 仅创建时生效；更新忽略。
+        address:
+          type: string
+          maxLength: 255
+          description: 探针访问地址（host:访问端口）。探测型可空。
+        listen_port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+          description: 从端进程监听端口。0 表示与 address 中的访问端口相同。
+        tls:
+          type: boolean
+        insecure_tls:
+          type: boolean
+        location:
+          type: string
+          maxLength: 64
+        probe_interval_seconds:
+          type: integer
+          minimum: 1
+        mtr_interval_seconds:
+          type: integer
+          minimum: 1
+        mtr_probes:
+          type: integer
+          minimum: 1
+          maximum: 10
+        tcp_ports:
+          type: string
+        enable_icmp:
+          type: boolean
+        enable_tcp:
+          type: boolean
+        enable_mtr:
+          type: boolean
+        enable_ipv4:
+          type: boolean
+          default: true
+          description: 探测 IPv4。与 enable_ipv6 至少开一项。
+        enable_ipv6:
+          type: boolean
+          default: true
+          description: 探测 IPv6。与 enable_ipv4 至少开一项。
+        route_interval_seconds:
+          type: integer
+          enum:
+          - 3600
+          - 86400
+          - 604800
+        route_keep:
+          type: integer
+          minimum: 1
+          maximum: 50
+        notify:
+          type: boolean
+        notification_tag:
+          type: string
+        latency_notify:
+          type: boolean
+        min_latency_ms:
+          type: number
+          format: double
+        max_latency_ms:
+          type: number
+          format: double
+        fail_threshold:
+          type: integer
+          minimum: 1
+        scopes:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/CollectorScope'
+    CollectorScopeWrite:
+      type: object
+      required:
+      - scopes
+      properties:
+        scopes:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/CollectorScope'
+    GenericObject:
+      type: object
+      additionalProperties: true
+    ObjectData:
+      type: object
+      required:
+      - data
+      properties:
+        data:
+          $ref: '#/components/schemas/GenericObject'
+    ObjectList:
+      type: object
+      required:
+      - data
+      - meta
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/GenericObject'
+        meta:
+          $ref: '#/components/schemas/Meta'
+  requestBodies:
+    GenericObject:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/GenericObject'
+    ServerWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ServerWrite'
+    ServerBackup:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ServerBackup'
+    ServerImportWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ServerImportWrite'
+    MonitorWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/MonitorWrite'
+    NotificationChannelWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NotificationChannelWrite'
+    AlertRuleWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AlertRuleWrite'
+    DDNSProfileWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DDNSProfileWrite'
+    NATTunnelWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NATTunnelWrite'
+    BotSettingsWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BotSettingsWrite'
+    BotChatWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BotChatWrite'
+    BotBindCodeWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BotBindCodeWrite'
+    BotReportWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BotReportWrite'
+    TrafficPolicyWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/TrafficPolicyWrite'
+    InstallPreviewWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/InstallPreviewWrite'
+    UpgradePreviewWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/UpgradePreviewWrite'
+    APITokenWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/APITokenWrite'
+    APITokenPatch:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/APITokenPatch'
+    BatchServerGroupWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BatchServerGroupWrite'
+    BatchServerDeleteWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BatchServerDeleteWrite'
+    ServerDisplayIndexWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ServerDisplayIndexWrite'
+    ServerGroupRenameWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ServerGroupRenameWrite'
+    CollectorWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/CollectorWrite'
+    CollectorScopeWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/CollectorScopeWrite'
+    CollectorInstallPreviewWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/CollectorInstallPreviewWrite'
+  responses:
+    Problem:
+      description: Problem details
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    ObjectResponse:
+      description: Object response
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ObjectData'
+    ObjectListResponse:
+      description: List response
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ObjectList'
+    SessionResponse:
+      description: Session state
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/Session'
+    BootstrapResponse:
+      description: Public bootstrap
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/Bootstrap'
+    ServerResponse:
+      description: Server
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/Server'
+    ServerListResponse:
+      description: Server list
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Server'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    ServerBackupResponse:
+      description: Server backup document
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/ServerBackup'
+    ServerImportPreviewResponse:
+      description: Server import preview
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/ServerImportPreview'
+    ServerImportResultResponse:
+      description: Server import result
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/ServerImportResult'
+    MonitorHistoryListResponse:
+      description: Public monitor latency history
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MonitorHistory'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    CycleTransferListResponse:
+      description: Public cycle transfer list
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CycleTransfer'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    PublicAvailabilityResponse:
+      description: Public availability summary
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/PublicAvailability'
+    PublicMetricListResponse:
+      description: Public resource history
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PublicMetricPoint'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    ServerGroupListResponse:
+      description: Derived server group list
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ServerGroup'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    ServerCredentialResponse:
+      description: Server credential
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/ServerCredential'
+    ServerSecretResponse:
+      description: Server connection secret
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/ServerSecret'
+    InstallPreviewResponse:
+      description: Probe installation preview
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/InstallPreview'
+    UpgradePreviewResponse:
+      description: Probe upgrade command
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/UpgradePreview'
+    ScriptCommandsResponse:
+      description: Copyable script commands
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/ScriptCommands'
+    ProbeCapabilitiesResponse:
+      description: Probe capability metadata
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/ProbeCapabilities'
+    MonitorResponse:
+      description: Monitor
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/Monitor'
+    MonitorListResponse:
+      description: Monitor list
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Monitor'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    NotificationChannelResponse:
+      description: Notification channel
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/NotificationChannel'
+    NotificationChannelListResponse:
+      description: Notification channel list
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NotificationChannel'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    AlertRuleResponse:
+      description: Alert rule
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/AlertRule'
+    AlertRuleListResponse:
+      description: Alert rule list
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AlertRule'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    DDNSProfileResponse:
+      description: DDNS profile
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/DDNSProfile'
+    DDNSProviderListResponse:
+      description: DDNS provider metadata list
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DDNSProvider'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    DDNSProfileListResponse:
+      description: DDNS profile list
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DDNSProfile'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    NATTunnelResponse:
+      description: NAT tunnel
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/NATTunnel'
+    NATTunnelListResponse:
+      description: NAT tunnel list
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NATTunnel'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    BotSettingsResponse:
+      description: Telegram Bot settings
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/BotSettings'
+    BotTestResponse:
+      description: Telegram Bot token test
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/BotTest'
+    BotAITestResponse:
+      description: AI 大模型连通性测试
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/BotAITest'
+    BotChatResponse:
+      description: Telegram Bot chat
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/BotChat'
+    BotChatListResponse:
+      description: Telegram Bot chat list
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/BotChat'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    BotBindCodeResponse:
+      description: Telegram Bot bind code
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/BotBindCode'
+    BotBindCodeListResponse:
+      description: Telegram Bot bind code list
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/BotBindCode'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    BotReportResponse:
+      description: Telegram Bot report
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/BotReport'
+    BotReportListResponse:
+      description: Telegram Bot report list
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/BotReport'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    TrafficPolicyResponse:
+      description: Traffic policy
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/TrafficPolicy'
+    TrafficPolicyListResponse:
+      description: Traffic policy list
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TrafficPolicy'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    TrafficUsageResponse:
+      description: Traffic usage
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/TrafficUsage'
+    TrafficHistoryListResponse:
+      description: Traffic policy history
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TrafficPolicyHistory'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    APITokenResponse:
+      description: API token
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/APIToken'
+    APITokenListResponse:
+      description: API token list
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/APIToken'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    CollectorResponse:
+      description: Collector
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/Collector'
+    CollectorCreatedResponse:
+      description: Created collector and its registration token
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/CollectorCreated'
+    CollectorListResponse:
+      description: Collector list
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Collector'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    CollectorInstallPreviewResponse:
+      description: Collector install command preview
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/CollectorInstallPreview'
+    CollectorTokenResponse:
+      description: Collector registration token
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/CollectorToken'
+    DatabaseStatusResponse:
+      description: Primary SQLite size and optimize status
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/DatabaseStatus'
+    ConnectionSummaryResponse:
+      description: Connection observation summary
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/ConnectionSummary'
+    ConnectionPathListResponse:
+      description: Node-observer connection paths
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConnectionPath'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    ConnectionLatencyListResponse:
+      description: Connection latency history buckets
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConnectionLatencyBucket'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    ProbeSummaryResponse:
+      description: Probe collector summary
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/ProbeSummary'
+    ProbePathListResponse:
+      description: Probe paths
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ProbePath'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    ProbeSampleListResponse:
+      description: Probe sample history
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ProbeSampleBucket'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    ProbeTraceResponse:
+      description: Latest MTR trace; data is null when none exists
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                type: object
+                nullable: true
+                allOf:
+                - $ref: '#/components/schemas/ProbeTrace'
+    ProbeRouteResponse:
+      description: Recent nexttrace routes; data is null when collector or server is missing
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                type: object
+                nullable: true
+                allOf:
+                - $ref: '#/components/schemas/ProbeRouteHistory'
+    ProbeRouteJobResponse:
+      description: On-demand route job
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            properties:
+              data:
+                $ref: '#/components/schemas/ProbeRouteJob'
+    ObserverAssignmentListResponse:
+      description: Observer assignments
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ObserverAssignmentRecord'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    AgentReliabilityListResponse:
+      description: Agent reliability
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AgentReliabilityRecord'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    IncidentListResponse:
+      description: Availability incidents
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/IncidentRecord'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    IncidentRevisionListResponse:
+      description: Incident revisions
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/IncidentRevisionRecord'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    TelemetryDataLossListResponse:
+      description: Telemetry data loss
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TelemetryDataLossRecord'
+              meta:
+                $ref: '#/components/schemas/Meta'
+    TelemetryAlertListResponse:
+      description: Telemetry alerts
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - data
+            - meta
+            properties:
+              data:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TelemetryAlertRecord'
+              meta:
+                $ref: '#/components/schemas/Meta'

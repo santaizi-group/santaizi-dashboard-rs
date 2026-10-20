@@ -1,0 +1,71 @@
+[package]
+name = "santaizi-dashboard"
+version = "0.1.0"
+edition = "2024"
+description = "Santaizi dashboard (Rust): primary panel and collector"
+license = "Apache-2.0"
+repository = "https://github.com/santaizi-group/santaizi-dashboard-rs"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+serde_yaml = "0.9.34"
+toml = "0.8"
+sha2 = "0.11.0"
+hmac = "0.13.0"
+hex = "0.4.3"
+base64 = "0.22.1"
+subtle = "2.6.1"
+uuid = { version = "1.27.0", features = ["v4"] }
+rand = "0.10.2"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "time", "net", "sync", "io-util", "fs", "process"] }
+tokio-stream = "0.1.19"
+tokio-util = { version = "0.7.19", features = ["codec"] }
+tonic = { version = "0.14.6", features = ["tls-ring", "tls-webpki-roots"] }
+tonic-health = "0.14.6"
+tonic-prost = "0.14.6"
+prost = "0.14.4"
+prost-types = "0.14.4"
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = "0.26.4"
+rustls-pemfile = "2.2.0"
+rustls-pki-types = "1.15.1"
+rcgen = { version = "0.14.9", features = ["x509-parser"] }
+x509-parser = "0.16.0"
+ed25519-dalek = "2.2"
+aes-gcm = "0.10.3"
+thiserror = "2.0.18"
+time = "0.3.55"
+rusqlite = { version = "0.32", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
+libc = "0.2"
+axum = { version = "0.8.9", features = ["ws"] }
+tower-http = { version = "0.6.11", features = ["fs", "cors", "trace", "set-header"] }
+rust-embed = "8"
+maxminddb = "0.24"
+cron = "0.15"
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-webpki-roots", "json", "blocking"] }
+url = "2.5.8"
+socket2 = { version = "0.6.5", features = ["all"] }
+hickory-resolver = { version = "0.26.3", default-features = false, features = ["tokio"] }
+futures-util = "0.3.34"
+http = "1"
+tower-layer = "0.3.3"
+tower-service = "0.3.3"
+
+[build-dependencies]
+tonic-prost-build = "0.14.6"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[dev-dependencies]
+tokio-tungstenite = "0.24"
+futures-util = "0.3.34"

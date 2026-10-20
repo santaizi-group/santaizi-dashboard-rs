@@ -1,0 +1,219 @@
+:root {
+  color-scheme: light;
+  --sz-primary: #2563eb;
+  --sz-primary-hover: #1d4ed8;
+  --sz-primary-soft: #eff6ff;
+  --sz-success: #059669;
+  --sz-warning: #d97706;
+  --sz-danger: #dc2626;
+  --sz-info: #0891b2;
+  --sz-bg: #f5f7fb;
+  --sz-surface: #ffffff;
+  --sz-surface-raised: #ffffff;
+  --sz-muted: #eef1f6;
+  --sz-text: #172033;
+  --sz-text-secondary: #3f4b63;
+  --sz-text-muted: #667085;
+  --sz-border: #e4e9f2;
+  --sz-border-subtle: #eef1f6;
+  --sz-radius: 12px;
+  --sz-shadow: 0 10px 32px rgba(35, 50, 80, .07);
+  --sz-sidebar: #ffffff;
+  --sz-sidebar-text: #344054;
+  --sz-sidebar-hover: #f2f4f7;
+  --sz-sidebar-active: #eff6ff;
+  --sz-sidebar-active-text: #1d4ed8;
+  --sz-focus: 0 0 0 3px rgba(37, 99, 235, .24);
+  /* 与 theme-nazhua 详情页地球同调（Canvas 直接读取，含透明度） */
+  --sz-globe-ocean: #d7e2ea;
+  --sz-globe-land: #5b7382;
+  --sz-globe-land-stroke: rgba(30, 41, 51, .28);
+  --sz-globe-sphere-stroke: rgba(51, 65, 85, .28);
+  --sz-globe-graticule: rgba(51, 65, 85, .16);
+  --sz-globe-highlight: #0e7490;
+  --sz-globe-glow: rgba(15, 23, 42, .12);
+
+  /* aliases used by shared ui / EP bridge (map to --sz-*) */
+  --bg: var(--sz-bg);
+  --bg-elevated: var(--sz-surface);
+  --bg-muted: var(--sz-muted);
+  --text: var(--sz-text);
+  --text-secondary: var(--sz-text-secondary);
+  --text-muted: var(--sz-text-muted);
+  --border: var(--sz-border);
+  --border-subtle: var(--sz-border-subtle);
+  --accent: var(--sz-primary);
+  --accent-hover: var(--sz-primary-hover);
+  --accent-soft: var(--sz-primary-soft);
+  --danger: var(--sz-danger);
+  --success: var(--sz-success);
+  --warning: var(--sz-warning);
+
+  --icon-text-gap: 6px;
+  --icon-size: 18px;
+  --icon-size-inline: 14px;
+  --icon-text-offset-y: -1px;
+
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 16px;
+  --radius-pill: 9999px;
+  --sz-radius-sm: var(--radius-sm);
+  --sz-radius-lg: var(--radius-lg);
+  --sz-radius-pill: var(--radius-pill);
+
+  --space-1: 4px;
+  --space-2: 6px;
+  --space-3: 8px;
+  --space-4: 12px;
+  --space-5: 16px;
+  --space-6: 20px;
+  --space-7: 24px;
+  --layout-gap: var(--space-4);
+  --layout-gap-lg: var(--space-6);
+  --card-padding-y: 22px;
+  --card-padding-x: 24px;
+  --control-padding-x: 15px;
+  --tag-padding-x: 10px;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-raised: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --shadow-overlay: 0 12px 40px rgba(0, 0, 0, 0.12);
+  --sz-shadow-raised: var(--shadow-raised);
+  --sz-shadow-overlay: var(--shadow-overlay);
+
+  --transition-fast: 0.15s ease;
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-page-in: 0.34s;
+  --duration-page-out: 0.18s;
+
+  --skeleton-base: var(--bg-muted);
+  --skeleton-highlight: rgba(255, 255, 255, 0.55);
+  --skeleton-radius: var(--radius-sm);
+  --duration-skeleton: 1.2s;
+  --sz-loading-mask: color-mix(in srgb, var(--sz-surface) 78%, transparent);
+
+  --font-size-min: 12px;
+  --font-size-caption: 12px;
+  --font-size-secondary: 13px;
+  --font-size-body: 14px;
+  --font-size-title: 15px;
+  --font-size-heading: 18px;
+  --font-size-display: 22px;
+  --line-height-tight: 1.25;
+  --line-height-body: 1.5;
+  --line-height-relaxed: 1.7;
+  --touch-min: 32px;
+  --touch-min-mobile: 44px;
+  --control-height: 36px;
+
+  --sz-font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    'SF Pro Text',
+    'SF Pro Display',
+    'Segoe UI',
+    'PingFang SC',
+    'Noto Sans SC',
+    'Microsoft YaHei',
+    sans-serif;
+}
+
+html.dark,
+:root.dark {
+  color-scheme: dark;
+  --sz-primary: #60a5fa;
+  --sz-primary-hover: #93c5fd;
+  --sz-primary-soft: #172554;
+  --sz-success: #34d399;
+  --sz-warning: #fbbf24;
+  --sz-danger: #f87171;
+  --sz-info: #22d3ee;
+  --sz-bg: #0b1120;
+  --sz-surface: #111827;
+  --sz-surface-raised: #182234;
+  --sz-muted: #1a2436;
+  --sz-text: #f8fafc;
+  --sz-text-secondary: #d0d7e4;
+  --sz-text-muted: #a8b2c3;
+  --sz-border: #263449;
+  --sz-border-subtle: #1c2738;
+  --sz-shadow: 0 14px 36px rgba(0, 0, 0, .28);
+  --sz-sidebar: #070b13;
+  --sz-sidebar-text: #d7deea;
+  --sz-sidebar-hover: #151d2b;
+  --sz-sidebar-active: #172554;
+  --sz-sidebar-active-text: #f8fafc;
+  --sz-focus: 0 0 0 3px rgba(96, 165, 250, .28);
+  --sz-globe-ocean: #0b2833;
+  --sz-globe-land: #5e8fa3;
+  --sz-globe-land-stroke: rgba(180, 236, 248, .35);
+  --sz-globe-sphere-stroke: rgba(144, 242, 255, .5);
+  --sz-globe-graticule: rgba(144, 242, 255, .16);
+  --sz-globe-highlight: #2bc4dd;
+  --sz-globe-glow: rgba(0, 212, 255, .42);
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-raised: 0 4px 18px rgba(0, 0, 0, 0.4);
+  --shadow-overlay: 0 12px 40px rgba(0, 0, 0, 0.5);
+  --skeleton-highlight: rgba(255, 255, 255, 0.1);
+  --sz-loading-mask: color-mix(in srgb, var(--sz-surface) 78%, transparent);
+}
+
+html {
+  font-size: 16px;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { min-height: 100%; margin: 0; }
+body {
+  background: var(--sz-bg);
+  color: var(--sz-text);
+  font-family: var(--sz-font-family);
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+button, input, textarea, select { font: inherit; font-family: inherit; }
+a { color: inherit; }
+:focus-visible { outline: none; box-shadow: var(--sz-focus); }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+button { gap: var(--icon-text-gap); }
+
+.icon-text {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--icon-text-gap);
+  line-height: 1;
+  min-width: 0;
+}
+.icon-text > i,
+.icon-text > svg,
+.icon-inline {
+  display: block;
+  flex-shrink: 0;
+  position: relative;
+  top: var(--icon-text-offset-y);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: .01ms !important;
+  }
+}

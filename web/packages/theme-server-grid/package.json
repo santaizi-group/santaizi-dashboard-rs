@@ -1,0 +1,30 @@
+{
+  "name": "@santaizi/theme-server-grid",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./theme.css": "./src/styles/theme.css",
+    "./pages/*": "./src/pages/*"
+  },
+  "peerDependencies": {
+    "@santaizi/api": "workspace:*",
+    "@santaizi/design": "workspace:*",
+    "@santaizi/i18n": "workspace:*",
+    "@santaizi/status-core": "workspace:*",
+    "@santaizi/theme-server-status": "workspace:*",
+    "@santaizi/ui": "workspace:*",
+    "echarts": ">=6.0.0",
+    "element-plus": ">=2.0.0",
+    "flag-icons": ">=7.0.0",
+    "font-logos": ">=1.3.0",
+    "vue": ">=3.5.0",
+    "vue-i18n": ">=11.0.0",
+    "vue-router": ">=5.0.0"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "vue": "3.5.41"
+  }
+}

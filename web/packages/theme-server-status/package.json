@@ -1,0 +1,32 @@
+{
+  "name": "@santaizi/theme-server-status",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./theme.css": "./src/styles/theme.css",
+    "./pages/*": "./src/pages/*"
+  },
+  "dependencies": {
+    "@santaizi/geo": "workspace:*",
+    "d3-geo": "3.1.1"
+  },
+  "peerDependencies": {
+    "@santaizi/api": "workspace:*",
+    "@santaizi/design": "workspace:*",
+    "@santaizi/i18n": "workspace:*",
+    "@santaizi/status-core": "workspace:*",
+    "@santaizi/ui": "workspace:*",
+    "echarts": ">=6.0.0",
+    "element-plus": ">=2.0.0",
+    "vue": ">=3.5.0",
+    "vue-i18n": ">=11.0.0",
+    "vue-router": ">=5.0.0"
+  },
+  "devDependencies": {
+    "@types/d3-geo": "3.1.1",
+    "typescript": "6.0.3",
+    "vue": "3.5.41"
+  }
+}

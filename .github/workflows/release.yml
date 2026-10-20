@@ -1,0 +1,147 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            goos: linux
+            goarch: amd64
+          - target: aarch64-unknown-linux-gnu
+            goos: linux
+            goarch: arm64
+
+    name: Build artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Invalid tag: $tag"
+            echo "Expected SemVer vMAJOR.MINOR.PATCH (v0.x allowed)"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install aarch64 GNU toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Sync crate version from tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          # 只改 [package] 的 version，不动依赖版本。
+          sed -i '0,/^version = /s/^version = ".*"/version = "'"${version}"'"/' Cargo.toml
+
+      # GeoIP 开箱即用：拉真库替换 resource/geoip.db 占位，随二进制内嵌。
+      - name: Fetch GeoIP database
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "geoip_week=$(date -u +%g%V)" >> "$GITHUB_ENV"
+          bash script/fetch-geoip.sh -o resource/geoip.db
+          test -s resource/geoip.db
+
+      # 二进制内嵌前端产物（rust-embed resource/web/）。
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Build web frontend
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          cp "target/${{ matrix.target }}/release/santaizi-dashboard" "bin/santaizi-dashboard-${{ matrix.goos }}-${{ matrix.goarch }}"
+          zip -j -9 "bin/santaizi-dashboard-${{ matrix.goos }}-${{ matrix.goarch }}.zip" "bin/santaizi-dashboard-${{ matrix.goos }}-${{ matrix.goarch }}"
+          rm "bin/santaizi-dashboard-${{ matrix.goos }}-${{ matrix.goarch }}"
+
+      - name: Checksums
+        shell: bash
+        run: sha256sum ./bin/*.zip | awk -F" |/" '{print $1, $NF}' > checksums.txt
+
+      - name: CI release (draft)
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ci-${{ github.run_id }}
+          name: CI ${{ github.run_id }}
+          draft: true
+          prerelease: true
+          artifacts: "checksums.txt,bin/*.zip"
+          body: "GeoIP week: ${{ env.geoip_week }}"
+          generateReleaseNotes: true
+
+      - name: Publish tag release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "checksums.txt,bin/*.zip"
+          body: "GeoIP week: ${{ env.geoip_week }}"
+          generateReleaseNotes: true
+
+  cleanup:
+    name: Cleanup CI release
+    permissions:
+      contents: write
+    if: ${{ always() && github.event_name != 'pull_request' }}
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete temporary CI release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          CI_TAG: ci-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if gh release view "$CI_TAG" >/dev/null 2>&1; then
+            gh release delete "$CI_TAG" --yes
+          else
+            echo "no temporary release $CI_TAG to delete"
+          fi
+          gh api -X DELETE "repos/${GH_REPO}/git/refs/tags/$CI_TAG" >/dev/null 2>&1 || true

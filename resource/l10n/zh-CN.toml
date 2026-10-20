@@ -1,0 +1,1196 @@
+[SantaiziMonitoring]
+other = "三太子监控"
+
+[Server]
+other = "服务器"
+
+[Services]
+other = "服务"
+
+[Notification]
+other = "告警"
+
+[Settings]
+other = "设置"
+
+[Home]
+other = "首页"
+
+[BackToHomepage]
+other = "返回前台"
+
+[AdminPanel]
+other = "管理后台"
+
+[Logout]
+other = "注销登录"
+
+[Login]
+other = "登录"
+
+[ConfirmLogout]
+other = "确定要注销吗？"
+
+[AfterLoggingOutYouHaveToLoginAgain]
+other = "注销后需重新登录以继续使用"
+
+[Cancel]
+other = "取消"
+
+[Confirm]
+other = "确认"
+
+[Name]
+other = "名称"
+
+[BackUp]
+other = "备份"
+
+[3amDaily]
+other = "(每天3点)"
+
+[Coverage]
+other = "覆盖范围"
+
+[IgnoreAllAndExecuteOnlyThroughSpecificServers]
+other = "忽略所有，仅通过特定服务器执行"
+
+[AllIncludedOnlySpecificServersAreNotExecuted]
+other = "覆盖所有，仅特定服务器不执行"
+
+[SpecificServers]
+other = "特定服务器"
+
+[EnterIdAndNameToSearch]
+other = "输入ID/名称以搜索"
+
+[NotificationMethodGroup]
+other = "通知方式组"
+
+[AddMonitor]
+other = "新增监控"
+
+[Blog]
+other = "博客"
+
+[Target]
+other = "目标"
+
+[Type]
+other = "类型"
+
+[SslExpirationOrChange]
+other = "(SSL到期、变更)"
+
+[Duration]
+other = "请求间隔"
+
+[Seconds]
+other = "秒"
+
+[EnableFailureNotification]
+other = "启用故障通知"
+
+[FailureNotification]
+other = "故障通知"
+
+[MaxLatency]
+other = "最大延迟(ms)"
+
+[MinLatency]
+other = "最小延迟(ms)"
+
+[EnableLatencyNotification]
+other = "启用延迟通知"
+
+[LatencyNotification]
+other = "延迟通知"
+
+[IntroductionOfMonitor]
+other = """
+类型为 <b>HTTP-GET</b> 时输入URL(带 http/https, HTTPS协议的会顺带监控SSL证书)；<br>
+类型为 <b>ICMP-Ping</b> 时输入域名/IP，不带端口；<br>
+类型为 <b>TCP-Ping</b> 时输入域名/IP + 端口号：example.com:22"""
+
+[AddNotificationMethod]
+other = "新增通知方式"
+
+[Tag]
+other = "分组"
+
+[DoNotSendTestMessages]
+other = "不发送测试信息"
+
+[RequestMethod]
+other = "请求方式"
+
+[RequestType]
+other = "请求类型"
+
+[VerifySSL]
+other = "验证SSL"
+
+[AddNotificationRule]
+other = "新增告警规则"
+
+[Rules]
+other = "规则"
+
+[NotificationTriggerMode]
+other = "通知触发模式"
+
+[ModeAlwaysTrigger]
+other = "始终触发"
+
+[ModeOnetimeTrigger]
+other = "单次触发"
+
+[Enable]
+other = "启用"
+
+[AddServer]
+other = "新增服务器"
+
+[BatchEditServerGroup]
+other = "批量修改分组"
+
+[BatchDeleteServer]
+other = "批量删除服务器"
+
+[InputServerGroupName]
+other = "输入分组名称"
+
+[ServerGroup]
+other = "服务器分组"
+
+[EinsteinLightspeed1]
+other = "爱因斯坦-光速1号"
+
+[DisplayIndex]
+other = "排序"
+
+[TheLargerTheNumberTheHigherThePriority]
+other = "越大越靠前"
+
+[Secret]
+other = "密钥"
+
+[Note]
+other = "备注"
+
+[PublicNote]
+other = "公开备注"
+
+[LinuxOneKeyInstall]
+other = "Linux 一键安装"
+
+[NoDomainAlert]
+other = "请先在设置页面配置 未接入CDN的面板服务器域名/IP"
+
+[PushSuccessfully]
+other = "推送成功"
+
+[LastExecution]
+other = "最近执行"
+
+[LastResult]
+other = "最后结果"
+
+[Administration]
+other = "管理"
+
+[CoverAll]
+other = "覆盖所有"
+
+[IgnoreAll]
+other = "忽略所有"
+
+[ByTrigger]
+other = "触发告警的服务器"
+
+[AccessDenied]
+other = "访问被拒绝"
+
+[Use]
+other = "使用"
+
+[AccountToLogin]
+other = "账号登录"
+
+[SignUp]
+other = "注册"
+
+[DontHaveAnAccount]
+other = "没有账号？"
+
+[SSLCertificate]
+other = "HTTP(S)/SSL证书"
+
+[TCPPort]
+other = "TCPing"
+
+[DeleteService]
+other = "移除服务"
+
+[ConfirmToDeleteThisService]
+other = "确认删除此服务？"
+
+[DeleteNotificationMethod]
+other = "删除通知方式"
+
+[ConfirmToDeleteThisNotificationMethod]
+other = "确认删除此通知方式？"
+
+[SelectAll]
+other = "全选"
+
+[VersionNumber]
+other = "版本号"
+
+[OneKeyInstall]
+other = "一键安装"
+
+[ClickToCopy]
+other = "点击复制"
+
+[InstallScriptNotConfigured]
+other = "未配置安装脚本"
+
+[DeleteServer]
+other = "删除服务器"
+
+[ConfirmToDeleteServer]
+other = "确认删除服务器？"
+
+[ResetSecret]
+other = "重置密钥"
+
+[ConfirmToResetSecret]
+other = "确认重置密钥？原密钥将立即失效，该服务器需要重新使用新密钥连接。"
+
+[NoServerSelected]
+other = "当前没有选中的服务器"
+
+[ExecutionResults]
+other = "执行结果"
+
+[SiteTitle]
+other = "网站标题"
+
+[AdministratorList]
+other = "管理员列表"
+
+[Theme]
+other = "前台界面主题"
+
+[Auto]
+other = "自动"
+
+[CustomCodes]
+other = "自定义代码（包括 style 和 script）"
+
+[CustomCodesDashboard]
+other = "Custom Codes for Dashboard"
+
+[AccessPassword]
+other = "前台访问密码"
+
+[PanelServerDomainAndIP]
+other = "未接入CDN的面板服务器域名/IP"
+
+[IPChangeAlert]
+other = "IP 变动通知"
+
+[AllIncludedOnlySpecificServersAreNotAlerted]
+other = "覆盖所有，仅特定服务器不提醒"
+
+[IgnoreAllOnlyAlertSpecificServers]
+other = "忽略所有，仅提醒特定服务器"
+
+[IgnoreAllRequestOnlyThroughSpecificServers]
+other = "忽略所有，仅通过特定服务器请求"
+
+[AllIncludedOnlySpecificServersAreNotRequest]
+other = "覆盖所有，仅特定服务器不请求"
+
+[ServerIDSeparatedByCommas]
+other = "服务器ID 以逗号隔开"
+
+[IPChangeNotificationTag]
+other = "将提醒发送至指定通知分组"
+
+[NotificationMessagesDoNotHideIP]
+other = "通知信息中显示完整IP地址"
+
+[Save]
+other = "保存"
+
+[ModifiedSuccessfully]
+other = "修改成功"
+
+[Offline]
+other = "已离线"
+
+[Platform]
+other = "系统"
+
+[DiskUsed]
+other = "硬盘"
+
+[MemUsed]
+other = "内存"
+
+[CpuUsed]
+other = "核心"
+
+[Virtualization]
+other = "虚拟化"
+
+[SwapUsed]
+other = "交换"
+
+[NetTransfer]
+other = "流量"
+
+[Load]
+other = "负载"
+
+[ProcessCount]
+other = "进程数"
+
+[ConnCount]
+other = "连接数"
+
+[BootTime]
+other = "启动"
+
+[LastActive]
+other = "活动"
+
+[Version]
+other = "版本"
+
+[NetSpeed]
+other = "网速"
+
+[Uptime]
+other = "在线"
+
+[ServerIsOffline]
+other = "服务器已离线"
+
+[Day]
+other = "天"
+
+[RealtimeChannelEstablished]
+other = "实时通道已建立"
+
+[GetTheLatestMonitoringDataInRealTime]
+other = "可以实时获取最新监控数据啦"
+
+[RealtimeChannelDisconnect]
+other = "实时通道已断开"
+
+[CanNotGetTheLatestMonitoringDataInRealTime]
+other = "无法实时获取最新监控数据咯"
+
+[30DaysOnline]
+other = "近30天可用性"
+
+[Details]
+other = "详情"
+
+[Status]
+other = "状态"
+
+[Availability]
+other = "可用性"
+
+[AverageLatency]
+other = "平均响应时间"
+
+[CycleTransferStats]
+other = "周期性流量统计"
+
+[From]
+other = "起始"
+
+[To]
+other = "结束"
+
+[NextCheck]
+other = "下一次检测"
+
+[CurrentUsage]
+other = "当前用量"
+
+[VerifyPassword]
+other = "验证查看密码"
+
+[LightMode]
+other = "亮色模式"
+
+[DarkMode]
+other = "暗色模式"
+
+[FollowSystem]
+other = "跟随系统"
+
+[GridLayout]
+other = "网格布局"
+
+[ListLayout]
+other = "列表布局"
+
+[EnterPassword]
+other = "请输入密码"
+
+[Location]
+other = "位置"
+
+[Running]
+other = "运行中"
+
+[UpNetTransfer]
+other = "上行"
+
+[DownNetTransfer]
+other = "下行"
+
+[TotalUpNetTransfer]
+other = "总上行"
+
+[TotalDownNetTransfer]
+other = "总下行"
+
+[WrongPassword]
+other = "输入的密码错误"
+
+[AnErrorEccurred]
+other = "发生错误"
+
+[SystemError]
+other = "系统错误"
+
+[NetworkError]
+other = "网络错误"
+
+[ServicesStatus]
+other = "服务状态"
+
+[ServersManagement]
+other = "服务器管理"
+
+[ServicesManagement]
+other = "服务监控"
+
+[ApiManagement]
+other = "API 管理"
+
+[IssueNewApiToken]
+other = "生成Token"
+
+[Token]
+other = "Token"
+
+[DeleteToken]
+other = "删除Token"
+
+[ConfirmToDeleteThisToken]
+other = "确认删除Token"
+
+[YouAreNotAuthorized]
+other = "此页面需要登录"
+
+[WrongAccessPassword]
+other = "访问密码错误"
+
+[Add]
+other = "新增"
+
+[Edit]
+other = "修改"
+
+[AlarmRule]
+other = "告警规则"
+
+[NotificationMethod]
+other = "通知方式"
+
+[Incident]
+other = "事件"
+
+[Resolved]
+other = "恢复"
+
+[StatusDown]
+other = "故障"
+
+[StatusNoData]
+other = "无数据"
+
+[StatusGood]
+other = "正常"
+
+[StatusLowAvailability]
+other = "低可用"
+
+[IPChanged]
+other = "IP变更"
+
+[Transleft]
+other = "剩余流量"
+
+[DashboardTheme]
+other = "后台界面主题"
+
+[Info]
+other = "信息"
+
+[HideForGuest]
+other = "对游客隐藏"
+
+[Menu]
+other = "菜单"
+
+[NetworkSpiter]
+other = "网络"
+
+[EnableShowInService]
+other = "在服务中显示"
+
+[DDNS]
+other = "动态 DNS"
+
+[DDNSProfiles]
+other = "DDNS配置"
+
+[AddDDNSProfile]
+other = "新配置"
+
+[EnableDDNS]
+other = "启用 DDNS"
+
+[EnableIPv4]
+other = "启用 DDNS IPv4"
+
+[EnableIPv6]
+other = "启用 DDNS IPv6"
+
+[DDNSDomain]
+other = "DDNS 域名"
+
+[DDNSDomains]
+other = "域名（逗号分隔）"
+
+[DDNSProvider]
+other = "DDNS 供应商"
+
+[MaxRetries]
+other = "最大重试次数"
+
+[DDNSAccessID]
+other = "DDNS 凭据 1"
+
+[DDNSAccessSecret]
+other = "DDNS 凭据 2"
+
+[DDNSTokenID]
+other = "令牌 ID"
+
+[DDNSTokenSecret]
+other = "令牌 Secret"
+
+[WebhookURL]
+other = "Webhook 地址"
+
+[WebhookMethod]
+other = "Webhook 请求方式"
+
+[WebhookRequestType]
+other = "Webhook 请求类型"
+
+[WebhookHeaders]
+other = "Webhook 请求头"
+
+[WebhookRequestBody]
+other = "Webhook 请求体"
+
+[Feature]
+other = "功能"
+
+[Template]
+other = "主题"
+
+[Stat]
+other = "信息"
+
+[Temperature]
+other = "温度"
+
+[DisableSwitchTemplateInFrontend]
+other = "禁止前台切换模板"
+
+[ServersOnWorldMap]
+other = "服务器世界分布图"
+
+[NAT]
+other = "内网穿透"
+
+[LocalService]
+other = "内网服务"
+
+[LocalServicePlaceholder]
+other = "192.168.1.1:80(带端口)"
+
+[BindHostname]
+other = "绑定域名"
+
+[NetworkSpiterList]
+other = "网络监控"
+
+[Refresh]
+other = "刷新"
+
+[CopyPath]
+other = "复制路径"
+
+[Goto]
+other = "跳往"
+
+[GotoHeadline]
+other = "跳往文件夹"
+
+[GotoGo]
+other = "确认"
+
+[GotoClose]
+other = "取消"
+
+[FMError]
+other = "Agent 返回了错误，请查看控制台获取详细信息。要建立新连接，请重新打开 FM。"
+
+[Remaining]
+other = "剩余"
+
+[Lifetime]
+other = "永续"
+
+[Price]
+other = "价格"
+
+[Expired]
+other = "已到期"
+
+[Days]
+other = "天"
+
+[CustomNameservers]
+other = "自定义DDNS使用的公共DNS服务器（逗号分隔）"
+
+[Plan]
+other = "套餐"
+
+[PublicNoteEditor]
+other = "公开备注编辑器"
+
+[BillingInfo]
+other = "账单信息"
+
+[PlanInfo]
+other = "套餐信息"
+
+[CustomDataNazhua]
+other = "CustomData (Nazhua)"
+
+[CustomDataAobobo]
+other = "CustomData (AoBoBo)"
+
+[RawJSON]
+other = "原始 JSON"
+
+[FinalJSONPreview]
+other = "最终 JSON 预览"
+
+[StartDate]
+other = "开始日期"
+
+[EndDate]
+other = "结束日期"
+
+[AutoRenewal]
+other = "自动续费"
+
+[Amount]
+other = "金额"
+
+[Bandwidth]
+other = "带宽"
+
+[TrafficVol]
+other = "流量"
+
+[TrafficType]
+other = "流量类型"
+
+[NetworkRoute]
+other = "线路"
+
+[Extra]
+other = "额外信息"
+
+[LocationCode]
+other = "位置代码"
+
+[Slogan]
+other = "标语"
+
+[OrderLink]
+other = "购买链接"
+
+[BuyBtnText]
+other = "购买按钮文字"
+
+[BuyBtnIcon]
+other = "购买按钮图标"
+
+[Flag]
+other = "旗帜"
+
+[Latitude]
+other = "纬度"
+
+[Longitude]
+other = "经度"
+
+[LatLng]
+other = "经纬度"
+
+[LocationLabel]
+other = "位置标签"
+
+[ServerBasicInfo]
+other = "基础信息"
+
+[AccessAndVisibility]
+other = "接入与可见性"
+
+[InternalNote]
+other = "内部备注"
+
+[UnlimitedDuration]
+other = "无限时长"
+
+[BillingCycle]
+other = "账单周期"
+
+[AmountPlaceholder]
+other = "格式如 $9.99、€19.92、¥199、19.99HKD、9.99USD、49.99CNY"
+
+[BillingCyclePlaceholder]
+other = "请输入账单周期；不执行自动续费时可任意填写"
+
+[BandwidthPlaceholder]
+other = "格式如 30Mbps、1Gbps、Unlimited"
+
+[TrafficVolPlaceholder]
+other = "格式如 1TB/月、500GB/月、Unlimited"
+
+[NetworkRoutePlaceholder]
+other = "输入网络标签后按回车添加"
+
+[ExtraPlaceholder]
+other = "输入其他标签后按回车添加"
+
+[LocationCodePlaceholder]
+other = "请输入位置代码"
+
+[FlagPlaceholder]
+other = "请输入旗帜代码，可使用国家/地区 code 或英文名称"
+
+[OrderLinkPlaceholder]
+other = "请输入购买链接，无需执行 encodeURIComponent"
+
+[BuyBtnTextPlaceholder]
+other = "留空默认为：购买"
+
+[BuyBtnIconPlaceholder]
+other = "适配 Remix Icon 图标库"
+
+[SloganPlaceholder]
+other = "介绍服务器的标语，支持简单 HTML"
+
+[TrafficOutboundOnly]
+other = "单向出流量"
+
+[TrafficBidirectional]
+other = "双向流量"
+
+[TrafficMaxInOut]
+other = "入出取最大"
+
+[AlertRuleEditor]
+other = "告警规则编辑器"
+
+[AddRule]
+other = "添加规则"
+
+[RuleType]
+other = "规则类型"
+
+[MinThreshold]
+other = "最小阈值"
+
+[MaxThreshold]
+other = "最大阈值"
+
+[CycleStart]
+other = "周期开始"
+
+[CycleInterval]
+other = "周期间隔"
+
+[CycleUnit]
+other = "周期单位"
+
+[Rule]
+other = "规则"
+
+[RuleTypeDesc_cpu]
+other = "CPU 使用率"
+
+[RuleTypeDesc_memory]
+other = "内存使用率"
+
+[RuleTypeDesc_swap]
+other = "Swap 使用率"
+
+[RuleTypeDesc_disk]
+other = "磁盘使用率"
+
+[RuleTypeDesc_net_in_speed]
+other = "下载速度"
+
+[RuleTypeDesc_net_out_speed]
+other = "上传速度"
+
+[RuleTypeDesc_net_all_speed]
+other = "总网速"
+
+[RuleTypeDesc_transfer_in]
+other = "入站流量"
+
+[RuleTypeDesc_transfer_out]
+other = "出站流量"
+
+[RuleTypeDesc_transfer_all]
+other = "总流量"
+
+[RuleTypeDesc_transfer_in_cycle]
+other = "周期内入站流量"
+
+[RuleTypeDesc_transfer_out_cycle]
+other = "周期内出站流量"
+
+[RuleTypeDesc_transfer_all_cycle]
+other = "周期内总流量"
+
+[RuleTypeDesc_offline]
+other = "离线"
+
+[RuleTypeDesc_load1]
+other = "1 分钟负载"
+
+[RuleTypeDesc_load5]
+other = "5 分钟负载"
+
+[RuleTypeDesc_load15]
+other = "15 分钟负载"
+
+[RuleTypeDesc_tcp_conn_count]
+other = "TCP 连接数"
+
+[RuleTypeDesc_udp_conn_count]
+other = "UDP 连接数"
+
+[RuleTypeDesc_process_count]
+other = "进程数"
+
+[RuleTypeDesc_temperature_max]
+other = "最大温度"
+
+[RemoveRule]
+other = "删除规则"
+
+[EditRawJSON]
+other = "编辑原始 JSON"
+
+[VisualEditor]
+other = "可视化编辑器"
+
+[PleaseEnterValidJSON]
+other = "请输入有效的 JSON"
+
+[ConfirmCloseModal]
+other = "确定要关闭吗？未保存的更改将丢失。"
+
+[Month]
+other = "月"
+
+[Cycle]
+other = "周期"
+
+[Yes]
+other = "是"
+
+[No]
+other = "否"
+
+[SupportsAllNazhuaFieldsAndExtraLocationFields]
+other = "支持 Nazhua 的所有字段，并额外包含 3D 地球定位相关字段"
+
+[RuleTypeCpu]
+other = "CPU"
+
+[RuleTypeMemory]
+other = "内存"
+
+[RuleTypeSwap]
+other = "交换"
+
+[RuleTypeDisk]
+other = "硬盘"
+
+[RuleTypeNetInSpeed]
+other = "入网速度"
+
+[RuleTypeNetOutSpeed]
+other = "出网速度"
+
+[RuleTypeNetAllSpeed]
+other = "全部网速"
+
+[RuleTypeTransferIn]
+other = "入网流量"
+
+[RuleTypeTransferOut]
+other = "出网流量"
+
+[RuleTypeTransferAll]
+other = "全部流量"
+
+[RuleTypeTransferInCycle]
+other = "入网周期流量"
+
+[RuleTypeTransferOutCycle]
+other = "出网周期流量"
+
+[RuleTypeTransferAllCycle]
+other = "全部周期流量"
+
+[RuleTypeOffline]
+other = "离线"
+
+[RuleTypeLoad1]
+other = "负载 1"
+
+[RuleTypeLoad5]
+other = "负载 5"
+
+[RuleTypeLoad15]
+other = "负载 15"
+
+[RuleTypeTcpConnCount]
+other = "TCP 连接数"
+
+[RuleTypeUdpConnCount]
+other = "UDP 连接数"
+
+[RuleTypeProcessCount]
+other = "进程数"
+
+[RuleTypeTemperatureMax]
+other = "最高温度"
+
+[CycleUnitHour]
+other = "小时"
+
+[CycleUnitDay]
+other = "天"
+
+[CycleUnitWeek]
+other = "周"
+
+[CycleUnitMonth]
+other = "月"
+
+[CycleUnitYear]
+other = "年"
+
+[PleaseSelect]
+other = "请选择"
+
+[Loading]
+other = "加载中"
+
+[NoData]
+other = "无数据"
+
+[NoMatch]
+other = "无匹配数据"
+
+[Telemetry]
+other = "探测"
+
+[TelemetryReliability]
+other = "探测可靠性"
+
+[TelemetryReliabilityDescription]
+other = "查看从端、观测点、探针传输、故障修正与数据丢失情况"
+
+[TelemetryCollectors]
+other = "从端"
+
+[TelemetryObserverAssignments]
+other = "观测点分配"
+
+[TelemetryAgentDelivery]
+other = "探针缓存与发送状态"
+
+[TelemetryIncidentRevisions]
+other = "故障判定修正"
+
+[TelemetryDataLoss]
+other = "探测数据丢失"
+
+[TelemetryAlerts]
+other = "探测告警"
+
+[TelemetryCollectorID]
+other = "从端标识"
+
+[TelemetryAddress]
+other = "地址"
+
+[TelemetryGeneration]
+other = "代次"
+
+[TelemetryConfigVersion]
+other = "配置版本"
+
+[TelemetryObserver]
+other = "观测点"
+
+[TelemetryNodeID]
+other = "节点标识"
+
+[TelemetryEffectiveFrom]
+other = "生效时间"
+
+[TelemetryLocalBufferPressure]
+other = "本地缓存压力"
+
+[TelemetryBufferedData]
+other = "缓存占用"
+
+[TelemetryPendingRecords]
+other = "待发送记录"
+
+[TelemetryProtocolVersion]
+other = "协议版本"
+
+[TelemetryInitialClassification]
+other = "初始判定"
+
+[TelemetryCurrentClassification]
+other = "当前判定"
+
+[TelemetryRevision]
+other = "修订版本"
+
+[TelemetryStartedAt]
+other = "开始时间"
+
+[TelemetryComponent]
+other = "组件"
+
+[TelemetryLossReason]
+other = "丢失原因"
+
+[TelemetryLostRecords]
+other = "丢失条数"
+
+[TelemetryAlertType]
+other = "告警类型"
+
+[TelemetrySeverity]
+other = "级别"
+
+[TelemetryMessage]
+other = "消息"
+
+[TelemetryNotified]
+other = "已通知"
+
+[TelemetryActive]
+other = "正常"
+
+[TelemetryRevoked]
+other = "已撤销"
+
+[TelemetryYes]
+other = "是"
+
+[TelemetryNo]
+other = "否"
+
+[TelemetryUnknown]
+other = "未知"
+
+[TelemetryWalHealthy]
+other = "正常"
+
+[TelemetryWalDownsampled]
+other = "已降低低优先级采样"
+
+[TelemetryWalRollup]
+other = "已启用分钟聚合"
+
+[TelemetryWalCritical]
+other = "空间紧张"
+
+[TelemetryWalDataLoss]
+other = "已发生数据丢失"
+
+[TelemetryLossCompacted]
+other = "降采样或聚合替代"
+
+[TelemetryLossHardLimit]
+other = "达到容量上限"
+
+[TelemetryLossCorruption]
+other = "缓存文件损坏"
+
+[TelemetryAlertHostOffline]
+other = "主机离线"
+
+[TelemetryAlertConnectivityDegraded]
+other = "连接质量下降"
+
+[TelemetryAlertCollectorOffline]
+other = "从端离线"
+
+[TelemetryAlertCollectorOnline]
+other = "从端上线"
+
+[TelemetryAlertDataLoss]
+other = "探测数据丢失"
+
+[TelemetrySeverityCritical]
+other = "严重"
+
+[TelemetrySeverityWarning]
+other = "警告"
+
+[TelemetrySeverityInfo]
+other = "信息"

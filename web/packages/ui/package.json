@@ -1,0 +1,22 @@
+{
+  "name": "@santaizi/ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./AppDialog.vue": "./src/AppDialog.vue",
+    "./AppDrawer.vue": "./src/AppDrawer.vue",
+    "./AppEmpty.vue": "./src/AppEmpty.vue",
+    "./AppSkeleton.vue": "./src/AppSkeleton.vue"
+  },
+  "peerDependencies": {
+    "element-plus": ">=2.0.0",
+    "vue": ">=3.5.0",
+    "vue-i18n": ">=11.0.0"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "vue": "3.5.41"
+  }
+}

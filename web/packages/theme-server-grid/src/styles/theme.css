@@ -1,0 +1,194 @@
+/* ServerGrid 方块矩阵。壳、工具条、抽屉、弹层样式由常驻加载的 theme-server-status/theme.css 提供；
+   本文件只负责 sg-* 矩阵层，颜色全部走 --sz-* / --ss-* 令牌，深浅色免双份。 */
+
+.sg-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+  padding: 14px 16px 16px;
+}
+
+.sg-tile {
+  min-width: 0;
+}
+.sg-tile.is-offline {
+  opacity: 0.86;
+}
+
+.sg-tile__main {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  height: 100%;
+  padding: 12px;
+  text-align: left;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--sz-text);
+  background: var(--sz-surface);
+  border: 1px solid var(--sz-border);
+  border-radius: var(--sz-radius);
+  cursor: pointer;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.sg-tile__main:hover {
+  border-color: color-mix(in srgb, var(--ss-accent) 42%, var(--sz-border));
+  box-shadow: var(--sz-shadow);
+}
+.sg-tile__main:focus-visible {
+  outline: none;
+  box-shadow: var(--sz-focus);
+}
+
+.sg-tile__head {
+  display: flex;
+  align-items: center;
+  gap: var(--icon-text-gap, 6px);
+  min-width: 0;
+  line-height: 1;
+}
+.sg-tile__head .status-dot {
+  margin: 0;
+}
+.sg-tile__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+.sg-tile__head .ss-chip {
+  flex-shrink: 0;
+}
+
+.sg-tile__sub,
+.sg-tile__loc {
+  display: flex;
+  align-items: center;
+  gap: var(--icon-text-gap, 6px);
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--sz-text-secondary);
+}
+.sg-tile__os {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sg-tile__loc .ss-chip {
+  min-width: 0;
+  overflow: hidden;
+}
+.sg-tile__loc .ss-chip > * {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sg-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sg-bar {
+  display: grid;
+  grid-template-columns: 3.8em minmax(0, 1fr) 46px;
+  align-items: center;
+  gap: var(--icon-text-gap, 6px);
+  font-size: 12px;
+  line-height: 1;
+}
+.sg-bar__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--sz-text-muted);
+}
+.sg-bar__track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--sz-muted);
+}
+.sg-bar__fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--ss-accent);
+  transition: width 0.3s ease;
+}
+.sg-bar__fill--warn {
+  background: var(--sz-warning);
+}
+.sg-bar__fill--danger {
+  background: var(--sz-danger);
+}
+.sg-bar__value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--sz-text-secondary);
+}
+
+.sg-tile__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--icon-text-gap, 6px);
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+.sg-tile__speed {
+  color: var(--sz-text-secondary);
+  white-space: nowrap;
+}
+.sg-tile__traffic {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sg-tile__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.sg-tile__meta .meta-tag,
+.sg-tile__meta .ss-chip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 860px) {
+  .sg-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    padding: 12px;
+  }
+}
+
+@media (max-width: 520px) {
+  .sg-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sg-tile__main,
+  .sg-bar__fill {
+    transition: none;
+  }
+}

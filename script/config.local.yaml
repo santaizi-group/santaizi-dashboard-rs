@@ -1,0 +1,24 @@
+# 本地 Primary 开发配置模板（由 script/start-local.sh 复制到 data/dashboard.yaml）。
+# mock OAuth 仅在 debug: true 时可用，切勿用于生产。
+
+debug: true
+mode: primary
+httpport: 8000
+grpcport: 5555
+grpchost: 127.0.0.1
+language: zh-CN
+
+oauth2:
+  type: mock
+  admin: "admin"
+
+site:
+  brand: "三太子监控（本地）"
+  cookiename: "santaizi-dashboard"
+  primarycolor: "#2563eb"
+
+web:
+  delivery: embedded
+
+telemetry:
+  data_dir: "./data"

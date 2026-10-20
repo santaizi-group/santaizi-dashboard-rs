@@ -1,0 +1,22 @@
+{
+  "name": "@santaizi/api-docs",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vitepress dev docs",
+    "build": "vitepress build docs",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@santaizi/design": "workspace:*",
+    "redoc": "2.5.0",
+    "remixicon": "4.9.1",
+    "vitepress": "1.6.4",
+    "vue": "3.5.41"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "vue-tsc": "3.3.9"
+  }
+}

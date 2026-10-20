@@ -1,0 +1,1196 @@
+[SantaiziMonitoring]
+other = "Santaizi Monitoring"
+
+[Server]
+other = "Servidores"
+
+[Services]
+other = "Servicios"
+
+[Notification]
+other = "Notificaciones"
+
+[Settings]
+other = "Configuraciones"
+
+[Home]
+other = "Inicio"
+
+[BackToHomepage]
+other = "Volver al Inicio"
+
+[AdminPanel]
+other = "Panel de Administración"
+
+[Logout]
+other = "Cerrar Sesión"
+
+[Login]
+other = "Iniciar Sesión"
+
+[ConfirmLogout]
+other = "¿Confirmar Cierre de Sesión?"
+
+[AfterLoggingOutYouHaveToLoginAgain]
+other = "Después de cerrar sesión, debe iniciar sesión nuevamente para continuar"
+
+[Cancel]
+other = "Cancelar"
+
+[Confirm]
+other = "Confirmar"
+
+[Name]
+other = "Nombre"
+
+[BackUp]
+other = "Respaldo"
+
+[3amDaily]
+other = "(Diariamente a las 3 a.m.)"
+
+[Coverage]
+other = "Cobertura"
+
+[IgnoreAllAndExecuteOnlyThroughSpecificServers]
+other = "Ignorar todo, ejecutar solo a través de servidores específicos"
+
+[AllIncludedOnlySpecificServersAreNotExecuted]
+other = "Incluir todo, excepto servidores específicos"
+
+[SpecificServers]
+other = "Servidores Específicos"
+
+[EnterIdAndNameToSearch]
+other = "Ingrese ID/Nombre para buscar"
+
+[NotificationMethodGroup]
+other = "Grupo de Métodos de Notificación"
+
+[AddMonitor]
+other = "Agregar Monitor de Servicio"
+
+[Blog]
+other = "Blog"
+
+[Target]
+other = "Objetivo"
+
+[Type]
+other = "Tipo"
+
+[SslExpirationOrChange]
+other = "(Expiración o Cambio de SSL)"
+
+[Duration]
+other = "Intervalo de Solicitud"
+
+[Seconds]
+other = "Segundos"
+
+[EnableFailureNotification]
+other = "Habilitar Notificación de Fallo"
+
+[FailureNotification]
+other = "Notificación de Fallo"
+
+[MaxLatency]
+other = "Máxima Latencia (ms)"
+
+[MinLatency]
+other = "Mínima Latencia (ms)"
+
+[EnableLatencyNotification]
+other = "Habilitar Notificación de Latencia"
+
+[LatencyNotification]
+other = "Notificación de Latencia"
+
+[IntroductionOfMonitor]
+other = """
+Para tipo <b>HTTP-GET</b>, ingrese URL (http/https, HTTPS también monitorea el certificado SSL);<br>
+Para tipo <b>ICMP-Ping</b>, ingrese dominio/IP sin puerto;<br>
+Para tipo <b>TCP-Ping</b>, ingrese dominio/IP + puerto: ejemplo.com:22"""
+
+[AddNotificationMethod]
+other = "Agregar Método de Notificación"
+
+[Tag]
+other = "Grupo de servidores"
+
+[DoNotSendTestMessages]
+other = "No Enviar Mensajes de Prueba"
+
+[RequestMethod]
+other = "Método de Solicitud"
+
+[RequestType]
+other = "Tipo de Solicitud"
+
+[VerifySSL]
+other = "Validar SSL"
+
+[AddNotificationRule]
+other = "Agregar Regla de Notificación"
+
+[Rules]
+other = "Reglas"
+
+[NotificationTriggerMode]
+other = "Modo de Disparo de Notificación"
+
+[ModeAlwaysTrigger]
+other = "Siempre Activar"
+
+[ModeOnetimeTrigger]
+other = "Activación Única"
+
+[Enable]
+other = "Habilitar"
+
+[AddServer]
+other = "Agregar Servidor"
+
+[BatchEditServerGroup]
+other = "Editar Grupo de Servidores en Lote"
+
+[BatchDeleteServer]
+other = "Eliminar Servidores en Lote"
+
+[InputServerGroupName]
+other = "Ingrese Nombre del Grupo de Servidores"
+
+[ServerGroup]
+other = "Grupos de Servidores"
+
+[EinsteinLightspeed1]
+other = "Einstein - Velocidad de luz 1"
+
+[DisplayIndex]
+other = "Índice de Visualización"
+
+[TheLargerTheNumberTheHigherThePriority]
+other = "A mayor número, mayor prioridad"
+
+[Secret]
+other = "Secreto"
+
+[Note]
+other = "Nota"
+
+[PublicNote]
+other = "Nota Pública"
+
+[LinuxOneKeyInstall]
+other = "Instalación Linux con Un Solo Clic"
+
+[NoDomainAlert]
+other = "Por favor, configure el dominio o IP del servidor del panel que no está conectado a la CDN en la página de configuración"
+
+[PushSuccessfully]
+other = "Envío Exitoso"
+
+[LastExecution]
+other = "Última Ejecución en"
+
+[LastResult]
+other = "Último Resultado"
+
+[Administration]
+other = "Administración"
+
+[CoverAll]
+other = "Cubrir Todo"
+
+[IgnoreAll]
+other = "Ignorar Todo"
+
+[ByTrigger]
+other = "Servidores con alarma"
+
+[AccessDenied]
+other = "Acceso Denegado"
+
+[Use]
+other = "Usar"
+
+[AccountToLogin]
+other = "Iniciar Sesión con Cuenta"
+
+[SignUp]
+other = "Registrarse"
+
+[DontHaveAnAccount]
+other = "¿No tiene una cuenta?"
+
+[SSLCertificate]
+other = "Certificados HTTP(S)/SSL"
+
+[TCPPort]
+other = "TCPing"
+
+[DeleteService]
+other = "Eliminar Servicio"
+
+[ConfirmToDeleteThisService]
+other = "¿Confirmar para eliminar este Servicio?"
+
+[DeleteNotificationMethod]
+other = "Eliminar Método de Notificación"
+
+[ConfirmToDeleteThisNotificationMethod]
+other = "¿Confirmar para eliminar este Método de Notificación?"
+
+[SelectAll]
+other = "Seleccionar Todo"
+
+[VersionNumber]
+other = "Número de Versión"
+
+[OneKeyInstall]
+other = "Instalación con Un Solo Clic"
+
+[ClickToCopy]
+other = "Hacer Clic para Copiar"
+
+[InstallScriptNotConfigured]
+other = "Script de instalación no configurado"
+
+[DeleteServer]
+other = "Eliminar Servidor"
+
+[ConfirmToDeleteServer]
+other = "¿Confirmar para eliminar este Servidor?"
+
+[ResetSecret]
+other = "Restablecer Secreto"
+
+[ConfirmToResetSecret]
+other = "¿Confirmar restablecimiento del secreto? El secreto anterior quedará invalidado inmediatamente y el agente debe reconectarse con el nuevo secreto."
+
+[NoServerSelected]
+other = "No hay Servidores Seleccionados"
+
+[ExecutionResults]
+other = "Resultados de Ejecución"
+
+[SiteTitle]
+other = "Título del Sitio"
+
+[AdministratorList]
+other = "Lista de Administradores"
+
+[Theme]
+other = "Tema de Frontend"
+
+[Auto]
+other = "Auto"
+
+[CustomCodes]
+other = "Códigos Personalizados (Incluye style y script)"
+
+[CustomCodesDashboard]
+other = "Custom Codes for Dashboard"
+
+[AccessPassword]
+other = "Contraseña de Acceso al Frontend"
+
+[PanelServerDomainAndIP]
+other = "Dominio/IP del Servidor del Panel sin CDN"
+
+[IPChangeAlert]
+other = "Notificación de Cambio de IP"
+
+[AllIncludedOnlySpecificServersAreNotAlerted]
+other = "Incluir Todo, Excepto Servidores Específicos"
+
+[IgnoreAllOnlyAlertSpecificServers]
+other = "Ignorar Todo, Alertar Solo Servidores Específicos"
+
+[IgnoreAllRequestOnlyThroughSpecificServers]
+other = "Ignorar Todo, Solicitar Solo a Través de Servidores Específicos"
+
+[AllIncludedOnlySpecificServersAreNotRequest]
+other = "Incluir Todo, Solo Los Servidores Específicos No Solicitan"
+
+[ServerIDSeparatedByCommas]
+other = "IDs de Servidores Separados por Comas"
+
+[IPChangeNotificationTag]
+other = "Enviar Alerta a Grupo de Notificación Específico"
+
+[NotificationMessagesDoNotHideIP]
+other = "Mostrar Dirección IP Completa en Mensajes de Notificación"
+
+[Save]
+other = "Guardar"
+
+[ModifiedSuccessfully]
+other = "Modificado con Éxito"
+
+[Offline]
+other = "Desconectado"
+
+[Platform]
+other = "Sistema"
+
+[DiskUsed]
+other = "Disco"
+
+[MemUsed]
+other = "Memoria"
+
+[CpuUsed]
+other = "CPU"
+
+[Virtualization]
+other = "Virtualización"
+
+[SwapUsed]
+other = "Swap"
+
+[NetTransfer]
+other = "Transferencia de Red"
+
+[Load]
+other = "Carga"
+
+[ProcessCount]
+other = "Cantidad de Procesos"
+
+[ConnCount]
+other = "Cantidad de Conexiones"
+
+[BootTime]
+other = "Tiempo de Arranque"
+
+[LastActive]
+other = "Última Actividad"
+
+[Version]
+other = "Versión"
+
+[NetSpeed]
+other = "Red"
+
+[Uptime]
+other = "Uptime"
+
+[ServerIsOffline]
+other = "El Servidor está Desconectado"
+
+[Day]
+other = "Días"
+
+[RealtimeChannelEstablished]
+other = "Canal en Tiempo Real Establecido"
+
+[GetTheLatestMonitoringDataInRealTime]
+other = "¡Ahora Puede Obtener los Últimos Datos de Monitoreo en Tiempo Real!"
+
+[RealtimeChannelDisconnect]
+other = "Canal en Tiempo Real Desconectado"
+
+[CanNotGetTheLatestMonitoringDataInRealTime]
+other = "¡No se Pueden Obtener los Últimos Datos de Monitoreo en Tiempo Real!"
+
+[30DaysOnline]
+other = "Disponibilidad de 30 Días"
+
+[Details]
+other = "Detalles"
+
+[Status]
+other = "Estado"
+
+[Availability]
+other = "Disponibilidad"
+
+[AverageLatency]
+other = "Latencia Promedio"
+
+[CycleTransferStats]
+other = "Estadísticas de Transferencia Periódica"
+
+[From]
+other = "Desde"
+
+[To]
+other = "Hasta"
+
+[NextCheck]
+other = "Próxima Verificación"
+
+[CurrentUsage]
+other = "Uso Actual"
+
+[VerifyPassword]
+other = "Verificar Contraseña"
+
+[LightMode]
+other = "Modo Claro"
+
+[DarkMode]
+other = "Modo Oscuro"
+
+[FollowSystem]
+other = "Seguir al Sistema"
+
+[GridLayout]
+other = "Diseño de Cuadrícula"
+
+[ListLayout]
+other = "Diseño de Lista"
+
+[EnterPassword]
+other = "Ingrese Contraseña"
+
+[Location]
+other = "Ubicación"
+
+[Running]
+other = "En Funcionamiento"
+
+[UpNetTransfer]
+other = "Red Ascendente"
+
+[DownNetTransfer]
+other = "Red Descendente"
+
+[TotalUpNetTransfer]
+other = "Total Ascendente"
+
+[TotalDownNetTransfer]
+other = "Total Descendente"
+
+[WrongPassword]
+other = "Contraseña Incorrecta"
+
+[AnErrorEccurred]
+other = "Ocurrió un Error"
+
+[SystemError]
+other = "Error del Sistema"
+
+[NetworkError]
+other = "Error de Red"
+
+[ServicesStatus]
+other = "Estado de los Servicios"
+
+[ServersManagement]
+other = "Gestión de Servidores"
+
+[ServicesManagement]
+other = "Gestión de Servicios"
+
+[ApiManagement]
+other = "Gestión de API"
+
+[IssueNewApiToken]
+other = "Emitir Nuevo Token"
+
+[Token]
+other = "Token"
+
+[DeleteToken]
+other = "Eliminar Token"
+
+[ConfirmToDeleteThisToken]
+other = "¿Confirmar para Eliminar este Token?"
+
+[YouAreNotAuthorized]
+other = "No Autorizado para esta Página"
+
+[WrongAccessPassword]
+other = "Contraseña de Acceso Incorrecta"
+
+[Add]
+other = "Agregar"
+
+[Edit]
+other = "Editar"
+
+[AlarmRule]
+other = "Reglas de Alarma"
+
+[NotificationMethod]
+other = "Método de notificación"
+
+[Incident]
+other = "Incidente"
+
+[Resolved]
+other = "Resuelto"
+
+[StatusDown]
+other = "Caído"
+
+[StatusNoData]
+other = "Sin Datos"
+
+[StatusGood]
+other = "Bueno"
+
+[StatusLowAvailability]
+other = "Baja Disponibilidad"
+
+[IPChanged]
+other = "Cambio de IP"
+
+[Transleft]
+other = "Transferencia Restante"
+
+[DashboardTheme]
+other = "Tema del Panel de Administración"
+
+[Info]
+other = "Información"
+
+[HideForGuest]
+other = "Ocultar para Invitados"
+
+[Menu]
+other = "Menú"
+
+[NetworkSpiter]
+other = "Red"
+
+[EnableShowInService]
+other = "Mostrar en servicio"
+
+[DDNS]
+other = "DNS Dinámico"
+
+[DDNSProfiles]
+other = "Perfiles DDNS"
+
+[AddDDNSProfile]
+other = "Nuevo Perfil"
+
+[EnableDDNS]
+other = "Habilitar DDNS"
+
+[EnableIPv4]
+other = "IPv4 Activado"
+
+[EnableIPv6]
+other = "IPv6 Activado"
+
+[DDNSDomain]
+other = "Dominios"
+
+[DDNSDomains]
+other = "Dominios (separados por comas)"
+
+[DDNSProvider]
+other = "Proveedor DDNS"
+
+[MaxRetries]
+other = "Número máximo de intentos de reintento"
+
+[DDNSAccessID]
+other = "Credencial 1"
+
+[DDNSAccessSecret]
+other = "Credencial 2"
+
+[DDNSTokenID]
+other = "ID del Token"
+
+[DDNSTokenSecret]
+other = "Secreto del Token"
+
+[WebhookURL]
+other = "URL del Webhook"
+
+[WebhookMethod]
+other = "Método de Solicitud del Webhook"
+
+[WebhookRequestType]
+other = "Tipo de solicitud del Webhook"
+
+[WebhookHeaders]
+other = "Encabezados de Solicitud del Webhook"
+
+[WebhookRequestBody]
+other = "Cuerpo de Solicitud del Webhook"
+
+[Feature]
+other = "Característica"
+
+[Template]
+other = "Plantilla"
+
+[Stat]
+other = "Stat"
+
+[Temperature]
+other = "Temperatura"
+
+[DisableSwitchTemplateInFrontend]
+other = "Deshabilitar Cambio de Plantilla en Frontend"
+
+[ServersOnWorldMap]
+other = "Servidores en el mapa mundial"
+
+[NAT]
+other = "NAT traversal"
+
+[LocalService]
+other = "Servicio de red local"
+
+[LocalServicePlaceholder]
+other = "192.168.1.1:80 (con puerto)"
+
+[BindHostname]
+other = "Vincular nombre de host"
+
+[NetworkSpiterList]
+other = "Monitor de red"
+
+[Refresh]
+other = "Actualizar"
+
+[CopyPath]
+other = "Copiar ruta"
+
+[Goto]
+other = "Ir a"
+
+[GotoHeadline]
+other = "Ir a una carpeta"
+
+[GotoGo]
+other = "Ir"
+
+[GotoClose]
+other = "Cancelar"
+
+[FMError]
+other = "Agent devolvió un error, consulte la consola para obtener más detalles. Para abrir una nueva conexión, vuelva a abrir el FM."
+
+[Remaining]
+other = "Remaining"
+
+[Lifetime]
+other = "Lifetime"
+
+[Price]
+other = "Price"
+
+[Expired]
+other = "Expired"
+
+[Days]
+other = "d"
+
+[CustomNameservers]
+other = "Servidores DNS públicos personalizados para DDNS (separar con coma)"
+
+[Plan]
+other = "Plan"
+
+[PublicNoteEditor]
+other = "Editor de Nota Pública"
+
+[BillingInfo]
+other = "Información de Facturación"
+
+[PlanInfo]
+other = "Información del Plan"
+
+[CustomDataNazhua]
+other = "CustomData (Nazhua)"
+
+[CustomDataAobobo]
+other = "CustomData (AoBoBo)"
+
+[RawJSON]
+other = "JSON Crudo"
+
+[FinalJSONPreview]
+other = "Vista previa final de JSON"
+
+[StartDate]
+other = "Fecha de Inicio"
+
+[EndDate]
+other = "Fecha de Fin"
+
+[AutoRenewal]
+other = "Renovación Automática"
+
+[Amount]
+other = "Monto"
+
+[Bandwidth]
+other = "Ancho de Banda"
+
+[TrafficVol]
+other = "Volumen de Tráfico"
+
+[TrafficType]
+other = "Tipo de Tráfico"
+
+[NetworkRoute]
+other = "Ruta de Red"
+
+[Extra]
+other = "Extra"
+
+[LocationCode]
+other = "Código de Ubicación"
+
+[Slogan]
+other = "Eslogan"
+
+[OrderLink]
+other = "Enlace de Compra"
+
+[BuyBtnText]
+other = "Texto del Botón de Compra"
+
+[BuyBtnIcon]
+other = "Icono del Botón de Compra"
+
+[Flag]
+other = "Bandera"
+
+[Latitude]
+other = "Latitud"
+
+[Longitude]
+other = "Longitud"
+
+[LatLng]
+other = "Lat/Lng"
+
+[LocationLabel]
+other = "Etiqueta de Ubicación"
+
+[ServerBasicInfo]
+other = "Información Básica"
+
+[AccessAndVisibility]
+other = "Acceso y Visibilidad"
+
+[InternalNote]
+other = "Nota Interna"
+
+[UnlimitedDuration]
+other = "Ilimitado"
+
+[BillingCycle]
+other = "Ciclo de Facturación"
+
+[AmountPlaceholder]
+other = "Ejemplos: $9.99, €19.92, ¥199, 19.99HKD, 9.99USD, 49.99CNY"
+
+[BillingCyclePlaceholder]
+other = "Introduce un ciclo de facturación; cualquier valor sirve si la renovación automática está desactivada"
+
+[BandwidthPlaceholder]
+other = "Ejemplos: 30Mbps, 1Gbps, Unlimited"
+
+[TrafficVolPlaceholder]
+other = "Ejemplos: 1TB/mes, 500GB/mes, Unlimited"
+
+[NetworkRoutePlaceholder]
+other = "Escribe una etiqueta de red y pulsa Enter"
+
+[ExtraPlaceholder]
+other = "Escribe una etiqueta extra y pulsa Enter"
+
+[LocationCodePlaceholder]
+other = "Introduce un código de ubicación"
+
+[FlagPlaceholder]
+other = "Introduce un código de bandera, código de país/región o nombre en inglés"
+
+[OrderLinkPlaceholder]
+other = "Introduce el enlace de compra; no hace falta encodeURIComponent"
+
+[BuyBtnTextPlaceholder]
+other = "Déjalo vacío para usar: Comprar"
+
+[BuyBtnIconPlaceholder]
+other = "Usa un nombre de Remix Icon"
+
+[SloganPlaceholder]
+other = "Un eslogan corto del servidor; se admite HTML simple"
+
+[TrafficOutboundOnly]
+other = "Solo salida"
+
+[TrafficBidirectional]
+other = "Bidireccional"
+
+[TrafficMaxInOut]
+other = "Máximo de entrada/salida"
+
+[AlertRuleEditor]
+other = "Editor de Reglas de Alerta"
+
+[AddRule]
+other = "Añadir Regla"
+
+[RuleType]
+other = "Tipo de Regla"
+
+[MinThreshold]
+other = "Umbral Mínimo"
+
+[MaxThreshold]
+other = "Umbral Máximo"
+
+[CycleStart]
+other = "Inicio del Ciclo"
+
+[CycleInterval]
+other = "Intervalo del Ciclo"
+
+[CycleUnit]
+other = "Unidad del Ciclo"
+
+[Rule]
+other = "Regla"
+
+[RuleTypeDesc_cpu]
+other = "Uso de CPU"
+
+[RuleTypeDesc_memory]
+other = "Uso de memoria"
+
+[RuleTypeDesc_swap]
+other = "Uso de swap"
+
+[RuleTypeDesc_disk]
+other = "Uso de disco"
+
+[RuleTypeDesc_net_in_speed]
+other = "Velocidad de red entrante"
+
+[RuleTypeDesc_net_out_speed]
+other = "Velocidad de red saliente"
+
+[RuleTypeDesc_net_all_speed]
+other = "Velocidad total de red"
+
+[RuleTypeDesc_transfer_in]
+other = "Tráfico entrante"
+
+[RuleTypeDesc_transfer_out]
+other = "Tráfico saliente"
+
+[RuleTypeDesc_transfer_all]
+other = "Tráfico total"
+
+[RuleTypeDesc_transfer_in_cycle]
+other = "Tráfico entrante en ciclo"
+
+[RuleTypeDesc_transfer_out_cycle]
+other = "Tráfico saliente en ciclo"
+
+[RuleTypeDesc_transfer_all_cycle]
+other = "Tráfico total en ciclo"
+
+[RuleTypeDesc_offline]
+other = "Desconectado"
+
+[RuleTypeDesc_load1]
+other = "Carga promedio de 1 minuto"
+
+[RuleTypeDesc_load5]
+other = "Carga promedio de 5 minutos"
+
+[RuleTypeDesc_load15]
+other = "Carga promedio de 15 minutos"
+
+[RuleTypeDesc_tcp_conn_count]
+other = "Conexiones TCP"
+
+[RuleTypeDesc_udp_conn_count]
+other = "Conexiones UDP"
+
+[RuleTypeDesc_process_count]
+other = "Cantidad de procesos"
+
+[RuleTypeDesc_temperature_max]
+other = "Temperatura máxima"
+
+[RemoveRule]
+other = "Eliminar Regla"
+
+[EditRawJSON]
+other = "Editar JSON Crudo"
+
+[VisualEditor]
+other = "Editor Visual"
+
+[PleaseEnterValidJSON]
+other = "Por favor ingrese JSON válido"
+
+[ConfirmCloseModal]
+other = "¿Estás seguro de que quieres cerrar? Los cambios no guardados se perderán."
+
+[Month]
+other = "Mes"
+
+[Cycle]
+other = "Ciclo"
+
+[Yes]
+other = "Sí"
+
+[No]
+other = "No"
+
+[SupportsAllNazhuaFieldsAndExtraLocationFields]
+other = "Admite todos los campos de Nazhua más campos adicionales de ubicación del globo 3D"
+
+[RuleTypeCpu]
+other = "CPU"
+
+[RuleTypeMemory]
+other = "Memoria"
+
+[RuleTypeSwap]
+other = "Swap"
+
+[RuleTypeDisk]
+other = "Disco"
+
+[RuleTypeNetInSpeed]
+other = "Velocidad de Entrada"
+
+[RuleTypeNetOutSpeed]
+other = "Velocidad de Salida"
+
+[RuleTypeNetAllSpeed]
+other = "Velocidad Total"
+
+[RuleTypeTransferIn]
+other = "Transferencia de Entrada"
+
+[RuleTypeTransferOut]
+other = "Transferencia de Salida"
+
+[RuleTypeTransferAll]
+other = "Transferencia Total"
+
+[RuleTypeTransferInCycle]
+other = "Transferencia de Entrada Ciclo"
+
+[RuleTypeTransferOutCycle]
+other = "Transferencia de Salida Ciclo"
+
+[RuleTypeTransferAllCycle]
+other = "Transferencia Total Ciclo"
+
+[RuleTypeOffline]
+other = "Fuera de Línea"
+
+[RuleTypeLoad1]
+other = "Carga 1"
+
+[RuleTypeLoad5]
+other = "Carga 5"
+
+[RuleTypeLoad15]
+other = "Carga 15"
+
+[RuleTypeTcpConnCount]
+other = "Conexiones TCP"
+
+[RuleTypeUdpConnCount]
+other = "Conexiones UDP"
+
+[RuleTypeProcessCount]
+other = "Procesos"
+
+[RuleTypeTemperatureMax]
+other = "Temperatura Máx"
+
+[CycleUnitHour]
+other = "Hora"
+
+[CycleUnitDay]
+other = "Día"
+
+[CycleUnitWeek]
+other = "Semana"
+
+[CycleUnitMonth]
+other = "Mes"
+
+[CycleUnitYear]
+other = "Año"
+
+[PleaseSelect]
+other = "Seleccione"
+
+[Loading]
+other = "Cargando"
+
+[NoData]
+other = "Sin datos"
+
+[NoMatch]
+other = "Sin coincidencias"
+
+[Telemetry]
+other = "Sondeo"
+
+[TelemetryReliability]
+other = "Fiabilidad del sondeo"
+
+[TelemetryReliabilityDescription]
+other = "Consulta recolectores, puntos de observación, entrega de agentes, correcciones de incidentes y pérdida de datos"
+
+[TelemetryCollectors]
+other = "Recolectores"
+
+[TelemetryObserverAssignments]
+other = "Asignaciones de observadores"
+
+[TelemetryAgentDelivery]
+other = "Búfer y entrega del agente"
+
+[TelemetryIncidentRevisions]
+other = "Correcciones de incidentes"
+
+[TelemetryDataLoss]
+other = "Pérdida de datos de sondeo"
+
+[TelemetryAlerts]
+other = "Alertas de sondeo"
+
+[TelemetryCollectorID]
+other = "ID del recolector"
+
+[TelemetryAddress]
+other = "Dirección"
+
+[TelemetryGeneration]
+other = "Generación"
+
+[TelemetryConfigVersion]
+other = "Versión de configuración"
+
+[TelemetryObserver]
+other = "Observador"
+
+[TelemetryNodeID]
+other = "ID del nodo"
+
+[TelemetryEffectiveFrom]
+other = "Válido desde"
+
+[TelemetryLocalBufferPressure]
+other = "Presión del búfer local"
+
+[TelemetryBufferedData]
+other = "Datos en búfer"
+
+[TelemetryPendingRecords]
+other = "Registros pendientes"
+
+[TelemetryProtocolVersion]
+other = "Versión del protocolo"
+
+[TelemetryInitialClassification]
+other = "Clasificación inicial"
+
+[TelemetryCurrentClassification]
+other = "Clasificación actual"
+
+[TelemetryRevision]
+other = "Revisión"
+
+[TelemetryStartedAt]
+other = "Inicio"
+
+[TelemetryComponent]
+other = "Componente"
+
+[TelemetryLossReason]
+other = "Motivo de pérdida"
+
+[TelemetryLostRecords]
+other = "Registros perdidos"
+
+[TelemetryAlertType]
+other = "Tipo de alerta"
+
+[TelemetrySeverity]
+other = "Severidad"
+
+[TelemetryMessage]
+other = "Mensaje"
+
+[TelemetryNotified]
+other = "Notificada"
+
+[TelemetryActive]
+other = "Activo"
+
+[TelemetryRevoked]
+other = "Revocado"
+
+[TelemetryYes]
+other = "Sí"
+
+[TelemetryNo]
+other = "No"
+
+[TelemetryUnknown]
+other = "Desconocido"
+
+[TelemetryWalHealthy]
+other = "Normal"
+
+[TelemetryWalDownsampled]
+other = "Muestreo de baja prioridad reducido"
+
+[TelemetryWalRollup]
+other = "Agregación por minuto activada"
+
+[TelemetryWalCritical]
+other = "Presión de almacenamiento crítica"
+
+[TelemetryWalDataLoss]
+other = "Se produjo pérdida de datos"
+
+[TelemetryLossCompacted]
+other = "Sustituido por reducción de muestreo o agregación"
+
+[TelemetryLossHardLimit]
+other = "Se alcanzó el límite de capacidad"
+
+[TelemetryLossCorruption]
+other = "Archivo de búfer dañado"
+
+[TelemetryAlertHostOffline]
+other = "Host sin conexión"
+
+[TelemetryAlertConnectivityDegraded]
+other = "Conectividad degradada"
+
+[TelemetryAlertCollectorOffline]
+other = "Recolector sin conexión"
+
+[TelemetryAlertCollectorOnline]
+other = "Recolector en línea"
+
+[TelemetryAlertDataLoss]
+other = "Pérdida de datos de sondeo"
+
+[TelemetrySeverityCritical]
+other = "Crítica"
+
+[TelemetrySeverityWarning]
+other = "Advertencia"
+
+[TelemetrySeverityInfo]
+other = "Información"
