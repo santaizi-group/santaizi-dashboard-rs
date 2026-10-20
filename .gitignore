@@ -4,11 +4,11 @@
 .env
 .DS_Store
 
-# runtime data
+# runtime data（仅仓根；web 源码里的 data/ 必须跟仓）
 *.db
 *.db-wal
 *.db-shm
-data/
+/data/
 # GeoIP 占位 stub 要跟仓（对齐 Go 跟踪 pkg/geoip/geoip.db）；真库只在 release 构建期替换
 !resource/geoip.db
 *.mmdb
