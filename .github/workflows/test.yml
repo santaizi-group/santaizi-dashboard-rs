@@ -86,5 +86,17 @@ jobs:
         with:
           key: aarch64-unknown-linux-gnu
 
+      # rust-embed 在编译期要求 resource/web/ 存在，交叉构建同样要先构建前端。
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Build web frontend
+        run: pnpm install --frozen-lockfile && pnpm build
+
       - name: Build
         run: cargo build --release --locked --target aarch64-unknown-linux-gnu
