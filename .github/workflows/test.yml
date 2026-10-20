@@ -66,6 +66,11 @@ jobs:
   cross:
     name: Cross build (linux arm64)
     runs-on: ubuntu-latest
+    env:
+      # cargo 默认用宿主 cc 链接 aarch64；显式指向交叉工具链。
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+      CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
     steps:
       - uses: actions/checkout@v4
 
