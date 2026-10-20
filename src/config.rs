@@ -402,7 +402,7 @@ impl Config {
             self.grpc_port = 5555;
         }
         if self.telemetry.data_dir.is_empty() {
-            self.telemetry.data_dir = "/var/lib/santaizi-dashboard".into();
+            self.telemetry.data_dir = "/opt/santaizi/dashboard-rs/data".into();
         }
         if self.telemetry.signing_key_path.is_empty() {
             self.telemetry.signing_key_path =

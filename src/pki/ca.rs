@@ -86,7 +86,7 @@ pub struct Bundle {
 
 pub fn default_dir(data_dir: &str) -> String {
     let base = if data_dir.is_empty() {
-        "/var/lib/santaizi-dashboard"
+        "/opt/santaizi/dashboard-rs/data"
     } else {
         data_dir
     };

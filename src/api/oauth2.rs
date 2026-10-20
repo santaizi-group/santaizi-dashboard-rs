@@ -347,6 +347,10 @@ fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
+            // GitHub / Gitee 等 API 对缺 User-Agent 的请求直接回 403（token 端点
+            // 不校验 UA，故症状是「换令牌成功、拉用户 403」）；Go 侧 go-github /
+            // go-gitlab SDK 每个请求都带 UA，reqwest 默认不发，这里在产品 UA 上对齐。
+            .user_agent(format!("santaizi-dashboard-rs/{}", crate::VERSION))
             .timeout(UPSTREAM_TIMEOUT)
             .build()
             .expect("reqwest client")
@@ -403,11 +407,16 @@ async fn fetch_user(
     kind: ProviderKind,
     access_token: &str,
 ) -> anyhow::Result<OauthProfile> {
-    let mut request = http_client()
-        .get(&endpoints.userinfo_url)
-        .bearer_auth(access_token);
+    let mut request = http_client().get(&endpoints.userinfo_url);
     if kind == ProviderKind::Github {
         request = request.header(header::ACCEPT, "application/vnd.github+json");
+    }
+    // Gitea SDK 用 `Authorization: token <t>`（Go `SetToken` 的形态）：Bearer 只在
+    // 较新 Gitea 上可用，`token` 方案全版本兼容，故对齐 Go。
+    if kind == ProviderKind::Gitea {
+        request = request.header(header::AUTHORIZATION, format!("token {access_token}"));
+    } else {
+        request = request.bearer_auth(access_token);
     }
     let response = request.send().await?;
     if !response.status().is_success() {

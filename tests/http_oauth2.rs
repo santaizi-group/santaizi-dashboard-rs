@@ -95,6 +95,17 @@ fn set_cookie_header(response: &reqwest::Response, name: &str) -> Option<String>
         .map(|raw| raw.to_string())
 }
 
+/// 上游请求必须带产品 UA：GitHub / Gitee 等 API 对无 User-Agent 的请求直接 403
+/// （Go 侧 go-github / go-gitlab SDK 每请求必带）。
+fn assert_user_agent(request: &str) {
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("user-agent: santaizi-dashboard-rs/"),
+        "{request}"
+    );
+}
+
 /// mock 一键登录：debug+mock 下 302 `/admin/`、种会话 Cookie、库内用户
 /// 建成且为超级管理员；随后该 Cookie 能通过会话端点认出人。
 #[tokio::test]
@@ -319,9 +330,11 @@ async fn gitea_stub_completes_full_login_flow() {
     );
     let token = cookie_value(&callback, SESSION_COOKIE).expect("session cookie");
 
-    // stub 侧：先是 token 交换（表单字段齐全），再是 userinfo（Bearer）。
+    // stub 侧：先是 token 交换（表单字段齐全），再是 userinfo（Gitea `token` 方案）。
     let requests = stub_seen.lock().unwrap().clone();
     assert_eq!(requests.len(), 2, "stub saw: {requests:?}");
+    assert_user_agent(&requests[0]);
+    assert_user_agent(&requests[1]);
     assert!(
         requests[0].starts_with("POST /login/oauth/access_token"),
         "{:?}",
@@ -353,11 +366,11 @@ async fn gitea_stub_completes_full_login_flow() {
         "{:?}",
         requests[1]
     );
-    // hyper 归一化头名为小写。
+    // hyper 归一化头名为小写。Gitea SDK 用 `token` 方案（Go `SetToken` 形态）。
     assert!(
         requests[1]
             .to_ascii_lowercase()
-            .contains("authorization: bearer stub-token"),
+            .contains("authorization: token stub-token"),
         "{:?}",
         requests[1]
     );

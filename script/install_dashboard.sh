@@ -4,16 +4,21 @@
 #   Santaizi Dashboard (Rust) 一键安装脚本
 #   默认从 santaizi-group/santaizi-dashboard-rs 下载，可用 SANTAIZI_DASHBOARD_RS_REPO 覆盖
 #   仅 Linux amd64 / arm64。两种安装形态：二进制 + systemd（默认）或 Docker compose。
-#   安装位置 /opt/santaizi/dashboard-rs，配置 /etc/santaizi/dashboard.yaml（0600），
-#   数据 /var/lib/santaizi-dashboard。--upgrade 沿用现有安装形态与配置，只更新程序。
+#   安装位置 /opt/santaizi/dashboard-rs，程序、配置、数据都在该目录下一块：
+#   config/dashboard.yaml（0600）与 data/。--upgrade 沿用现有安装形态与配置，只更新程序。
+#   Docker 形态的 compose 以 ./data、./config/dashboard.yaml 相对挂载，
+#   容器内固定为 /var/lib/santaizi-dashboard 与 /etc/santaizi/dashboard.yaml。
 #   SANTAIZI_DASHBOARD_RS_PARSE_ONLY=1 时只写配置与 compose（路径可用环境变量覆盖），
 #   不碰 systemd/docker、不要 root，供一次性验证。
 #========================================================
 
 SANTAIZI_BASE_PATH="/opt/santaizi"
 SANTAIZI_DASHBOARD_PATH="${SANTAIZI_DASHBOARD_PATH:-${SANTAIZI_BASE_PATH}/dashboard-rs}"
-SANTAIZI_DASHBOARD_YAML="${SANTAIZI_DASHBOARD_YAML:-/etc/santaizi/dashboard.yaml}"
-SANTAIZI_DASHBOARD_DATA="${SANTAIZI_DASHBOARD_DATA:-/var/lib/santaizi-dashboard}"
+# 配置与数据默认跟随工作目录放一块；env 显式指定时不跟随（YAML_FROM_ENV/DATA_FROM_ENV）。
+YAML_FROM_ENV="${SANTAIZI_DASHBOARD_YAML:-}"
+DATA_FROM_ENV="${SANTAIZI_DASHBOARD_DATA:-}"
+SANTAIZI_DASHBOARD_YAML="${YAML_FROM_ENV:-${SANTAIZI_DASHBOARD_PATH}/config/dashboard.yaml}"
+SANTAIZI_DASHBOARD_DATA="${DATA_FROM_ENV:-${SANTAIZI_DASHBOARD_PATH}/data}"
 SANTAIZI_DASHBOARD_BIN="${SANTAIZI_DASHBOARD_PATH}/santaizi-dashboard"
 SANTAIZI_DASHBOARD_UNIT="${SANTAIZI_DASHBOARD_UNIT:-/etc/systemd/system/santaizi-dashboard-rs.service}"
 
@@ -260,15 +265,19 @@ write_config() {
     oauth2_clientsecret=$(yaml_escape "$OAUTH2_CLIENTSECRET")
     oauth2_endpoint=$(yaml_escape "$OAUTH2_ENDPOINT")
     site_brand=$(yaml_escape "$SITE_BRAND")
-    escaped_data=$(yaml_escape "$SANTAIZI_DASHBOARD_DATA")
     if [ "$INSTALL_MODE" = "docker" ]; then
-        # 配置挂进容器使用，端口固定容器内 80/5555，宿主端口靠 compose 映射。
+        # 配置挂进容器使用，端口固定容器内 80/5555，宿主端口靠 compose 映射；
+        # data_dir 写容器内路径（compose 把宿主 ./data 挂到 /var/lib/santaizi-dashboard）。
         cfg_http_port=80
         cfg_grpc_port=5555
+        escaped_data=$(yaml_escape "/var/lib/santaizi-dashboard")
     else
         cfg_http_port=$WEB_PORT
         cfg_grpc_port=$GRPC_PORT
+        escaped_data=$(yaml_escape "$SANTAIZI_DASHBOARD_DATA")
     fi
+    # 数据目录与配置放一块；docker 形态它就是 compose 的 ./data 挂载源。
+    as_root mkdir -p "$SANTAIZI_DASHBOARD_DATA"
     tmp=$(mktemp)
     cat > "$tmp" <<EOF
 mode: primary
@@ -294,6 +303,7 @@ EOF
 }
 
 write_compose() {
+    # 相对路径按 compose 文件所在目录（安装工作目录）解析，配置与数据放一块。
     tmp=$(mktemp)
     cat > "$tmp" <<EOF
 services:
@@ -307,8 +317,8 @@ services:
     volumes:
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
-      - ${SANTAIZI_DASHBOARD_DATA}:/var/lib/santaizi-dashboard
-      - ${SANTAIZI_DASHBOARD_YAML}:/etc/santaizi/dashboard.yaml:ro
+      - ./data:/var/lib/santaizi-dashboard
+      - ./config/dashboard.yaml:/etc/santaizi/dashboard.yaml:ro
     environment:
       - TZ=Asia/Shanghai
 EOF
@@ -382,6 +392,14 @@ collect_answers() {
 
     SANTAIZI_DASHBOARD_PATH=$(prompt "请输入 Dashboard 工作目录" "$SANTAIZI_DASHBOARD_PATH") || exit 1
     SANTAIZI_DASHBOARD_BIN="${SANTAIZI_DASHBOARD_PATH}/santaizi-dashboard"
+    # 配置/数据跟着工作目录放一块。Docker 形态的 compose 用 ./config、./data 相对挂载，
+    # 宿主路径必须就在工作目录下，不接受 env 覆盖；env 覆盖仅对二进制形态生效。
+    if [ "$INSTALL_MODE" = "docker" ] || [ -z "$YAML_FROM_ENV" ]; then
+        SANTAIZI_DASHBOARD_YAML="${SANTAIZI_DASHBOARD_PATH}/config/dashboard.yaml"
+    fi
+    if [ "$INSTALL_MODE" = "docker" ] || [ -z "$DATA_FROM_ENV" ]; then
+        SANTAIZI_DASHBOARD_DATA="${SANTAIZI_DASHBOARD_PATH}/data"
+    fi
 
     WEB_PORT=$(prompt_port "请输入面板 Web 端口" "80") || exit 1
     GRPC_PORT=$(prompt_port "请输入 Agent gRPC 端口" "5555") || exit 1
@@ -466,6 +484,7 @@ usage() {
     echo "  --upgrade  非交互升级：沿用现有安装形态与配置，只更新程序"
     echo "环境变量: SANTAIZI_DASHBOARD_RS_REPO / SANTAIZI_DASHBOARD_PATH / SANTAIZI_DASHBOARD_YAML"
     echo "          SANTAIZI_DASHBOARD_DATA / SANTAIZI_DASHBOARD_RS_PARSE_ONLY=1"
+    echo "          （Docker 形态配置/数据固定在工作目录下的 ./config、./data，后两个变量仅对二进制形态生效）"
 }
 
 case "${1:-}" in

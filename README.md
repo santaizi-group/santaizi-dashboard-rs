@@ -25,11 +25,13 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-da
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/install_dashboard.sh)" -- --upgrade
 ```
 
-默认目录布局：
+默认目录布局（程序、配置、数据都在工作目录下一块）：
 
-- 程序：`/opt/santaizi/dashboard-rs`
-- 配置：`/etc/santaizi/dashboard.yaml`
-- 数据：`/var/lib/santaizi-dashboard`
+- 程序：`/opt/santaizi/dashboard-rs/santaizi-dashboard`
+- 配置：`/opt/santaizi/dashboard-rs/config/dashboard.yaml`（0600）
+- 数据：`/opt/santaizi/dashboard-rs/data`
+
+Docker 形态的 compose 以 `./data`、`./config/dashboard.yaml` 相对挂载；容器内固定为 `/var/lib/santaizi-dashboard` 与 `/etc/santaizi/dashboard.yaml`（宿主端口靠 compose 映射）。
 
 Docker 镜像：`ghcr.io/santaizi-group/santaizi-dashboard-rs`。
 
@@ -62,10 +64,10 @@ cargo build --release
 ## 运行与配置
 
 ```bash
-./target/release/santaizi-dashboard -c /etc/santaizi/dashboard.yaml
+./target/release/santaizi-dashboard -c /opt/santaizi/dashboard-rs/config/dashboard.yaml
 ```
 
-`-c` 默认 `/etc/santaizi/dashboard.yaml`，`--db` 默认 `/var/lib/santaizi-dashboard/sqlite.db`。环境变量 `SANTAIZI_*`（下划线换成点）打底，YAML 覆盖。
+`-c` 默认 `/opt/santaizi/dashboard-rs/config/dashboard.yaml`，`--db` 默认 `/opt/santaizi/dashboard-rs/data/sqlite.db`。环境变量 `SANTAIZI_*`（下划线换成点）打底，YAML 覆盖。
 
 ## GeoIP
 

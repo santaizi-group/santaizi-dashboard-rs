@@ -18,12 +18,15 @@ struct Cli {
     #[arg(
         short = 'c',
         long = "config",
-        default_value = "/etc/santaizi/dashboard.yaml"
+        default_value = "/opt/santaizi/dashboard-rs/config/dashboard.yaml"
     )]
     config: String,
 
     /// SQLite 数据库文件路径
-    #[arg(long = "db", default_value = "/var/lib/santaizi-dashboard/sqlite.db")]
+    #[arg(
+        long = "db",
+        default_value = "/opt/santaizi/dashboard-rs/data/sqlite.db"
+    )]
     db: String,
 }
 
