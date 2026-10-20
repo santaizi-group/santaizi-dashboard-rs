@@ -1,0 +1,24 @@
+# 二进制安装示例。Docker 形态请把 httpport/grpcport 写成 80/5555，
+# data_dir 写成 /var/lib/santaizi-dashboard；宿主端口只写在 compose 映射里。
+# mock 仅在 debug: true 时可用，不能用于生产。
+
+mode: primary
+debug: false
+httpport: 80
+grpcport: 5555
+language: zh-CN
+# 回调路径固定 /oauth2/callback，须与浏览器地址栏的协议和域名一致，不要只填首页。
+# 反向代理须转发 /oauth2，并带上 Host 与 X-Forwarded-Proto，否则回调会被拼成 http。
+oauth2:
+  type: 'github'
+  admin: 'your-github-username'
+  clientid: ''
+  clientsecret: ''
+  endpoint: ''
+site:
+  brand: '三太子监控'
+  cookiename: 'santaizi-dashboard-rs'
+web:
+  delivery: 'embedded'
+telemetry:
+  data_dir: '/opt/santaizi/dashboard-rs/data'

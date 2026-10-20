@@ -13,7 +13,7 @@
 
 ## 安装
 
-仅支持 Linux amd64 / arm64。一键安装（交互选择二进制 + systemd 或 Docker）：
+仅支持 Linux amd64 / arm64。步骤、OAuth2 回调和反向代理见 [部署](docs/deployment.md)。一键安装（交互选择二进制 + systemd 或 Docker）：
 
 ```bash
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/install_dashboard.sh)"

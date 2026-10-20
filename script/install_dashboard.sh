@@ -6,6 +6,7 @@
 #   仅 Linux amd64 / arm64。两种安装形态：二进制 + systemd（默认）或 Docker compose。
 #   安装位置 /opt/santaizi/dashboard-rs，程序、配置、数据都在该目录下一块：
 #   config/dashboard.yaml（0600）与 data/。--upgrade 沿用现有安装形态与配置，只更新程序。
+#   选定 OAuth 类型后按提供商打印控制台字段，并给出可粘贴的 /oauth2/callback。
 #   Docker 形态的 compose 以 ./data、./config/dashboard.yaml 相对挂载，
 #   容器内固定为 /var/lib/santaizi-dashboard 与 /etc/santaizi/dashboard.yaml。
 #   SANTAIZI_DASHBOARD_RS_PARSE_ONLY=1 时只写配置与 compose（路径可用环境变量覆盖），
@@ -41,6 +42,7 @@ OAUTH2_ADMIN=""
 OAUTH2_CLIENTID=""
 OAUTH2_CLIENTSECRET=""
 OAUTH2_ENDPOINT=""
+PUBLIC_ORIGIN=""
 SITE_BRAND=""
 
 err() {
@@ -285,6 +287,8 @@ debug: false
 httpport: ${cfg_http_port}
 grpcport: ${cfg_grpc_port}
 language: zh-CN
+# 回调路径固定 /oauth2/callback，须与浏览器地址栏的协议和域名一致，不要只填首页。
+# 反向代理须转发 /oauth2，并带上 Host 与 X-Forwarded-Proto，否则回调会被拼成 http。
 oauth2:
   type: '${oauth2_type}'
   admin: '${oauth2_admin}'
@@ -377,6 +381,107 @@ run_compose() {
     fi
 }
 
+# 只接受到域名（可带端口）为止，拒绝路径和尾斜杠。
+is_origin() {
+    origin=$1
+    case "$origin" in
+        http://*|https://*) ;;
+        *) return 1 ;;
+    esac
+    case "$origin" in
+        */) return 1 ;;
+    esac
+    rest=${origin#*://}
+    case "$rest" in
+        ""|*/*|*[[:space:]]*) return 1 ;;
+    esac
+    return 0
+}
+
+prompt_origin() {
+    message=$1
+    while true; do
+        val=$(prompt "$message" "") || return 1
+        if is_origin "$val"; then
+            printf "%s\n" "$val"
+            return 0
+        fi
+        err "只填到域名和端口，例如 https://dash.example.com。不要带路径或尾斜杠。"
+    done
+}
+
+oauth_field_hint() {
+    case "$OAUTH2_TYPE" in
+        github)
+            info "GitHub 请创建 OAuth App（不是 GitHub App），不要勾 Device Flow。"
+            info "控制台字段 Authorization callback URL 填下面的回调，不要只填首页。"
+            info "管理员账号填 GitHub 登录名。"
+            ;;
+        gitee)
+            info "Gitee 控制台字段「应用回调地址」填下面的回调，不要只填应用主页。"
+            info "管理员账号填 Gitee 登录名。"
+            ;;
+        gitlab|jihulab)
+            info "Redirect URI 填下面的回调。权限勾选 read_user、read_api。"
+            info "管理员账号填 username。"
+            ;;
+        gitea)
+            info "Redirect URIs 填下面的回调。"
+            info "Endpoint 只填 Gitea 源站（如 https://git.example.com），不要带路径。"
+            info "管理员账号填登录名。"
+            ;;
+        cloudflare)
+            info "Cloudflare Access 的 Redirect URLs 填下面的回调。"
+            info "Endpoint 填团队域名（如 https://team.cloudflareaccess.com）。"
+            info "管理员账号填 Access 返回的用户 sub，不是邮箱。"
+            ;;
+    esac
+}
+
+prompt_oauth_type() {
+    info "请配置 OAuth2 登录（首次登录必须使用 OAuth2）"
+    info "支持 github / gitlab / jihulab / gitee / gitea / cloudflare。OIDC 尚未实现。"
+    while true; do
+        val=$(prompt "OAuth2 类型" "github") || return 1
+        val=$(printf "%s" "$val" | tr "[:upper:]" "[:lower:]")
+        case "$val" in
+            github|gitlab|jihulab|gitee|gitea|cloudflare)
+                OAUTH2_TYPE=$val
+                return 0
+                ;;
+            oidc)
+                err "OIDC 尚未实现，登录会失败。请改用列出的类型。"
+                ;;
+            mock)
+                err "mock 仅在 debug: true 时可用，不能用于生产安装。"
+                ;;
+            *)
+                err "请输入 github、gitlab、jihulab、gitee、gitea 或 cloudflare。"
+                ;;
+        esac
+    done
+}
+
+prompt_public_origin() {
+    info "回调必须与浏览器地址栏的协议、域名、端口完全一致。"
+    info "路径固定 /oauth2/callback，不要加尾斜杠，不要改成 /admin/ 或 /oauth2/login。"
+    while true; do
+        val=$(prompt "面板对外地址（如 https://dash.example.com，仅本机可直接回车）" "") || return 1
+        if [ -z "$val" ]; then
+            PUBLIC_ORIGIN=""
+            info "未填写对外地址。回调模板：https://<浏览器地址栏的域名和端口>/oauth2/callback"
+            info "安装结束时打印的 http://IP:端口 只能本机核对，不能拿去登记回调。"
+            return 0
+        fi
+        if is_origin "$val"; then
+            PUBLIC_ORIGIN=$val
+            success "现在去提供商创建应用，回调填：${PUBLIC_ORIGIN}/oauth2/callback"
+            return 0
+        fi
+        err "只填到域名和端口，例如 https://dash.example.com。不要带路径或尾斜杠。"
+    done
+}
+
 collect_answers() {
     info "请选择 Dashboard 安装方式"
     info "  1) 二进制 + systemd（默认）"
@@ -404,15 +509,34 @@ collect_answers() {
     WEB_PORT=$(prompt_port "请输入面板 Web 端口" "80") || exit 1
     GRPC_PORT=$(prompt_port "请输入 Agent gRPC 端口" "5555") || exit 1
 
-    info "请配置 OAuth2 登录（首次登录必须使用 OAuth2）"
-    info "请先在提供商创建应用。回调地址必须填：https://<你访问面板的域名>/oauth2/callback"
-    info "GitHub 字段名是 Authorization callback URL；不要只填首页。"
-    OAUTH2_TYPE=$(prompt "OAuth2 类型 (github/gitlab/jihulab/gitee/gitea)" "github") || exit 1
-    OAUTH2_TYPE=${OAUTH2_TYPE:-github}
-    OAUTH2_ADMIN=$(prompt_required "管理员账号（多个用半角逗号隔开）") || exit 1
+    prompt_oauth_type || exit 1
+    oauth_field_hint
+    prompt_public_origin || exit 1
+    case "$OAUTH2_TYPE" in
+        cloudflare)
+            admin_prompt="管理员账号（Access 用户 sub，多个用半角逗号隔开）"
+            ;;
+        gitlab|jihulab)
+            admin_prompt="管理员 username（多个用半角逗号隔开）"
+            ;;
+        *)
+            admin_prompt="管理员登录名（多个用半角逗号隔开）"
+            ;;
+    esac
+    OAUTH2_ADMIN=$(prompt_required "$admin_prompt") || exit 1
     OAUTH2_CLIENTID=$(prompt_required "OAuth2 Client ID") || exit 1
     OAUTH2_CLIENTSECRET=$(prompt_required "OAuth2 Client Secret") || exit 1
-    OAUTH2_ENDPOINT=$(prompt "OAuth2 Endpoint（仅自建 Gitea 需要）" "") || exit 1
+    case "$OAUTH2_TYPE" in
+        gitea)
+            OAUTH2_ENDPOINT=$(prompt_origin "Gitea 源站（如 https://git.example.com，不要带路径）") || exit 1
+            ;;
+        cloudflare)
+            OAUTH2_ENDPOINT=$(prompt_origin "Cloudflare Access 团队域名（如 https://team.cloudflareaccess.com）") || exit 1
+            ;;
+        *)
+            OAUTH2_ENDPOINT=$(prompt "OAuth2 Endpoint（GitHub 等公有平台留空）" "") || exit 1
+            ;;
+    esac
 
     SITE_BRAND=$(prompt "站点标题" "三太子监控") || exit 1
     SITE_BRAND=${SITE_BRAND:-三太子监控}
@@ -432,7 +556,16 @@ get_server_ip() {
 finish() {
     SERVER_IP=$(get_server_ip)
     success "Santaizi Dashboard (Rust) 安装完成！"
-    success "访问地址: http://${SERVER_IP}:${WEB_PORT}"
+    if [ -n "$PUBLIC_ORIGIN" ]; then
+        success "对外地址: ${PUBLIC_ORIGIN}"
+        success "OAuth2 回调: ${PUBLIC_ORIGIN}/oauth2/callback"
+        info "本机核对: http://${SERVER_IP}:${WEB_PORT}。不要拿这个地址登记回调。"
+    else
+        success "本机核对: http://${SERVER_IP}:${WEB_PORT}"
+        info "回调模板：https://<浏览器地址栏的域名和端口>/oauth2/callback"
+        info "不要拿上面的 IP 地址登记回调。"
+    fi
+    info "本程序不提供 HTTPS。反向代理必须转发 /oauth2，并带上 Host 与 X-Forwarded-Proto: https，否则回调会被拼成 http://...。"
     success "工作目录: ${SANTAIZI_DASHBOARD_PATH}"
     success "配置文件: ${SANTAIZI_DASHBOARD_YAML}"
     success "数据目录: ${SANTAIZI_DASHBOARD_DATA}"
