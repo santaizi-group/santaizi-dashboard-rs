@@ -239,6 +239,8 @@ pub struct Config {
     pub http_port: u16,
     #[serde(rename = "grpcport")]
     pub grpc_port: u16,
+    /// 对外通告地址（安装命令 / 凭据下发用，空回退 `127.0.0.1`）；
+    /// 不参与监听绑定——gRPC 恒绑 `0.0.0.0`（对齐 Go 监听 `:port` 语义）。
     #[serde(rename = "grpchost")]
     pub grpc_host: String,
     #[serde(rename = "proxygrpcport")]
@@ -631,16 +633,6 @@ impl Config {
             .filter_map(|part| part.trim().parse::<u64>().ok())
             .filter(|id| *id > 0)
             .collect();
-    }
-
-    /// gRPC 监听地址：空 `grpchost` 时绑全接口（Go 监听 `:port` 语义），
-    /// 非空时仍按指定地址绑定。`grpchost` 本职是对外通告地址，安装脚本不写它。
-    pub fn grpc_bind_host(&self) -> &str {
-        if self.grpc_host.trim().is_empty() {
-            "0.0.0.0"
-        } else {
-            self.grpc_host.as_str()
-        }
     }
 
     /// 运行时外部 GeoIP 库路径（env `SANTAIZI_GEOIP_DB`，非 YAML 配置项）。

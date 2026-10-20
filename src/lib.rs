@@ -54,11 +54,10 @@ pub async fn run(conf: config::Config, db_path: &str) -> Result<()> {
         _ => {
             let db = db::migrate::open_primary(db_path)?;
             let state = state::AppState::primary(conf, db).await?;
-            let grpc_listener = tokio::net::TcpListener::bind((
-                state.conf().grpc_bind_host(),
-                state.conf().grpc_port,
-            ))
-            .await?;
+            // gRPC 恒绑全接口：`grpchost` 只是对外通告地址（安装命令/凭据下发用），
+            // 不拿来 bind——域名或公网 IP 在容器里没有对应网卡，会 EADDRNOTAVAIL。
+            let grpc_listener =
+                tokio::net::TcpListener::bind(("0.0.0.0", state.conf().grpc_port)).await?;
             let http_listener =
                 tokio::net::TcpListener::bind(("0.0.0.0", state.conf().http_port)).await?;
             let shutdown = spawn_background_workers(&state, db_path);

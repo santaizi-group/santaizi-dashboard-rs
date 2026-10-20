@@ -21,7 +21,8 @@ use crate::{Result, VERSION};
 ///
 /// 从端库路径取 `collector.database_path`；未配置时回退到 CLI `--db`
 /// （Go 要求该配置项非空，这里放宽为回退，避免误配即拒绝启动）。
-/// agent 服务监听 `grpc_host:grpc_port`；`grpc_host` 为空时绑全接口（Go `ServeCollectorRPC` 同）。
+/// agent 服务监听 `0.0.0.0:grpc_port` 全接口；`grpc_host` 仅作对外通告地址
+/// （对齐 Go `ServeCollectorRPC` 监听 `:port`）。
 pub async fn serve(conf: &Config, db_path: &str) -> Result<()> {
     let collector_path = if conf.collector.database_path.is_empty() {
         db_path
@@ -34,15 +35,9 @@ pub async fn serve(conf: &Config, db_path: &str) -> Result<()> {
         runtime::Runtime::new(cancel.clone(), db, collector_path, conf.collector.clone()).await?,
     );
     let mut worker = runtime.start();
-    let listener = tokio::net::TcpListener::bind((conf.grpc_bind_host(), conf.grpc_port))
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", conf.grpc_port))
         .await
-        .map_err(|err| {
-            anyhow::anyhow!(
-                "bind collector agent {}:{}: {err}",
-                conf.grpc_bind_host(),
-                conf.grpc_port
-            )
-        })?;
+        .map_err(|err| anyhow::anyhow!("bind collector agent 0.0.0.0:{}: {err}", conf.grpc_port))?;
     let server_cancel = cancel.clone();
     let server_conf = conf.clone();
     let server_runtime = std::sync::Arc::clone(&runtime);
