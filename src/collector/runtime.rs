@@ -186,11 +186,11 @@ impl Runtime {
 
     pub fn connected_agent_disconnected(&self) {
         // 饱和减法：guard 重复 drop 也不会回绕。
-        let _ =
-            self.connected_agents
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    current.checked_sub(1)
-                });
+        let _ = self
+            .connected_agents
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_sub(1)
+            });
     }
 
     pub fn is_probe(&self) -> bool {
