@@ -55,7 +55,7 @@ pub async fn run(conf: config::Config, db_path: &str) -> Result<()> {
             let db = db::migrate::open_primary(db_path)?;
             let state = state::AppState::primary(conf, db).await?;
             let grpc_listener = tokio::net::TcpListener::bind((
-                state.conf().grpc_host.as_str(),
+                state.conf().grpc_bind_host(),
                 state.conf().grpc_port,
             ))
             .await?;

@@ -1456,12 +1456,16 @@ async fn script_commands(
             "command": format!("sh -c \"$(curl -fsSL {})\"", shell_quote(&scripts.dashboard)),
             "destructive": false,
         }));
+        // 二进制 + systemd 与 Docker 两种安装形态通吃，脚本按既有安装自动识别。
+        out.push(json!({
+            "id": "dashboard_upgrade", "group": "dashboard", "platform": "linux",
+            "command": format!(
+                "sh -c \"$(curl -fsSL {})\" -- --upgrade",
+                shell_quote(&scripts.dashboard)
+            ),
+            "destructive": false,
+        }));
     }
-    out.push(json!({
-        "id": "dashboard_upgrade", "group": "dashboard", "platform": "linux",
-        "command": "cd /opt/santaizi && docker compose pull && docker compose up -d",
-        "destructive": false,
-    }));
     for (id, platform, script) in [
         ("collector_upgrade", "linux", &scripts.upgradecollector),
         ("agent_upgrade_linux", "linux", &scripts.upgrade_linux),

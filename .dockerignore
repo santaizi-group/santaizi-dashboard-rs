@@ -1,0 +1,8 @@
+.git/
+.github/
+target/
+data/
+node_modules/
+**/node_modules/
+resource/web/
+web/apps/*/dist/

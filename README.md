@@ -1,26 +1,48 @@
 # 三太子 Santaizi · 面板（Rust）
 
-`Santaizi Dashboard（Rust）` 是 Go 版面板（[santanzi-dashboard](https://github.com/santaizi-group/santanzi-dashboard)）的 Rust 重写：主面板（primary）与从端（collector）双模式，同一套 `SantaiziService` 线协议，面向高性能探测摄入。
+三太子监控的 Rust 面板。同一二进制可作主面板（`mode: primary`）或从端（`mode: collector`），线协议为 `SantaiziService`。
 
-**当前状态：v0.1.0，Phase 0–7 完成（存储 / PKI / gRPC 双模式 / HTTP 全套 / 通知 / 监控派发 / 流量评估 / 前端内嵌），真机 smoke 通过；提交与发版等拍板。**
+仓库：[`santaizi-group/santaizi-dashboard-rs`](https://github.com/santaizi-group/santaizi-dashboard-rs)。Go 版面板：[`santanzi-dashboard`](https://github.com/santaizi-group/santanzi-dashboard)。
 
-## 与 Go 版的差异
+## 与 Go 版的边界
 
-* 不做内网穿透（NAT）、DDNS、Telegram 机器人。
-* 不对 Go 版探针做兼容适配：不提供 V1 `SantaiziService`（`ReportSystemState` 等）与 `/api/v1/*`、`/api/*` 遗留 HTTP API。探针请使用 `santaizi-agent-rs`（默认 v2 通路）。
-* 数据库为全新 SQLite，不迁移 Go 版库；schema 与 Go 版 v20 对齐（去掉 bot/ddns/nat 表）。
+- 不做内网穿透（NAT）、DDNS、Telegram 机器人。
+- 无 V1 `SantaiziService`，无 `/api/v1/*`、`/api/*`。探针使用 [`santaizi-agent-rs`](https://github.com/santaizi-group/santaizi-agent-rs) 的 v2 通路。
+- 数据库为全新 SQLite，不迁移 Go 版库。schema 与 Go 版 v20 对齐，去掉 bot / ddns / nat 表。
+- proto 权威在 Go 仓。本仓 `proto/santaizi.proto` 是拷贝，CI 用 [`script/proto-diff.sh`](./script/proto-diff.sh) 防漂移。
+
+## 安装
+
+仅支持 Linux amd64 / arm64。一键安装（交互选择二进制 + systemd 或 Docker）：
+
+```bash
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/install_dashboard.sh)"
+```
+
+升级（沿用现有安装形态与配置）：
+
+```bash
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/install_dashboard.sh)" -- --upgrade
+```
+
+默认目录布局：
+
+- 程序：`/opt/santaizi/dashboard-rs`
+- 配置：`/etc/santaizi/dashboard.yaml`
+- 数据：`/var/lib/santaizi-dashboard`
+
+Docker 镜像：`ghcr.io/santaizi-group/santaizi-dashboard-rs`。
 
 ## 构建
 
-```bash
-# 前端（产物输出 resource/web/，rust-embed 内嵌；CI 同款步骤）
-pnpm install --frozen-lockfile && pnpm build
+需要稳定版 Rust（edition 2024）、`protoc`、pnpm 10 与 Node 24。
 
-# 后端
+```bash
+pnpm install --frozen-lockfile && pnpm build
 cargo build --release
 ```
 
-`build.rs` 用 `tonic-prost-build` 由 `proto/santaizi.proto` 生成 gRPC 代码；proto 以 `santaizi-dashboard`（Go 仓）为权威，CI 会 diff 防漂移。`resource/web/` 缺失时 cargo 编译失败——本地开发先跑上面的 pnpm 步骤（web/ 源码自 santaizi-dashboard vendor 并裁掉 DDNS / NAT / Bot）。
+前端产物写入 `resource/web/`（已 gitignore）。目录缺失时 `cargo` 无法编译。
 
 ## 本地开发
 
@@ -28,32 +50,44 @@ cargo build --release
 ./script/start-local.sh
 ```
 
-首次启动会把 `script/config.local.yaml` 复制到 `data/dashboard.yaml`，走 mock OAuth2：
+首次启动把 [`script/config.local.yaml`](./script/config.local.yaml) 写到 `data/dashboard.yaml`，使用 mock OAuth2：
 
-* Web：`http://127.0.0.1:8000`
-* 登录：`http://127.0.0.1:8000/oauth2/login`（直接以 `admin` 进入后台，无需外部 OAuth 应用）
-* gRPC：`127.0.0.1:5555`
-* 数据、密钥与 SQLite：`data/`（已 gitignore）
+- Web：`http://127.0.0.1:8000`
+- 登录：`http://127.0.0.1:8000/oauth2/login`（以 `admin` 进入后台）
+- gRPC：`127.0.0.1:5555`
+- 数据、密钥与 SQLite：`data/`（已 gitignore）
 
-`--reset-config` 重新生成配置；`HTTP_PORT` / `GRPC_PORT` 覆盖端口。mock 仅在 `debug: true` 下可用，切勿用于生产。
+`--reset-config` 重新生成配置。`HTTP_PORT` / `GRPC_PORT` 覆盖端口。mock OAuth 仅在 `debug: true` 下可用，不能用于生产。
 
-## 配置
+## 运行与配置
 
 ```bash
 ./target/release/santaizi-dashboard -c /etc/santaizi/dashboard.yaml
 ```
 
-环境变量前缀 `SANTAIZI_`（下划线替换为点）打底，YAML 覆盖。默认库路径 `/var/lib/santaizi-dashboard/sqlite.db`（`--db` 可改）。
+`-c` 默认 `/etc/santaizi/dashboard.yaml`，`--db` 默认 `/var/lib/santaizi-dashboard/sqlite.db`。环境变量 `SANTAIZI_*`（下划线换成点）打底，YAML 覆盖。
 
 ## GeoIP
 
 国家码与探测跳点 ASN 查询开箱即用：
 
-* **内嵌**：release 构建期 `script/fetch-geoip.sh` 从 GitHub 拉真库替换 `resource/geoip.db` 占位并编进二进制；源码构建拿占位 stub 时自动走下面的自愈下载。
-* **外部指定**：`SANTAIZI_GEOIP_DB=/path/to/geoip.dat`（或 `.mmdb` / 其他 `geoip.db`），支持 v2ray 系列 `GeoIPList`（`geoip.dat`）与 MaxMind MMDB，按内容自动识别。
-* **自愈下载**：无可用库时按源表顺序从 GitHub release 拉取（Loyalsoldier → MetaCubeX → v2fly → P3TERX GeoLite2），带 `.sha256sum` 校验，缓存在 `--db` 同目录 `geoip.db`；`SANTAIZI_GEOIP_DOWNLOAD=0` 可关闭。
-* 缺库静默降级：国家码/ASN 返回空，不影响上报。
+- **内嵌**：发版构建时 [`script/fetch-geoip.sh`](./script/fetch-geoip.sh) 用真库替换 `resource/geoip.db` 占位并编进二进制。源码构建拿到占位 stub 时，走下面的自愈下载。
+- **外部指定**：`SANTAIZI_GEOIP_DB=/path/to/geoip.dat`（或 `.mmdb`）。支持 v2ray 系列 `geoip.dat` 与 MaxMind MMDB，按内容识别。
+- **自愈下载**：无可用库时按源表从 GitHub release 拉取并校验，缓存到 `--db` 同目录的 `geoip.db`。`SANTAIZI_GEOIP_DOWNLOAD=0` 关闭下载。
+- 缺库时国家码与 ASN 为空，上报继续。
+
+## 测试与发版
+
+前端构建之后，本地与 CI 相同：
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --all-targets --locked
+```
+
+tag `vMAJOR.MINOR.PATCH` 发布 linux amd64 / arm64 zip 与 `ghcr.io/santaizi-group/santaizi-dashboard-rs` 多架构镜像。安全问题通过 [`SECURITY.md`](./SECURITY.md) 中的 GitHub 私密公告提交。
 
 ## 版权
 
-本项目派生自 [Nezha Monitoring](https://github.com/naiba/nezha)（Apache-2.0），品牌「三太子 / Santaizi」为再品牌化，不主张原商标。致谢与许可声明见 [`NOTICE`](./NOTICE) 与 [`LICENSE`](./LICENSE)，二者不得删除或削弱。
+本项目派生自 [哪吒监控 Nezha Monitoring](https://github.com/naiba/nezha)（Apache-2.0，原作者 naiba）。品牌「三太子 / Santaizi」为再品牌化，不主张原商标。致谢与许可见 [`NOTICE`](./NOTICE) 与 [`LICENSE`](./LICENSE)，二者不得删除或削弱。

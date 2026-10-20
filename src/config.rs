@@ -522,7 +522,7 @@ impl Config {
             self.install_script.collector = "https://raw.githubusercontent.com/santaizi-group/santanzi-dashboard/main/script/install_collector.sh".into();
         }
         if self.install_script.dashboard.is_empty() {
-            self.install_script.dashboard = "https://raw.githubusercontent.com/santaizi-group/santanzi-dashboard/main/script/install_dashboard.sh".into();
+            self.install_script.dashboard = "https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/install_dashboard.sh".into();
         }
         if self.install_script.upgradecollector.is_empty() {
             self.install_script.upgradecollector = "https://raw.githubusercontent.com/santaizi-group/santanzi-dashboard/main/script/upgrade_collector.sh".into();
@@ -631,6 +631,16 @@ impl Config {
             .filter_map(|part| part.trim().parse::<u64>().ok())
             .filter(|id| *id > 0)
             .collect();
+    }
+
+    /// gRPC 监听地址：空 `grpchost` 时绑全接口（Go 监听 `:port` 语义），
+    /// 非空时仍按指定地址绑定。`grpchost` 本职是对外通告地址，安装脚本不写它。
+    pub fn grpc_bind_host(&self) -> &str {
+        if self.grpc_host.trim().is_empty() {
+            "0.0.0.0"
+        } else {
+            self.grpc_host.as_str()
+        }
     }
 
     /// 运行时外部 GeoIP 库路径（env `SANTAIZI_GEOIP_DB`，非 YAML 配置项）。
