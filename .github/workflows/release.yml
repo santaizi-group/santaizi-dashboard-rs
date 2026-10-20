@@ -79,6 +79,8 @@ jobs:
         run: |
           set -euo pipefail
           echo "geoip_week=$(date -u +%g%V)" >> "$GITHUB_ENV"
+          # 发布在独立 job，经 outputs 把周次带给 release notes。
+          echo "geoip_week=$(date -u +%g%V)" >> "$GITHUB_OUTPUT"
           bash script/fetch-geoip.sh -o resource/geoip.db
           test -s resource/geoip.db
 
@@ -106,31 +108,70 @@ jobs:
           zip -j -9 "bin/santaizi-dashboard-${{ matrix.goos }}-${{ matrix.goarch }}.zip" "bin/santaizi-dashboard-${{ matrix.goos }}-${{ matrix.goarch }}"
           rm "bin/santaizi-dashboard-${{ matrix.goos }}-${{ matrix.goarch }}"
 
-      - name: Checksums
-        shell: bash
-        run: sha256sum ./bin/*.zip | awk -F" |/" '{print $1, $NF}' > checksums.txt
+      # 两个原因不能在各矩阵 job 里直接发 Release：私有仓 Actions artifact
+      # 额度按账号共用（约 500MB），且矩阵并行时后创建的正式 Release 必被
+      # GitHub 拒 422 already_exists。产物先传本 run 草稿，由 release job
+      # 取回双架构后合并发布（同探针仓三段式）。
+      - name: Upload binaries to temporary release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          CI_TAG: ci-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if gh release view "$CI_TAG" >/dev/null 2>&1; then
+              break
+            fi
+            gh release create "$CI_TAG" \
+              --draft \
+              --target "${{ github.sha }}" \
+              --title "CI artifacts ${{ github.run_id }}" \
+              --notes "Temporary build outputs for ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. Deleted after publish." \
+              && break || true
+            sleep 2
+          done
+          gh release view "$CI_TAG" >/dev/null
+          shopt -s nullglob
+          files=(bin/*.zip)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no build outputs to upload" >&2
+            exit 1
+          fi
+          gh release upload "$CI_TAG" "${files[@]}" --clobber
 
-      - name: CI release (draft)
-        uses: ncipollo/release-action@v1
-        with:
-          tag: ci-${{ github.run_id }}
-          name: CI ${{ github.run_id }}
-          draft: true
-          prerelease: true
-          artifacts: "checksums.txt,bin/*.zip"
-          body: "GeoIP week: ${{ env.geoip_week }}"
-          generateReleaseNotes: true
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    name: Release
+    permissions:
+      contents: write
+    steps:
+      # gh 从 git remote 推断仓库；本 job 无 checkout，必须显式 GH_REPO，
+      # 否则下载报 "not a git repository"。
+      - name: Download binaries from temporary release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          CI_TAG: ci-${{ github.run_id }}
+        run: |
+          mkdir -p bin
+          gh release download "$CI_TAG" --dir bin
+          ls -la bin/
+
+      - name: Checksum
+        run: sha256sum ./bin/*.zip | awk -F" |/" '{print $1, $NF}' > checksums.txt
 
       - name: Publish tag release
         uses: ncipollo/release-action@v1
         with:
           artifacts: "checksums.txt,bin/*.zip"
-          body: "GeoIP week: ${{ env.geoip_week }}"
+          body: "GeoIP week: ${{ needs.build.outputs.geoip_week }}"
           generateReleaseNotes: true
 
   image:
     name: Build image
-    needs: [build]
+    needs: [release]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -162,7 +203,7 @@ jobs:
     permissions:
       contents: write
     if: ${{ always() && github.event_name != 'pull_request' }}
-    needs: [build]
+    needs: [build, release]
     runs-on: ubuntu-latest
     steps:
       - name: Delete temporary CI release
