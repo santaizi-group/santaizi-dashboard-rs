@@ -44,7 +44,7 @@ const cpuText = computed(() => {
     ? `${props.server.cpuCoreCount} ${t('cores')}`
     : ''
   const usage = `${props.server.cpu.percent.toFixed(1)}%`
-  return [models, cores, usage].filter(Boolean).join(' · ')
+  return [models, cores, usage].filter(Boolean).join(' ')
 })
 const memText = computed(() => {
   const metric = props.server.memory
@@ -72,7 +72,7 @@ function cycleDetail(cycle: ServerStatusView['cycles'][number]) {
   return [
     `${cycle.usedLabel} / ${cycle.quotaLabel}`,
     cycle.remainingLabel ? `${t('remaining')} ${cycle.remainingLabel}` : '',
-  ].filter(Boolean).join(' · ')
+  ].filter(Boolean).join(' ')
 }
 
 async function loadAvailability(id: number) {

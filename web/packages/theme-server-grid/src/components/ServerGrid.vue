@@ -22,8 +22,8 @@ const views = computed(() => toServerStatusViews([...props.servers], props.cycle
 </script>
 
 <template>
-  <section class="status-panel">
-    <header v-if="title" class="group-title">
+  <section class="sg-group">
+    <header v-if="title" class="sg-group__title">
       <span>{{ title }}</span>
       <small>{{ servers.length }}</small>
     </header>

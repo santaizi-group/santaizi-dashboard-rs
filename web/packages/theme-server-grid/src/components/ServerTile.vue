@@ -9,7 +9,7 @@ import {
   type StatusTableColumns,
 } from '@santaizi/theme-server-status'
 
-// 四行纯文字布局（旗+名称 / 系统+价格 / 指标·分隔 / 网速+流量），无进度条、环图与 chip。
+// 四行纯文字布局（旗+名称 / 系统+价格 / 指标 / 网速+流量），无进度条、环图与 chip。
 // 数值染色阈值：>50% 琥珀提示，≥90% 红色告警（后者保原有告警信号）。
 const HOT_PERCENT = 50
 
@@ -70,13 +70,10 @@ function tone(percent: number) {
         <span v-if="columns.price && price" class="sg-tile__price">{{ price }}</span>
       </span>
       <span class="sg-metrics">
-        <template v-for="(item, index) in metrics" :key="item.id">
-          <i v-if="index" class="sg-metric__sep" aria-hidden="true">·</i>
-          <span class="sg-metric">
-            <span class="sg-metric__label">{{ item.label }}</span>
-            <span class="sg-metric__value" :class="tone(item.percent)">{{ item.percent.toFixed(1) }}%</span>
-          </span>
-        </template>
+        <span v-for="item in metrics" :key="item.id" class="sg-metric">
+          <span class="sg-metric__label">{{ item.label }}</span>
+          <span class="sg-metric__value" :class="tone(item.percent)">{{ item.percent.toFixed(1) }}%</span>
+        </span>
       </span>
       <i class="sg-tile__divider" aria-hidden="true"></i>
       <span class="sg-tile__foot">

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { trafficUsageParts, trafficUsageText } from '@santaizi/theme-server-status'
+import { billingText, trafficUsageParts, trafficUsageText, type PublicNoteView } from '@santaizi/theme-server-status'
 
 // 卡片第 4 行把「标签」与「数值」分开着色（标签次要色、数值加粗），
 // 表格行仍用 trafficUsageText 整串；两边的 kind→文案映射必须一致。
@@ -18,6 +18,22 @@ const dict: Record<string, string> = {
 }
 const t = (key: string, values?: Record<string, unknown>) =>
   String(values?.value !== undefined ? `${dict[key] ?? key} ${values.value}` : (dict[key] ?? key))
+
+describe('billingText', () => {
+  const translate = (key: string, values?: Record<string, unknown>) => {
+    if (key === 'cycleYear') return '年'
+    if (key === 'cyclePay') return `${values?.cycle ?? ''}付`
+    return key
+  }
+  const priced = {
+    bill: { amountKind: 'priced', amountValue: '9.90USD', cycleLabel: 'cycleYear' },
+  } as PublicNoteView
+
+  it('joins amount and cycle with a single space', () => {
+    expect(billingText(priced, translate, (key) => key === 'cycleYear')).toBe('9.90USD 年付')
+    expect(billingText(priced, translate, (key) => key === 'cycleYear')).not.toContain('·')
+  })
+})
 
 describe('trafficUsageParts', () => {
   it('splits label and value per kind', () => {

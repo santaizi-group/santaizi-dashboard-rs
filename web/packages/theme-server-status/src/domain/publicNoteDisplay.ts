@@ -15,7 +15,7 @@ export function billingText(view: PublicNoteView, t: Translate, te: TranslateExi
   if (amountKind === 'free') return t('freeBilling')
   if (amountKind === 'priced') {
     if (cycleLabel === 'cycleOnetime') return amountValue
-    return cycle ? `${amountValue} · ${t('cyclePay', { cycle })}` : amountValue
+    return cycle ? `${amountValue} ${t('cyclePay', { cycle })}` : amountValue
   }
   return ''
 }

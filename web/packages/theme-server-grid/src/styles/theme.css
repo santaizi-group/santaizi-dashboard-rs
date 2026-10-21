@@ -1,6 +1,26 @@
 /* ServerGrid 方块矩阵。壳、工具条、抽屉、弹层样式由常驻加载的 theme-server-status/theme.css 提供；
-   本文件只负责 sg-* 矩阵层。卡片为四行纯文字布局（旗+名称 / 系统+价格 / 指标·分隔 / 1px 线 / 网速+流量），
-   深色用截图指定色板，浅色回落 --sz-* 令牌，故颜色全部走 --sg-* 中间变量，深浅免双份规则。 */
+   本文件只负责 sg-* 矩阵层。卡片为四行纯文字布局（旗+名称 / 系统+价格 / 指标 / 1px 线 / 网速+流量），
+   深色用截图指定色板，浅色回落 --sz-* 令牌，故颜色全部走 --sg-* 中间变量，深浅免双份规则。
+   分组不套 status-panel：无边框、无底、无阴影，标题与数量同一行靠左。 */
+
+.sg-group {
+  margin-bottom: 18px;
+}
+.sg-group__title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 12px 8px;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.2;
+  color: var(--sz-text);
+}
+.sg-group__title small {
+  color: var(--sz-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
 
 .sg-grid {
   display: grid;
@@ -25,7 +45,6 @@
   --sg-secondary: var(--sz-text-secondary);
   --sg-label: var(--sz-text-muted);
   --sg-divider: var(--sz-border-subtle);
-  --sg-sep: var(--sz-border);
   --sg-hot: var(--sz-warning);
 
   display: flex;
@@ -52,7 +71,6 @@ html.dark .sg-tile__main {
   --sg-secondary: #8a92a1;
   --sg-label: #7f8796;
   --sg-divider: #20252f;
-  --sg-sep: #3a404d;
   --sg-hot: #f5b84b;
 }
 .sg-tile__main:hover {
@@ -117,10 +135,11 @@ html.dark .sg-tile__main {
 /* 发行版标识只给 Debian 上品牌红，其余跟随次要文字色 */
 .sg-tile__main .ss-os-logo.fl-debian { color: #e0195a; }
 
-/* 第 3 行：资源指标（· 分隔，单行） */
+/* 第 3 行：资源指标（空隙分隔，标签不省略） */
 .sg-metrics {
   display: flex;
   align-items: baseline;
+  gap: 8px;
   min-width: 0;
   margin-top: 11px;
   font-size: 12px;
@@ -129,13 +148,11 @@ html.dark .sg-tile__main {
 .sg-metric {
   display: flex;
   align-items: baseline;
+  flex: 0 0 auto;
   gap: 4px;
-  min-width: 0;
 }
 .sg-metric__label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex: 0 0 auto;
   white-space: nowrap;
   color: var(--sg-label);
 }
@@ -148,12 +165,6 @@ html.dark .sg-tile__main {
 }
 .sg-metric__value.hot { color: var(--sg-hot); }
 .sg-metric__value.danger { color: var(--sz-danger); }
-.sg-metric__sep {
-  flex: 0 0 auto;
-  margin: 0 5px;
-  font-style: normal;
-  color: var(--sg-sep);
-}
 
 /* 分隔线：第 3 行下方 10px，横跨内容区，下方 9px */
 .sg-tile__divider {
