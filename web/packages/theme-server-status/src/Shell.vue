@@ -1,10 +1,9 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
 import { AppDrawer } from '@santaizi/ui'
 import { useInjectedStatusStore } from '@santaizi/status-core'
-import { provideStatusPageActions, type StatusPageAction } from './composables/statusPageActions'
 import { formatProductVersion, PRODUCT_REPO_URL } from './domain/productVersion'
 
 defineProps<{
@@ -22,7 +21,6 @@ const emit = defineEmits<{
 const { t } = useI18n()
 const route = useRoute()
 const store = useInjectedStatusStore()
-const pageActions = provideStatusPageActions()
 const mobileOpen = ref(false)
 const footerText = computed(() => store.bootstrap?.footer_text?.trim() || '')
 const versionLine = computed(() => formatProductVersion(store.bootstrap?.version))
@@ -34,12 +32,6 @@ watch(() => route.fullPath, () => {
 
 function closeMenu() {
   mobileOpen.value = false
-}
-
-async function runAction(action: StatusPageAction) {
-  mobileOpen.value = false
-  await nextTick()
-  action.run()
 }
 </script>
 
@@ -101,11 +93,6 @@ async function runAction(action: StatusPageAction) {
         <RouterLink to="/" @click="closeMenu"><i class="ri-server-line"></i><span>{{ t('statusHome') }}</span></RouterLink>
         <RouterLink to="/service" @click="closeMenu"><i class="ri-heart-pulse-line"></i><span>{{ t('statusServices') }}</span></RouterLink>
         <RouterLink to="/network" @click="closeMenu"><i class="ri-line-chart-line"></i><span>{{ t('statusNetwork') }}</span></RouterLink>
-        <div v-if="pageActions.length" class="status-mobile-nav__actions">
-          <button v-for="action in pageActions" :key="action.id" type="button" @click="runAction(action)">
-            <i :class="action.icon"></i><span>{{ action.label }}</span>
-          </button>
-        </div>
       </nav>
     </AppDrawer>
     <footer>

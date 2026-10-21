@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { PublicMetricPoint } from '@santaizi/api'
 import { AppEmpty } from '@santaizi/ui'
-import { useResourceHistory } from '../composables/useResourceHistory'
+import { MAX_RANGE_MS, useResourceHistory } from '../composables/useResourceHistory'
 import { formatSpeed } from '../domain/transfer'
 import type { ServerStatusView } from '../domain/serverStatusView'
 import ResourceHistoryChart, { type HistorySeries, type HistoryUnit } from './ResourceHistoryChart.vue'
+import TimeRangeChips from './TimeRangeChips.vue'
 
 type HistoryCard = {
   key: string
@@ -29,8 +30,44 @@ const {
   points,
   hasCharts,
   load,
+  setPreset,
   disabledHistoryDate,
 } = useResourceHistory(computed(() => props.server.id))
+
+const presetHours = ref<number | null>(24)
+const customOpen = ref(false)
+const draftStart = ref<Date | null>(null)
+const draftEnd = ref<Date | null>(null)
+
+const customValid = computed(() => {
+  if (!draftStart.value || !draftEnd.value) return false
+  const start = draftStart.value.getTime()
+  const end = draftEnd.value.getTime()
+  return end > start && end - start <= MAX_RANGE_MS
+})
+
+function onPreset(hours: number) {
+  presetHours.value = hours
+  customOpen.value = false
+  setPreset(hours)
+}
+
+function toggleCustom() {
+  customOpen.value = !customOpen.value
+  if (customOpen.value) {
+    const [start, end] = range.value
+    draftStart.value = new Date(start)
+    draftEnd.value = new Date(end)
+    presetHours.value = null
+  }
+}
+
+function applyCustom() {
+  if (!customValid.value || !draftStart.value || !draftEnd.value) return
+  range.value = [new Date(draftStart.value), new Date(draftEnd.value)]
+  customOpen.value = false
+  void load()
+}
 
 function token(name: string, fallback: string) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
@@ -134,20 +171,45 @@ const cards = computed<HistoryCard[]>(() => {
   <section class="ss-detail__section ss-history">
     <header class="ss-history__head">
       <h3>{{ t('nazhua.resourceHistory') }}</h3>
-      <el-date-picker
-        v-model="range"
-        class="ss-history__range"
-        type="datetimerange"
-        format="YYYY-MM-DD HH:mm"
-        unlink-panels
-        :clearable="false"
-        :disabled-date="disabledHistoryDate"
-        :start-placeholder="t('startedAt')"
-        :end-placeholder="t('endedAt')"
-        :aria-label="t('nazhua.resourceHistory')"
-        @change="load"
-      />
+      <div class="ss-history__controls">
+        <TimeRangeChips :hours="presetHours" @update:hours="onPreset" />
+        <button
+          type="button"
+          class="ss-history__custom-toggle"
+          :class="{ 'is-active': customOpen }"
+          :aria-expanded="customOpen"
+          @click="toggleCustom"
+        ><i class="ri-time-line"></i>{{ t('customRange') }}</button>
+      </div>
     </header>
+    <!-- 不用 el-collapse-transition：v-show 直切，避免高度过渡在部分环境测得 0 高且移动端无感 -->
+    <div v-show="customOpen" class="ss-history__custom">
+        <label class="ss-history__field">
+          <span>{{ t('startedAt') }}</span>
+          <el-date-picker
+            v-model="draftStart"
+            type="datetime"
+            format="YYYY-MM-DD HH:mm"
+            :clearable="false"
+            :disabled-date="disabledHistoryDate"
+            :aria-label="t('startedAt')"
+          />
+        </label>
+        <label class="ss-history__field">
+          <span>{{ t('endedAt') }}</span>
+          <el-date-picker
+            v-model="draftEnd"
+            type="datetime"
+            format="YYYY-MM-DD HH:mm"
+            :clearable="false"
+            :disabled-date="disabledHistoryDate"
+            :aria-label="t('endedAt')"
+          />
+        </label>
+        <button type="button" class="ss-history__apply" :disabled="!customValid" @click="applyCustom">
+          {{ t('apply') }}
+        </button>
+      </div>
     <div class="ss-history__body" v-loading="loading && hasCharts">
       <div v-if="!hasCharts && (loading || failed || empty)" class="ss-latency__empty">
         <AppEmpty

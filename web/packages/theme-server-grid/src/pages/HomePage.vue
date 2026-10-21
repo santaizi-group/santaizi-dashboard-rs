@@ -11,7 +11,6 @@ import {
 } from '@santaizi/status-core'
 import {
   mapCycleTransfers,
-  registerStatusPageActions,
   resolveStatusNoteColumns,
   ServerDetailDrawer,
   StatusGlobe,
@@ -118,19 +117,6 @@ function onScrimClick() {
 }
 
 onMounted(loadCycles)
-
-registerStatusPageActions(() => [
-  ...(store.loadError
-    ? [{ id: 'refresh', label: t('refresh'), icon: 'ri-refresh-line', run: () => { void store.load() } }]
-    : []),
-  { id: 'map', label: t('worldMap'), icon: 'ri-earth-line', run: () => { void showMap() } },
-  {
-    id: 'group',
-    label: t(grouped.value ? 'flatView' : 'groupView'),
-    icon: grouped.value ? 'ri-list-check-2' : 'ri-folder-chart-line',
-    run: toggle,
-  },
-])
 </script>
 
 <template>
@@ -169,12 +155,17 @@ registerStatusPageActions(() => [
       <button v-if="store.loadError" type="button" @click="store.load">
         <i class="ri-refresh-line"></i>{{ t('refresh') }}
       </button>
-      <button type="button" class="status-toolbar__page-action" @click="showMap">
-        <i class="ri-earth-line"></i>{{ t('worldMap') }}
+      <button type="button" class="status-toolbar__page-action" :aria-label="t('worldMap')" @click="showMap">
+        <i class="ri-earth-line"></i><span>{{ t('worldMap') }}</span>
       </button>
-      <button type="button" class="status-toolbar__page-action" @click="toggle">
+      <button
+        type="button"
+        class="status-toolbar__page-action"
+        :aria-label="t(grouped ? 'flatView' : 'groupView')"
+        @click="toggle"
+      >
         <i :class="grouped ? 'ri-list-check-2' : 'ri-folder-chart-line'"></i>
-        {{ t(grouped ? 'flatView' : 'groupView') }}
+        <span>{{ t(grouped ? 'flatView' : 'groupView') }}</span>
       </button>
     </div>
 

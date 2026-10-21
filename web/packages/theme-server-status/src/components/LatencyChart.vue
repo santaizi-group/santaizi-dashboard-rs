@@ -2,8 +2,9 @@
 import { toRef } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { AppEmpty } from '@santaizi/ui'
-import { NETWORK_RANGES, useNetworkMonitor } from '../composables/useNetworkMonitor'
+import { useNetworkMonitor } from '../composables/useNetworkMonitor'
 import MonitorLineChart from './MonitorLineChart.vue'
+import TimeRangeChips from './TimeRangeChips.vue'
 
 const props = defineProps<{ serverId: number; hideHeading?: boolean }>()
 const { t } = useI18n()
@@ -39,17 +40,7 @@ const {
             <el-switch v-model="cutPeak" size="small" />
           </label>
         </div>
-        <div class="ss-latency__ranges" role="group" :aria-label="t('nazhua.recent')">
-          <span>{{ t('nazhua.recent') }}</span>
-          <el-button-group>
-            <el-button
-              v-for="item in NETWORK_RANGES"
-              :key="item.hours"
-              :type="hours === item.hours ? 'primary' : 'default'"
-              @click="hours = item.hours"
-            >{{ t(item.labelKey) }}</el-button>
-          </el-button-group>
-        </div>
+        <TimeRangeChips :hours="hours" label @update:hours="hours = $event" />
       </div>
     </header>
     <div v-if="failed || empty || loading" class="ss-latency__empty">
