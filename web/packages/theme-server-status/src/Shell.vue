@@ -44,7 +44,7 @@ async function runAction(action: StatusPageAction) {
 </script>
 
 <template>
-  <div class="server-status-shell">
+  <div class="server-status-shell" :class="'shell--' + publicTheme">
     <a href="#status-main" class="skip-link">{{ t('skipContent') }}</a>
     <header class="status-nav">
       <RouterLink to="/" class="status-brand">

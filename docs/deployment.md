@@ -4,8 +4,6 @@
 
 不做内网穿透、DDNS、Telegram 机器人。没有 OIDC：`oauth2.type: oidc` 登录会返回 501。`mock` 只在 `debug: true` 时能登录，不能用于生产。数据库是全新 SQLite，不迁移 Go 版库。
 
-从端一键命令仍安装 Go 镜像 `ghcr.io/santaizi-group/santaizi-dashboard`，不是本仓镜像。本页的安装脚本只装主面板。
-
 ## 安全
 
 管理后台、OAuth 回调、API 与 WebSocket 不要直接暴露在公网。Web 放在私有网络或反向代理访问控制之后；gRPC（默认 `5555`）只对探针开放，与 Web 入口分开。
@@ -110,6 +108,32 @@ services:
 ```bash
 docker compose up -d
 ```
+
+## 从端
+
+从端与主面板是同一二进制，`mode: collector`。登录后台 → 从端 → 添加从端，在安装弹窗复制一键命令，到观测点主机执行。命令由面板按当前配置生成（端点、端口、TLS 旗标），注册令牌只在弹窗里显示，丢失就轮换。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/install_collector.sh | bash -s -- --primary-endpoint primary.example.com:5555 --token <注册令牌> --grpc-port 5556 --primary-tls false --primary-insecure-tls false
+```
+
+默认装到 `/opt/santaizi/collector-rs`，容器名 `santaizi-collector-rs`，与 Go 版从端（`/opt/santaizi/collector`）可在同一主机共存。`--primary-tls` 跟随主端 `grpc_tls.enabled`；主端证书不在公开信任链（自签）时加 `--primary-insecure-tls true`。
+
+升级不传 `--token`（保留配置与数据，pull 并重建）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/install_collector.sh | bash
+```
+
+日志与卸载：
+
+```bash
+docker logs -f santaizi-collector-rs
+cd /opt/santaizi/collector-rs && docker compose down
+sudo rm -rf /opt/santaizi/collector-rs
+```
+
+主端 CA 轮换或重装后，盘上的从端证书会被主端在 TLS 层拒绝（`UnknownCA`）。从端检测到后自动丢弃旧证书、用注册令牌重新注册，无需手工删数据目录；日志里「主端拒绝了从端证书」即这条自愈路径。持续出现且不恢复，检查主端是否已吊销该从端。
 
 ## 最小配置
 

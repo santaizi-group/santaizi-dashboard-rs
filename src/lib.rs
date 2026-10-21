@@ -22,7 +22,12 @@ pub mod telemetry;
 pub mod traffic_eval;
 pub mod util;
 
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// 版本号：构建期优先取 git tag（见 `build.rs`），取不到回退
+/// `Cargo.toml` 的 `[package] version`（CI 发版会从 tag 同步它）。
+pub const VERSION: &str = match option_env!("SANTAIZI_BUILD_VERSION") {
+    Some(version) if !version.is_empty() => version,
+    _ => env!("CARGO_PKG_VERSION"),
+};
 
 /// 进程级错误别名。
 pub type Result<T> = std::result::Result<T, anyhow::Error>;

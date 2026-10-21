@@ -60,6 +60,19 @@ const REPLICATION_RETRY_MIN: Duration = Duration::from_secs(1);
 const REPLICATION_RETRY_MAX: Duration = Duration::from_secs(10);
 /// probe 从端不落 spool：复制循环空转等待（Go `replicationLoop` 15s）。
 const PROBE_REPLICATION_IDLE: Duration = Duration::from_secs(15);
+/// 证书被主端拒绝后的作废冷却：同一证书问题最多每 30s 重注册一次，
+/// 避免中间件等场景下高频丢弃证书。
+const IDENTITY_RESET_COOLDOWN: Duration = Duration::from_secs(30);
+/// 主端在 TLS 层拒绝从端客户端证书时发出的 fatal alert
+/// （rustls `AlertDescription` 的 Display 形态）。客户端侧校验失败不会
+/// 以 "received fatal alert" 呈现，双重条件避免误判。
+const CLIENT_CERT_REJECTED_ALERTS: [&str; 5] = [
+    "UnknownCA",
+    "BadCertificate",
+    "CertificateUnknown",
+    "CertificateExpired",
+    "CertificateRevoked",
+];
 
 type CollectorClient =
     proto::santaizi_collector_service_client::SantaiziCollectorServiceClient<Channel>;
@@ -85,6 +98,8 @@ struct SyncState {
     last_replication_ack: u64,
     replication_rtt_ms: f64,
     replication_rtt_at: i64,
+    /// 最近一次作废被拒证书的时间（冷却控制重注册频率）。
+    identity_reset_at: Option<Instant>,
 }
 
 pub struct Runtime {
@@ -258,15 +273,69 @@ impl Runtime {
             if self.cancel.is_cancelled() {
                 return Ok(());
             }
-            if let Err(err) = self.sync_once().await
-                && !self.cancel.is_cancelled()
-            {
-                tracing::warn!("collector sync disconnected: {err:#}");
+            match self.sync_once().await {
+                Ok(()) => {}
+                Err(err) => {
+                    if self.cancel.is_cancelled() {
+                        return Ok(());
+                    }
+                    if self.recover_rejected_certificate(&err) {
+                        // 证书已作废：立即重拨重注册，不等 SYNC_RETRY。
+                        continue;
+                    }
+                    tracing::warn!("collector sync disconnected: {err:#}");
+                }
             }
             if !sleep_or_cancel(&self.cancel, SYNC_RETRY).await {
                 return Ok(());
             }
         }
+    }
+
+    /// 主端在 TLS 层不承认从端客户端证书时的自愈：丢弃盘上证书，下一轮
+    /// 不带证书拨号并经注册令牌重新签发。触发场景：主端 CA 轮换 / 主端
+    /// 重装（数据目录重建）/ 从端数据目录复用自其它主端——此时证书还在
+    /// 盘上，`dial` 每次都带上它，握手即被拒，注册请求永远到不了主端，
+    /// 只能死循环重试（Go 同场景需手工删 PKI 目录）。
+    /// 返回 `true` 表示已作废，调用方立即重试。
+    fn recover_rejected_certificate(&self, err: &anyhow::Error) -> bool {
+        let Some(alert) = primary_rejected_client_certificate(err) else {
+            return false;
+        };
+        let has_identity = match self.client_store.identity() {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(err) => {
+                tracing::warn!("collector client certificate unreadable: {err:#}");
+                false
+            }
+        };
+        if !has_identity {
+            // 没有证书还被拒：不是证书问题，走常规重试与日志。
+            return false;
+        }
+        if self.config.registration_token.trim().is_empty() {
+            tracing::error!(
+                "主端拒绝了从端证书（{alert}），且未配置注册令牌，无法自动重新注册；请删除 {} 后重启从端",
+                self.client_store.dir().display()
+            );
+            return false;
+        }
+        {
+            let mut state = self.lock();
+            if let Some(at) = state.identity_reset_at
+                && Instant::now().duration_since(at) < IDENTITY_RESET_COOLDOWN
+            {
+                return false;
+            }
+            state.identity_reset_at = Some(Instant::now());
+        }
+        if let Err(err) = self.client_store.discard_identity() {
+            tracing::error!("作废被主端拒绝的从端证书失败: {err:#}");
+            return false;
+        }
+        tracing::warn!("主端拒绝了从端证书（{alert}）；已丢弃旧证书，将用注册令牌重新注册");
+        true
     }
 
     /// 一轮同步：拨号 → 证书就绪 → 注册 → hello → 收发循环。
@@ -799,6 +868,21 @@ fn host_of(endpoint: &str) -> String {
         .to_string()
 }
 
+/// 错误链是否表示「主端拒绝了从端客户端证书」；命中返回 alert 名。
+/// tonic 把 TLS 握手失败包成 `transport error: connection error:
+/// received fatal alert: <AlertDescription>`，客户端自身校验失败不会
+/// 以 "received fatal alert" 呈现，故双重条件防误判。
+fn primary_rejected_client_certificate(err: &anyhow::Error) -> Option<&'static str> {
+    let chain = format!("{err:#}");
+    if !chain.contains("received fatal alert") {
+        return None;
+    }
+    CLIENT_CERT_REJECTED_ALERTS
+        .iter()
+        .copied()
+        .find(|alert| chain.contains(alert))
+}
+
 /// `durationMilliseconds`：负值夹到 0。
 fn duration_millis(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000.0
@@ -814,6 +898,43 @@ mod tests {
         assert_eq!(host_of("127.0.0.1:18081"), "127.0.0.1");
         assert_eq!(host_of("[::1]:5556"), "::1");
         assert_eq!(host_of("panel.example.com"), "panel.example.com");
+    }
+
+    #[test]
+    fn detects_primary_client_certificate_rejection() {
+        // 形态对齐实战日志：tonic transport error 包 hyper 的 fatal alert。
+        let err = anyhow::anyhow!(
+            "dial primary main.example.in:18181: transport error: connection error: received fatal alert: UnknownCA"
+        );
+        assert_eq!(primary_rejected_client_certificate(&err), Some("UnknownCA"));
+        let wrapped = Err::<(), _>(err)
+            .map_err(|err| anyhow::anyhow!("collector sync worker failed: {err}"))
+            .unwrap_err();
+        assert_eq!(
+            primary_rejected_client_certificate(&wrapped),
+            Some("UnknownCA")
+        );
+    }
+
+    #[test]
+    fn ignores_non_certificate_alerts_and_local_errors() {
+        for message in [
+            // 客户端自身校验服务端证书失败：不呈 "received fatal alert"。
+            "dial primary: transport error: connection error: invalid peer certificate: UnknownIssuer",
+            // 与服务端证书无关的握手告警。
+            "dial primary: transport error: connection error: received fatal alert: HandshakeFailure",
+            "dial primary: transport error: connection error: received fatal alert: ProtocolVersion",
+            // 纯传输/超时类错误。
+            "dial primary: transport error: connection error: Connection reset by peer",
+            "collector sync stream closed by primary",
+        ] {
+            let err = anyhow::anyhow!(message.to_string());
+            assert_eq!(
+                primary_rejected_client_certificate(&err),
+                None,
+                "should not treat as cert rejection: {message}"
+            );
+        }
     }
 
     #[tokio::test]

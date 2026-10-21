@@ -520,14 +520,18 @@ impl Config {
         if self.install_script.macos.is_empty() {
             self.install_script.macos = "https://raw.githubusercontent.com/santaizi-group/santanzi-dashboard/main/script/install.command".into();
         }
+        // 从端安装/升级默认指向本仓脚本：Rust 面板生成的从端安装命令装的
+        // 应是 Rust 版从端（T-0270 前误指向 Go 面板脚本）。Go 面板仍用各自
+        // 的脚本；两边安装目录不同（collector-rs / collector），可共存。
         if self.install_script.collector.is_empty() {
-            self.install_script.collector = "https://raw.githubusercontent.com/santaizi-group/santanzi-dashboard/main/script/install_collector.sh".into();
+            self.install_script.collector = "https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/install_collector.sh".into();
         }
         if self.install_script.dashboard.is_empty() {
             self.install_script.dashboard = "https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/install_dashboard.sh".into();
         }
         if self.install_script.upgradecollector.is_empty() {
-            self.install_script.upgradecollector = "https://raw.githubusercontent.com/santaizi-group/santanzi-dashboard/main/script/upgrade_collector.sh".into();
+            // 同一脚本：不传 --token 即升级模式（pull 并重建，保留配置）。
+            self.install_script.upgradecollector = "https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/install_collector.sh".into();
         }
         if self.install_script.upgrade_linux.is_empty() {
             self.install_script.upgrade_linux = "https://raw.githubusercontent.com/santaizi-group/santanzi-dashboard/main/script/upgrade_agent.sh".into();
@@ -860,6 +864,66 @@ mod tests {
         assert_eq!(conf.retention.evidence_hours, 48);
         assert!(conf.retention.auto_compact());
         assert_eq!(conf.offline_history_retention_days, 365);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 安装脚本（`script/install_collector.sh` 的 `write_config`）产出的
+    /// YAML 必须被本配置结构完整接受：字段名、容器路径与默认值一一对应。
+    /// 脚本改键名而这里没同步，从端会在启动时才发现配置不生效。
+    #[test]
+    fn loads_install_script_collector_yaml() {
+        let dir =
+            std::env::temp_dir().join(format!("santaizi-cfg-collector-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dashboard.yaml");
+        std::fs::write(
+            &path,
+            "mode: collector\ndebug: false\nlanguage: zh-CN\ngrpcport: 5556\n\
+             telemetry:\n  data_dir: /var/lib/santaizi-dashboard\n\
+             collector:\n  primary_endpoint: 'main.example.com:18181'\n\
+             \x20 primary_tls: true\n  primary_insecure_tls: false\n\
+             \x20 registration_token: 'stc_demo'\n\
+             \x20 database_path: /var/lib/santaizi-dashboard/collector.db\n\
+             grpc_tls:\n  enabled: false\n  cert_file: /var/lib/santaizi-dashboard/pki/server.crt\n\
+             \x20 key_file: /var/lib/santaizi-dashboard/pki/server.key\n  client_ca_file: \"\"\n\
+             \x20 require_agent_mtls: false\n  require_collector_mtls: false\n",
+        )
+        .unwrap();
+        let conf = Config::load(path.to_str().unwrap()).unwrap();
+        assert_eq!(conf.mode, "collector");
+        assert_eq!(conf.grpc_port, 5556);
+        assert_eq!(conf.collector.primary_endpoint, "main.example.com:18181");
+        assert!(conf.collector.primary_tls);
+        assert!(!conf.collector.primary_insecure_tls);
+        assert_eq!(conf.collector.registration_token, "stc_demo");
+        assert_eq!(
+            conf.collector.database_path,
+            "/var/lib/santaizi-dashboard/collector.db"
+        );
+        assert!(!conf.grpc_tls.enabled);
+        // 从端安装/升级命令默认指向本仓 Rust 脚本，不跑去 Go 面板。
+        assert!(
+            conf.install_script
+                .collector
+                .contains("santaizi-group/santaizi-dashboard-rs/main/script/install_collector.sh")
+        );
+        assert!(
+            conf.install_script
+                .upgradecollector
+                .contains("santaizi-group/santaizi-dashboard-rs/main/script/install_collector.sh")
+        );
+        assert!(
+            !conf
+                .install_script
+                .collector
+                .contains("santanzi-dashboard/")
+        );
+        assert!(
+            !conf
+                .install_script
+                .upgradecollector
+                .contains("santanzi-dashboard/")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

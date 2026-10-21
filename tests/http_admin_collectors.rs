@@ -156,6 +156,15 @@ async fn collector_create_rotate_scope_and_install_preview() {
     let command = preview["data"]["command"].as_str().unwrap();
     assert!(command.contains("panel.example:5555"), "{command}");
     assert!(command.contains(&new_token), "{command}");
+    // 从端安装命令默认装 Rust 版从端（本仓脚本），不跑去 Go 面板脚本。
+    assert!(
+        command.contains("santaizi-dashboard-rs/main/script/install_collector.sh"),
+        "{command}"
+    );
+    assert!(
+        !command.contains("santanzi-dashboard/main/script/install_collector.sh"),
+        "{command}"
+    );
 
     cancel.cancel();
     let _ = server.await;

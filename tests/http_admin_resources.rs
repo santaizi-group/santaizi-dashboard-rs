@@ -369,6 +369,35 @@ async fn static_endpoints_and_previews() {
     assert!(ids.contains(&"agent_upgrade_linux"));
     assert!(ids.contains(&"agent_uninstall_windows"));
 
+    // 从端相关命令默认指向 Rust 版从端：升级走本仓安装脚本，移除走
+    // collector-rs 目录（T-0270 前误指 Go 面板脚本与 /opt/santaizi/collector）。
+    let collector_commands: Vec<String> = data["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["group"] == "collector")
+        .map(|item| item["command"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        collector_commands
+            .iter()
+            .any(|command| command
+                .contains("santaizi-dashboard-rs/main/script/install_collector.sh")),
+        "{collector_commands:?}"
+    );
+    assert!(
+        collector_commands
+            .iter()
+            .any(|command| command.contains("/opt/santaizi/collector-rs")),
+        "{collector_commands:?}"
+    );
+    assert!(
+        !collector_commands
+            .iter()
+            .any(|command| command.contains("santanzi-dashboard/")),
+        "{collector_commands:?}"
+    );
+
     // install-preview：go / linux，命令带主机、端口与密钥。
     let install = client()
         .post(format!(

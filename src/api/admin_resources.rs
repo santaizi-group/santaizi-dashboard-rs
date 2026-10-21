@@ -1490,7 +1490,8 @@ async fn script_commands(
     }
     out.push(json!({
         "id": "collector_remove", "group": "collector", "platform": "linux",
-        "command": "cd /opt/santaizi/collector && docker compose down", "destructive": true,
+        // Rust 版从端安装目录（与 Go 版 /opt/santaizi/collector 共存）。
+        "command": "cd /opt/santaizi/collector-rs && docker compose down", "destructive": true,
     }));
     out.push(json!({
         "id": "agent_uninstall_posix", "group": "agent", "platform": "posix",

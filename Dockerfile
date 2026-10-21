@@ -20,6 +20,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compil
        fi \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
+# 版本号：默认取 Cargo.toml（CI 在 checkout 里同步成 tag 版本）；本地构建可用
+# --build-arg SANTAIZI_VERSION=v0.1.4 覆盖。空值即回退，见 build.rs。
+ARG SANTAIZI_VERSION=""
+ENV SANTAIZI_BUILD_VERSION=${SANTAIZI_VERSION}
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY proto/ proto/
 COPY src/ src/

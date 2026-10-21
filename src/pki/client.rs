@@ -183,6 +183,22 @@ impl ClientStore {
         write_file_atomic(&self.dir.join(AGENT_CA_NAME), pem, CERT_FILE_MODE)
     }
 
+    /// 丢弃盘上客户端密钥与证书（主端不承认当前证书时重新注册；
+    /// 等价于运维手工删除 `client.key` / `client.crt` 的 remedy）。
+    /// `ca.crt`（主端 CA，仍可用于校验服务端证书）与 `agent-ca.crt`
+    /// （从端 agent 服务信任池）保留，注册成功后会一并刷新。
+    pub fn discard_identity(&self) -> Result<()> {
+        for name in [CLIENT_KEY_NAME, CLIENT_CERT_NAME] {
+            let path = self.dir.join(name);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(anyhow::anyhow!("remove {}: {err}", path.display())),
+            }
+        }
+        Ok(())
+    }
+
     /// 读取 Agent CA；不存在返回空（Go `ClientStore.LoadAgentCA`）。
     pub fn load_agent_ca(&self) -> Result<Vec<u8>> {
         match std::fs::read(self.dir.join(AGENT_CA_NAME)) {
@@ -303,6 +319,28 @@ mod tests {
             cert_der: Vec::new(),
         };
         assert!(broken.expired(now));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discard_identity_keeps_ca_files() {
+        let dir = test_dir("discard");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = ClientStore::new(dir.to_str().unwrap()).unwrap();
+        let bundle =
+            bundle_with_validity(&dir, OffsetDateTime::now_utc() + Duration::from_secs(3600));
+        store.save(&bundle).unwrap();
+        store.save_agent_ca(b"agent-ca-pem").unwrap();
+        std::fs::write(dir.join("ca.crt"), b"primary-ca-pem").unwrap();
+
+        store.discard_identity().unwrap();
+        assert!(store.load().unwrap().is_none());
+        assert!(store.identity().unwrap().is_none());
+        // CA 与 Agent CA 保留：注册刷新前仍可用于校验主端 / agent 服务。
+        assert_eq!(store.load_agent_ca().unwrap(), b"agent-ca-pem");
+        assert_eq!(store.ca_pem().unwrap(), Some(b"primary-ca-pem".to_vec()));
+        // 重复作废（无证书）是幂等空操作。
+        store.discard_identity().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

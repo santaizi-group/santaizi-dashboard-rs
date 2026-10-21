@@ -2,6 +2,8 @@
 .server-status-shell {
   --ss-live: color-mix(in srgb, var(--sz-success) 42%, #4ade80);
   --ss-nav-height: 68px;
+  /* 导航水平缩进：默认与 1640px 容器外缘对齐；%按可视视口解析，避免 100vw 把滚动条算进去 */
+  --ss-nav-inset: max(28px, calc((100% - 1640px) / 2));
   --svc-surface: color-mix(in srgb, var(--sz-bg) 55%, var(--sz-surface));
   --svc-border: var(--sz-border);
   --svc-text: var(--sz-text);
@@ -81,7 +83,7 @@ html.dark .server-status-shell,
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: env(safe-area-inset-top, 0px) max(28px, calc((100vw - 1640px) / 2)) 0;
+  padding: env(safe-area-inset-top, 0px) var(--ss-nav-inset) 0;
   background: var(--sz-surface);
   box-shadow: var(--shadow);
   color: var(--sz-text);
@@ -1193,8 +1195,8 @@ html.dark .status-globe__canvas,
 @media (max-width: 860px) {
   /* lock-scroll 用测量盒滚动条宽度写 body.width；叠加滚动条实际为 0，页面会凭空收窄并抖。 */
   body.el-popup-parent--hidden { width: auto !important; }
-  .server-status-shell { --control-height: var(--touch-min-mobile); --ss-nav-height: 56px; }
-  .status-nav { gap: 8px; padding-right: 8px; padding-left: 8px; }
+  .server-status-shell { --control-height: var(--touch-min-mobile); --ss-nav-height: 56px; --ss-nav-inset: 8px; }
+  .status-nav { gap: 8px; }
   .status-nav__links { display: none; }
   .status-menu-btn { display: inline-grid; }
   .status-brand { min-width: 0; flex: 1 1 auto; }

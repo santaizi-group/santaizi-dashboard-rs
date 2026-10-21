@@ -10,7 +10,7 @@
   display: flex;
   align-items: baseline;
   gap: 8px;
-  padding: 0 12px 8px;
+  padding: 0 0 8px;
   font-size: 14px;
   font-weight: 650;
   line-height: 1.2;
@@ -26,7 +26,7 @@
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 10px;
-  padding: 10px 12px;
+  padding: 10px 0;
 }
 
 .sg-tile {
@@ -224,4 +224,12 @@ html.dark .sg-tile__main {
   .sg-tile__main {
     transition: none;
   }
+}
+
+/* ServerGrid 主题：全宽常量边距。导航/工具条/分组标题/卡片共用一条边距线，
+   桌面 32px、移动 16px，不随窗口宽度伸缩（去掉 1640px 封顶）。 */
+.server-status-shell.shell--server-grid { --ss-nav-inset: 32px; }
+.server-status-shell.shell--server-grid .status-container { width: 100%; }
+@media (max-width: 860px) {
+  .server-status-shell.shell--server-grid { --ss-nav-inset: 16px; }
 }
