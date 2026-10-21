@@ -10,8 +10,9 @@ import {
 } from '@santaizi/theme-server-status'
 
 // 四行纯文字布局（旗+名称 / 系统+价格 / 指标 / 网速+流量），无进度条、环图与 chip。
-// 数值染色阈值：>50% 琥珀提示，≥90% 红色告警（后者保原有告警信号）。
-const HOT_PERCENT = 50
+// 数值染色阈值：≥80% 琥珀提示，≥90% 红色强调，≥100% 红色发光闪烁。
+const HOT_PERCENT = 80
+const ALERT_PERCENT = 90
 
 const props = defineProps<{
   server: ServerStatusView
@@ -37,8 +38,9 @@ const trafficLevel = computed(() => props.server.trafficUsage.statusLevel)
 const tileLabel = computed(() => `${props.server.name} · ${t('serverDetail')} · ${props.server.online ? t('online') : t('offline')}`)
 
 function tone(percent: number) {
-  if (percent >= 90) return 'danger'
-  if (percent > HOT_PERCENT) return 'hot'
+  if (percent >= 100) return 'critical'
+  if (percent >= ALERT_PERCENT) return 'danger'
+  if (percent >= HOT_PERCENT) return 'hot'
   return ''
 }
 </script>
