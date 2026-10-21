@@ -24,9 +24,21 @@
 
 .sg-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  /* 250px 起：220 会把「磁盘 xx.x%」整段裁掉；260 旧值被用户否过（太宽松，6 列大块）。
+     <260px 的窄块由下方容器查询收紧内距与间距兜底，保证最宽指标行（三组「标签 100.0%」）不裁。 */
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
   gap: 10px;
   padding: 10px 0;
+}
+
+.sg-tile {
+  container-type: inline-size;
+}
+@container (max-width: 259.9px) {
+  /* 加 .sg-tile 前缀抬权重：基础规则在文件更后，同权重会被按源码顺序反压 */
+  .sg-tile .sg-tile__main { padding-left: 10px; padding-right: 10px; }
+  .sg-tile .sg-metrics { gap: 5px; }
+  .sg-tile .sg-metric { gap: 2px; }
 }
 
 .sg-tile {
