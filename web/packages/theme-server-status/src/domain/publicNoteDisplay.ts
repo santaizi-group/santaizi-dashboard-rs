@@ -46,6 +46,23 @@ export function planTagLabel(tag: string, t: Translate) {
   return tag
 }
 
+// 卡片式布局要把「标签」与「数值」分开着色（标签弱、数值强），故返回两段；
+// 表格行仍用下面的 trafficUsageText 整串输出。
+export function trafficUsageParts(
+  kind: string,
+  valueLabel: string,
+  t: Translate,
+): { label: string; value: string } {
+  switch (kind) {
+    case 'cycle': return { label: t('trafficLabelRemaining'), value: valueLabel }
+    case 'out': return { label: t('trafficLabelOut'), value: valueLabel }
+    case 'both': return { label: t('trafficLabelBoth'), value: valueLabel }
+    case 'maxOut': return { label: t('trafficLabelMaxOut'), value: valueLabel }
+    case 'maxIn': return { label: t('trafficLabelMaxIn'), value: valueLabel }
+    default: return { label: t('trafficUnlimited'), value: '' }
+  }
+}
+
 export function trafficUsageText(
   kind: string,
   valueLabel: string,

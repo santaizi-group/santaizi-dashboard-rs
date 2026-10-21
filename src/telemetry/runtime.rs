@@ -50,6 +50,7 @@ pub fn upsert_agent_runtime(tx: &Transaction<'_>, row: &AgentRuntimeRow) -> anyh
 
 struct ServerRuntimeRow {
     last_collected_at: i64,
+    last_received_at: i64,
     current_session_id: Vec<u8>,
     current_sequence: u64,
     last_ip: String,
@@ -64,20 +65,21 @@ fn load_server_runtime(
     server_id: i64,
 ) -> anyhow::Result<Option<ServerRuntimeRow>> {
     tx.query_row(
-        "SELECT last_collected_at, current_session_id, current_sequence, last_ip, host_payload, \
-         current_offline_id, last_boot_time, last_uptime \
+        "SELECT last_collected_at, last_received_at, current_session_id, current_sequence, last_ip, \
+         host_payload, current_offline_id, last_boot_time, last_uptime \
          FROM server_runtimes WHERE server_id = ?",
         [server_id],
         |row| {
             Ok(ServerRuntimeRow {
                 last_collected_at: row.get::<_, Option<i64>>(0)?.unwrap_or(0),
-                current_session_id: row.get::<_, Option<Vec<u8>>>(1)?.unwrap_or_default(),
-                current_sequence: row.get::<_, Option<i64>>(2)?.unwrap_or(0).max(0) as u64,
-                last_ip: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                host_payload: row.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default(),
-                current_offline_id: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
-                last_boot_time: row.get::<_, Option<i64>>(6)?.unwrap_or(0).max(0) as u64,
-                last_uptime: row.get::<_, Option<i64>>(7)?.unwrap_or(0).max(0) as u64,
+                last_received_at: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                current_session_id: row.get::<_, Option<Vec<u8>>>(2)?.unwrap_or_default(),
+                current_sequence: row.get::<_, Option<i64>>(3)?.unwrap_or(0).max(0) as u64,
+                last_ip: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                host_payload: row.get::<_, Option<Vec<u8>>>(5)?.unwrap_or_default(),
+                current_offline_id: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                last_boot_time: row.get::<_, Option<i64>>(7)?.unwrap_or(0).max(0) as u64,
+                last_uptime: row.get::<_, Option<i64>>(8)?.unwrap_or(0).max(0) as u64,
             })
         },
     )
@@ -86,6 +88,7 @@ fn load_server_runtime(
 }
 
 /// `touchV2Runtime`：可信帧刷新运行态。返回是否真正应用（乱序帧返回 false）。
+/// v1 unary 上报无序列号，调 `touch_legacy_runtime`（判旧只看接收钟）。
 ///
 /// 同一事务内、覆盖 LastBootTime/LastUptime/LastIP 之前收口离线历史
 /// （Go `closeV2OfflineHistory` 同序）：原因判定比较「离线前」运行态与
@@ -114,6 +117,75 @@ pub fn touch_server_runtime(
             return Ok(false);
         }
     }
+    touch_server_runtime_row(
+        tx,
+        server_id,
+        runtime,
+        node_uuid,
+        session_id,
+        sequence,
+        collected_at_nanos,
+        received_at_nanos,
+        state,
+        host,
+        offline,
+    )
+}
+
+/// v1 unary 上报（`ReportSystemState` / `ReportSystemInfo`）的运行态刷新：
+/// 无 session/sequence，只有接收钟参与判旧，`protocol` 落非 `v2`
+/// （读侧 `runtime_presentation` 因此回落运行态列，不查可用性桶）。
+#[allow(clippy::too_many_arguments)]
+pub fn touch_legacy_runtime(
+    tx: &Transaction<'_>,
+    node_uuid: &[u8],
+    sequence: u64,
+    received_at_nanos: i64,
+    state: Option<&proto::State>,
+    host: Option<&proto::Host>,
+    offline: OfflineHistoryPolicy,
+) -> anyhow::Result<bool> {
+    let server_id = bindings::server_id_from_node_uuid(tx, node_uuid)?
+        .ok_or_else(|| anyhow::anyhow!("node is not bound to a server"))?;
+    let runtime = load_server_runtime(tx, server_id)?;
+    if let Some(runtime) = &runtime {
+        // v1 判旧：Go `Server.LastActive` 语义（后到的上报总是覆盖），
+        // 同一接收钟按调用序覆盖（sequence 恒 0，不再比对 session）。
+        if runtime.last_received_at > received_at_nanos {
+            return Ok(false);
+        }
+    }
+    touch_server_runtime_row(
+        tx,
+        server_id,
+        runtime,
+        node_uuid,
+        &[0u8; 16],
+        sequence,
+        received_at_nanos,
+        received_at_nanos,
+        state,
+        host,
+        offline,
+    )
+}
+
+/// 共享写路径：合并 Host 继承/GeoIP、收口离线记录、upsert 运行态行。
+#[allow(clippy::too_many_arguments)]
+fn touch_server_runtime_row(
+    tx: &Transaction<'_>,
+    server_id: i64,
+    runtime: Option<ServerRuntimeRow>,
+    node_uuid: &[u8],
+    session_id: &[u8],
+    sequence: u64,
+    collected_at_nanos: i64,
+    received_at_nanos: i64,
+    state: Option<&proto::State>,
+    host: Option<&proto::Host>,
+    offline: OfflineHistoryPolicy,
+) -> anyhow::Result<bool> {
+    let legacy = session_id.iter().all(|byte| *byte == 0);
 
     let merged_host = host.map(|host| {
         // 空 IP / 国家码继承上一帧 + GeoIP 按地址兜底（Go `enrichPBHost`）。
@@ -182,19 +254,22 @@ pub fn touch_server_runtime(
     }
 
     let received_text = crate::util::time::unix_nanos_to_sqlite(received_at_nanos);
+    // v1 上报无采集钟与序列号：last_collected_at 跟接收钟、sequence 恒 0，
+    // `protocol` 落非 `v2` 让读侧回落运行态列（Go `ServerRuntime.Protocol` 语义）。
+    let protocol = if legacy { "v1" } else { "v2" };
     let updated = tx.execute(
         "INSERT INTO server_runtimes (server_id, status, first_seen_at, last_seen_at, last_online_at, \
          last_boot_time, last_uptime, last_ip, last_agent_version, current_node_uuid, current_session_id, \
          current_sequence, protocol, host_state, connectivity_state, last_collected_at, last_received_at, \
          state_payload, host_payload, created_at, updated_at) \
-         VALUES (?1, 'online', ?2, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'v2', 'online', 'full', ?10, ?11, ?12, ?13, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) \
+         VALUES (?1, 'online', ?2, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?14, 'online', 'full', ?10, ?11, ?12, ?13, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) \
          ON CONFLICT (server_id) DO UPDATE SET \
          status = 'online', last_seen_at = ?2, last_online_at = ?2, \
          last_boot_time = COALESCE(?3, server_runtimes.last_boot_time), \
          last_uptime = COALESCE(?4, server_runtimes.last_uptime), \
          last_ip = COALESCE(?5, server_runtimes.last_ip), \
          last_agent_version = COALESCE(?6, server_runtimes.last_agent_version), \
-         current_node_uuid = ?7, current_session_id = ?8, current_sequence = ?9, protocol = 'v2', \
+         current_node_uuid = ?7, current_session_id = ?8, current_sequence = ?9, protocol = ?14, \
          host_state = 'online', connectivity_state = 'full', last_collected_at = ?10, last_received_at = ?11, \
          state_payload = COALESCE(?12, server_runtimes.state_payload), \
          host_payload = COALESCE(?13, server_runtimes.host_payload), \
@@ -213,6 +288,7 @@ pub fn touch_server_runtime(
             received_at_nanos,
             state_payload,
             host_payload,
+            protocol,
         ],
     )?;
     Ok(updated > 0)

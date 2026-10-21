@@ -33,7 +33,6 @@ const views = computed(() => toServerStatusViews([...props.servers], props.cycle
         :key="row.id"
         :server="row"
         :columns="props.columns"
-        :show-group="!title"
         @select="emit('select', row.id)"
       />
     </div>

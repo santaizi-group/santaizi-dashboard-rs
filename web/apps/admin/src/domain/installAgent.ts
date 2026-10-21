@@ -25,7 +25,8 @@ export const INSTALL_PRESETS: Record<InstallProfile, MonitoringOptions> = {
 
 export const DEFAULT_INSTALL_PROFILE: InstallProfile = 'standard_cloud'
 export const DEFAULT_INSTALL_PLATFORM: InstallPreviewWrite['platform'] = 'linux'
-export const DEFAULT_INSTALL_IMPLEMENTATION: NonNullable<InstallPreviewWrite['implementation']> = 'go'
+// 默认实现为 Rust；Rust 只出 Linux 命令，弹窗选中时锁定平台为 linux。
+export const DEFAULT_INSTALL_IMPLEMENTATION: NonNullable<InstallPreviewWrite['implementation']> = 'rust'
 export const DEFAULT_CLEAN_INSTALL = true
 
 export function defaultInstallPreviewBody(): InstallPreviewWrite {

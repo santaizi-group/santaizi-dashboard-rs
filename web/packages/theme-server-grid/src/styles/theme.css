@@ -1,5 +1,6 @@
 /* ServerGrid 方块矩阵。壳、工具条、抽屉、弹层样式由常驻加载的 theme-server-status/theme.css 提供；
-   本文件只负责 sg-* 矩阵层，颜色全部走 --sz-* / --ss-* 令牌，深浅色免双份。 */
+   本文件只负责 sg-* 矩阵层。卡片为四行纯文字布局（旗+名称 / 系统+价格 / 指标·分隔 / 1px 线 / 网速+流量），
+   深色用截图指定色板，浅色回落 --sz-* 令牌，故颜色全部走 --sg-* 中间变量，深浅免双份规则。 */
 
 .sg-grid {
   display: grid;
@@ -17,24 +18,45 @@
 }
 
 .sg-tile__main {
+  /* 浅色回落现有令牌 */
+  --sg-surface: var(--sz-surface);
+  --sg-border: var(--sz-border);
+  --sg-text: var(--sz-text);
+  --sg-secondary: var(--sz-text-secondary);
+  --sg-label: var(--sz-text-muted);
+  --sg-divider: var(--sz-border-subtle);
+  --sg-sep: var(--sz-border);
+  --sg-hot: var(--sz-warning);
+
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 0; /* 覆盖 tokens.css 的 button{gap}，行距由各行的 margin-top 精确控制 */
   width: 100%;
   height: 100%;
-  padding: 9px 10px;
+  padding: 11px 12px;
+  overflow: hidden;
   text-align: left;
-  font-family: inherit;
-  font-size: 12px;
-  color: var(--sz-text);
-  background: var(--sz-surface);
-  border: 1px solid var(--sz-border);
+  font-family: Inter, 'Noto Sans SC', system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  color: var(--sg-text);
+  background: var(--sg-surface);
+  border: 1px solid var(--sg-border);
   border-radius: var(--sz-radius);
   cursor: pointer;
   transition: border-color 0.18s ease, box-shadow 0.18s ease;
 }
+html.dark .sg-tile__main {
+  --sg-surface: #14171e;
+  --sg-border: #252a35;
+  --sg-text: #e7e9ee;
+  --sg-secondary: #8a92a1;
+  --sg-label: #7f8796;
+  --sg-divider: #20252f;
+  --sg-sep: #3a404d;
+  --sg-hot: #f5b84b;
+}
 .sg-tile__main:hover {
-  border-color: color-mix(in srgb, var(--ss-accent) 42%, var(--sz-border));
+  border-color: color-mix(in srgb, var(--ss-accent) 42%, var(--sg-border));
   box-shadow: var(--sz-shadow);
 }
 .sg-tile__main:focus-visible {
@@ -42,32 +64,45 @@
   box-shadow: var(--sz-focus);
 }
 
+/* 第 1 行：国旗 + 名称 */
+.sg-tile__head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
 .sg-tile__name {
   display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
-  font-weight: 650;
-  line-height: 1.3;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  line-height: 1.25;
+  color: var(--sg-text);
 }
 
+/* 第 2 行：系统 + 价格 */
 .sg-tile__sub {
   display: flex;
   align-items: center;
-  gap: var(--icon-text-gap, 6px);
+  justify-content: space-between;
+  gap: 8px;
   min-width: 0;
+  min-height: 16px;
+  margin-top: 5px;
   font-size: 12px;
+  font-weight: 400;
   line-height: 1.2;
-  color: var(--sz-text-secondary);
+  color: var(--sg-secondary);
 }
 .sg-tile__os-part {
   display: flex;
   align-items: center;
   gap: var(--icon-text-gap, 6px);
   min-width: 0;
-  margin-left: auto;
 }
 .sg-tile__os {
   min-width: 0;
@@ -75,75 +110,98 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.sg-tile__price {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+/* 发行版标识只给 Debian 上品牌红，其余跟随次要文字色 */
+.sg-tile__main .ss-os-logo.fl-debian { color: #e0195a; }
 
+/* 第 3 行：资源指标（· 分隔，单行） */
 .sg-metrics {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 3px;
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  margin-top: 11px;
   font-size: 12px;
+  line-height: 1.2;
 }
 .sg-metric {
   display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-  line-height: 1.2;
-}
-.sg-metric__label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--sz-text-muted);
-}
-.sg-metric__value {
-  font-variant-numeric: tabular-nums;
-  color: var(--sz-text-secondary);
-}
-.sg-metric__value--warn {
-  color: var(--sz-warning);
-}
-.sg-metric__value--danger {
-  color: var(--sz-danger);
-}
-
-.sg-tile__foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--icon-text-gap, 6px);
-  min-width: 0;
-  font-size: 12px;
-  line-height: 1.2;
-  font-variant-numeric: tabular-nums;
-}
-.sg-tile__speed {
-  color: var(--sz-text-secondary);
-  white-space: nowrap;
-}
-.sg-tile__traffic {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.sg-tile__foot .ss-traffic--fine {
-  color: var(--sz-text-secondary);
-}
-
-.sg-tile__meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  align-items: baseline;
   gap: 4px;
   min-width: 0;
 }
-.sg-tile__meta .meta-tag,
-.sg-tile__meta .ss-chip {
-  max-width: 100%;
+.sg-metric__label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--sg-label);
 }
+.sg-metric__value {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--sg-text);
+}
+.sg-metric__value.hot { color: var(--sg-hot); }
+.sg-metric__value.danger { color: var(--sz-danger); }
+.sg-metric__sep {
+  flex: 0 0 auto;
+  margin: 0 5px;
+  font-style: normal;
+  color: var(--sg-sep);
+}
+
+/* 分隔线：第 3 行下方 10px，横跨内容区，下方 9px */
+.sg-tile__divider {
+  display: block;
+  height: 0;
+  margin-top: 10px;
+  border-top: 1px solid var(--sg-divider);
+}
+
+/* 第 4 行：网速 + 流量 */
+.sg-tile__foot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  margin-top: 9px;
+  font-size: 12px;
+  line-height: 1.2;
+}
+.sg-tile__speed {
+  display: flex;
+  align-items: baseline;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.sg-tile__arrow {
+  flex: 0 0 auto;
+  margin-right: 3px;
+  font-style: normal;
+  color: var(--sg-label);
+}
+.sg-tile__arrow--gap { margin-left: 10px; }
+.sg-tile__num {
+  font-weight: 600;
+  color: var(--sg-text);
+}
+.sg-tile__traffic {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  white-space: nowrap;
+}
+.sg-tile__traffic-label { color: var(--sg-secondary); }
+.sg-tile__traffic.ss-traffic--warning .sg-tile__num { color: var(--sz-warning); }
+.sg-tile__traffic.ss-traffic--alert .sg-tile__num,
+.sg-tile__traffic.ss-traffic--over .sg-tile__num { color: var(--sz-danger); }
 
 @media (max-width: 520px) {
   .sg-grid {

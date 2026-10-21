@@ -20,6 +20,7 @@ pub mod collector_agent;
 pub mod control;
 pub mod enroll;
 pub mod ingest;
+pub mod legacy;
 pub mod support;
 
 /// keepalive：对齐 Go `keepalive.ServerParameters{Time: 60s, Timeout: 20s}`。
@@ -28,7 +29,8 @@ pub mod support;
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
 const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// 主端 gRPC 服务：Enrollment + Collector + Replication + Health。
+/// 主端 gRPC 服务：Enrollment + Collector + Replication + Health
+/// + 旧版 `SantaiziService`（v1 unary，密钥认证互通）。
 pub async fn serve_primary(
     state: Arc<AppState>,
     listener: tokio::net::TcpListener,
@@ -50,6 +52,10 @@ pub async fn serve_primary(
 
     let enrollment = santaizi_enrollment_service_server::SantaiziEnrollmentServiceServer::new(
         enroll::EnrollmentHandler::new(Arc::clone(&state)),
+    );
+    // v1 unary 互通（Go `SantaiziHandlerSingleton`）：旧探针的 client_secret 回退通路。
+    let legacy = proto::santaizi_service_server::SantaiziServiceServer::new(
+        legacy::LegacyHandler::new(Arc::clone(&state)),
     );
     let collector_handler = collector::CollectorHandler::new(Arc::clone(&state));
     let collector = proto::santaizi_collector_service_server::SantaiziCollectorServiceServer::new(
@@ -74,6 +80,7 @@ pub async fn serve_primary(
     );
     builder
         .add_service(enrollment)
+        .add_service(legacy)
         .add_service(collector)
         .add_service(replication)
         .add_service(telemetry)
