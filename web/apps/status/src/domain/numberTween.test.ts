@@ -1,40 +1,44 @@
 import { describe, expect, it } from 'vitest'
-import { createTween, easeOutCubic, tweenDoneAt, tweenValueAt } from '@santaizi/theme-server-status'
+import { createTween, easeInOutCubic, tweenDoneAt, tweenValueAt } from '@santaizi/theme-server-status'
 
-describe('easeOutCubic', () => {
+describe('easeInOutCubic', () => {
   it('pins both endpoints', () => {
-    expect(easeOutCubic(0)).toBe(0)
-    expect(easeOutCubic(1)).toBe(1)
+    expect(easeInOutCubic(0)).toBe(0)
+    expect(easeInOutCubic(1)).toBe(1)
   })
 
-  it('decelerates monotonically and clamps out-of-range input', () => {
+  it('ramps in and out symmetrically, fastest in the middle', () => {
     // 0.25 / 0.5 / 0.75 的缓动值都是二进制精确小数
-    expect([0, 0.25, 0.5, 0.75, 1].map(easeOutCubic)).toEqual([0, 0.578125, 0.875, 0.984375, 1])
-    expect(easeOutCubic(-1)).toBe(0)
-    expect(easeOutCubic(2)).toBe(1)
-    expect(easeOutCubic(Number.NaN)).toBe(1)
+    expect([0, 0.25, 0.5, 0.75, 1].map(easeInOutCubic)).toEqual([0, 0.0625, 0.5, 0.9375, 1])
+    expect(easeInOutCubic(0.25) + easeInOutCubic(0.75)).toBe(1)
+    // 起步慢：前四分之一时间只走 6.25% 路程（ease-out 会走 58%）
+    expect(easeInOutCubic(0.25)).toBeLessThan(0.1)
+  })
+
+  it('clamps out-of-range input', () => {
+    expect(easeInOutCubic(-1)).toBe(0)
+    expect(easeInOutCubic(2)).toBe(1)
+    expect(easeInOutCubic(Number.NaN)).toBe(1)
   })
 })
 
 describe('tweenValueAt', () => {
-  const state = createTween(10, 20, 1000, 700)
+  const state = createTween(10, 20, 1000, 1600)
 
   it('starts at the previous value and ends exactly at the target', () => {
     expect(tweenValueAt(state, 1000)).toBe(10)
-    expect(tweenValueAt(state, 1700)).toBe(20)
-    expect(tweenValueAt(state, 5000)).toBe(20)
+    expect(tweenValueAt(state, 2600)).toBe(20)
+    expect(tweenValueAt(state, 9000)).toBe(20)
   })
 
   it('holds the previous value before the tween clock begins', () => {
     expect(tweenValueAt(state, 900)).toBe(10)
   })
 
-  it('interpolates between endpoints mid-flight, decelerating', () => {
-    const mid = tweenValueAt(state, 1350)
-    expect(mid).toBeGreaterThan(10)
-    expect(mid).toBeLessThan(20)
-    // ease-out：一半时间已走完大半路程
-    expect(mid).toBeGreaterThan(15)
+  it('covers the distance slowly at the edges and fastest in the middle', () => {
+    expect(tweenValueAt(state, 1400)).toBeCloseTo(10.625, 10) // 25% 时间 → 6.25% 路程
+    expect(tweenValueAt(state, 1800)).toBe(15) // 中点
+    expect(tweenValueAt(state, 2200)).toBeCloseTo(19.375, 10) // 75% 时间 → 93.75% 路程
   })
 
   it('snaps to the target for zero or invalid duration', () => {
@@ -49,12 +53,12 @@ describe('tweenValueAt', () => {
 })
 
 describe('tweenDoneAt', () => {
-  const state = createTween(10, 20, 1000, 700)
+  const state = createTween(10, 20, 1000, 1600)
 
   it('reports completion at or after the end', () => {
     expect(tweenDoneAt(state, 1000)).toBe(false)
-    expect(tweenDoneAt(state, 1699)).toBe(false)
-    expect(tweenDoneAt(state, 1700)).toBe(true)
+    expect(tweenDoneAt(state, 2599)).toBe(false)
+    expect(tweenDoneAt(state, 2600)).toBe(true)
   })
 
   it('treats zero duration as already done', () => {

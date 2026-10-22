@@ -42,7 +42,11 @@ describe('useTweenedNumber', () => {
 
     flushFrame(startedAt + 350)
     expect(shown?.value).toBeGreaterThan(100)
-    expect(shown?.value).toBeLessThan(200)
+    expect(shown?.value).toBeLessThan(115) // 1600ms ease-in-out：前 22% 时间只走约 4% 路程
+
+    flushFrame(startedAt + 800)
+    expect(shown?.value).toBeGreaterThan(140)
+    expect(shown?.value).toBeLessThan(160) // 中点附近：一半路程
 
     flushFrame(startedAt + 5000)
     expect(shown?.value).toBe(200)

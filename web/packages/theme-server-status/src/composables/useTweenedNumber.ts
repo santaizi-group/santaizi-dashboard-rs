@@ -1,8 +1,8 @@
 import { onScopeDispose, ref, watch, type Ref } from 'vue'
 import { createTween, tweenDoneAt, tweenValueAt, type TweenState } from '../domain/numberTween'
 
-/** 与 WS 帧间隔（2s）错开：补间在下一帧到达前停稳，不产生追赶感。 */
-const DEFAULT_DURATION = 700
+/** 运动铺满 2s 帧间隔的大部分：留约 0.4s 静止，下一帧到达时已稳稳落位。 */
+const DEFAULT_DURATION = 1600
 
 interface ActiveTween {
   state: TweenState
