@@ -346,6 +346,43 @@ pub fn assignments_for_observer(
     Ok(rows)
 }
 
+/// 取该观测点名下已终结（`valid_to` 已设）的节点 UUID，去重。
+///
+/// 从端 `IsNodeAuthorized` 先查吊销缓存再查指派：只靠「新配置里不再出现该指派」
+/// 也能判越权，但那是隐式的。显式推送终结节点让吊销成为正向信号——
+/// 尤其在指派被提前终结、而 `valid_from/valid_to` 尚未翻过的窗口里。
+/// 此前这里恒返回空表，从端的 `collector_cached_revocations` 与
+/// `is_node_authorized` 的吊销分支都是死代码。
+pub fn revoked_node_uuids_for_observer(
+    conn: &Connection,
+    observer_id: &str,
+) -> anyhow::Result<Vec<Vec<u8>>> {
+    let mut stmt = conn.prepare(
+        // `valid_to = 0` 是全库通用的「未终结」哨兵（见 assignments_for_observer
+        // 的 `COALESCE(valid_to, 0)`），所以「已终结」是 `<> 0` 而不是 `IS NOT NULL`。
+        "SELECT DISTINCT node_uuid FROM observer_assignments \
+         WHERE observer_id = ? AND valid_to IS NOT NULL AND valid_to <> 0",
+    )?;
+    let rows = stmt.query_map([observer_id], |row| row.get::<_, Vec<u8>>(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// 该观测点名下的**在效**节点 UUID 集合（去重）。
+///
+/// 归属校验用：从端凭一条 collector 凭据就能推任意节点的数据，
+/// 等于把「谁能代表这个节点上报」降级成「谁有凭据」。
+pub fn assigned_node_uuids(
+    conn: &Connection,
+    observer_id: &str,
+) -> anyhow::Result<std::collections::HashSet<Vec<u8>>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT node_uuid FROM observer_assignments \
+         WHERE observer_id = ? AND (valid_to = 0 OR valid_to = '')",
+    )?;
+    let rows = stmt.query_map([observer_id], |row| row.get::<_, Vec<u8>>(0))?;
+    Ok(rows.collect::<Result<std::collections::HashSet<_>, _>>()?)
+}
+
 /// `recordIdentityChange`：V2 换绑留下 P0 生命周期事件，证明节点 UUID 变更。
 fn record_identity_change(
     tx: &Transaction<'_>,
@@ -569,6 +606,65 @@ mod tests {
             err.downcast_ref::<BindingError>(),
             Some(BindingError::BoundToOtherNode)
         ));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `revoked_node_uuids` 恒空 → 从端吊销缓存与 `IsNodeAuthorized` 吊销分支
+    /// 全是死代码。终结绑定必须显式推给从端。
+    #[test]
+    fn terminated_bindings_are_reported_as_revoked() {
+        let path = temp_db("revoked");
+        let db = migrate::open_primary(&path).unwrap();
+        seed(&db);
+        let live_node = [2u8; 16];
+        let terminated = [3u8; 16];
+        db.write(|tx| {
+            tx.execute(
+                // secret_ciphertext 上有 UNIQUE 索引，不能与 server 1 复用同一个值。
+                "INSERT INTO servers (id, name, tag, secret_ciphertext, display_index, hide_for_guest) VALUES (2, 's2', 'tag1', X'01', 1, 0)",
+                [],
+            )?;
+            bind_server_node_for_protocol(tx, 1, &live_node, 1_000, true)?;
+            bind_server_node_for_protocol(tx, 2, &terminated, 1_000, true)?;
+            // 终结第二个绑定：与生产代码一致，valid_to 存 TEXT 纳秒串。
+            tx.execute(
+                "UPDATE observer_assignments SET valid_to = ?2 WHERE node_uuid = ?1 AND valid_to = 0",
+                rusqlite::params![terminated.to_vec(), 2_000_i64.to_string()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        // 顺带验证：终结行的 valid_to 是 TEXT，assignments_for_observer 不得因此崩。
+        let all = db
+            .read(|conn| assignments_for_observer(conn, "col1"))
+            .expect("assignments_for_observer 必须在 TEXT valid_to 下仍可用");
+        assert_eq!(all.len(), 2, "两条指派都应返回");
+
+        let revoked = db
+            .read(|conn| revoked_node_uuids_for_observer(conn, "col1"))
+            .unwrap();
+        assert_eq!(revoked, vec![terminated.to_vec()], "只应报终结节点");
+        // 换个观测点：不应看到别人的终结节点。
+        let other = db
+            .read(|conn| revoked_node_uuids_for_observer(conn, "col-other"))
+            .unwrap();
+        assert!(other.is_empty());
+
+        // 在效指派集合只含未终结节点（归属校验的另一半）。
+        let live = db.read(|conn| assigned_node_uuids(conn, "col1")).unwrap();
+        assert_eq!(live.len(), 1, "只应含在效节点：{live:?}");
+        assert!(live.contains(live_node.as_slice()), "在效节点应命中");
+        assert!(
+            !live.contains(terminated.as_slice()),
+            "已终结节点不得仍在在效集合里"
+        );
+        assert!(
+            db.read(|conn| assigned_node_uuids(conn, "col-other"))
+                .unwrap()
+                .is_empty(),
+            "别的观测点看不到这些节点"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

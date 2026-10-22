@@ -216,6 +216,17 @@ pub(crate) fn reset_for_test() {
 mod tests {
     use super::*;
 
+    /// GeoDB 是进程级全局。多个用例并行 `install_for_test` / `reset_for_test`
+    /// 会互相把对方的库清掉或换掉（`bundle_prefers_ipv4` 偶发失败即此）。
+    /// 凡触碰全局库的用例都持这把锁跑完整个函数体。
+    static GEOIP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn geoip_guard() -> std::sync::MutexGuard<'static, ()> {
+        GEOIP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
+
     #[test]
     fn stub_and_garbage_are_invalid() {
         assert!(GeoDb::from_bytes(b"stub".to_vec()).is_none());
@@ -236,6 +247,7 @@ mod tests {
 
     #[test]
     fn bundle_prefers_ipv4() {
+        let _guard = geoip_guard();
         reset_for_test();
         let list = v2ray::GeoIpList {
             entry: vec![
@@ -271,6 +283,7 @@ mod tests {
 
     #[test]
     fn external_path_loads_v2ray_dat() {
+        let _guard = geoip_guard();
         let list = v2ray::GeoIpList {
             entry: vec![v2ray::GeoIp {
                 country_code: "US".into(),
@@ -293,6 +306,8 @@ mod tests {
 
     #[test]
     fn enrich_keeps_existing_country_code() {
+        let _guard = geoip_guard();
+        reset_for_test();
         let mut host = proto::Host {
             country_code: "CN".into(),
             ip: "1.2.3.4".into(),
@@ -300,6 +315,7 @@ mod tests {
         };
         enrich_country_code(&mut host, Some("8.8.8.8"));
         assert_eq!(host.country_code, "CN", "已有码不覆盖");
+        reset_for_test();
     }
 
     fn prost_encode(list: v2ray::GeoIpList) -> Vec<u8> {

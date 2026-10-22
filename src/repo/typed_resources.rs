@@ -85,19 +85,20 @@ pub fn list_monitors(
         _ => "id",
     };
     let direction = if ascending { "ASC" } else { "DESC" };
+    let like = format!("%{}%", crate::util::text::like_contains(q));
     let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM monitors WHERE deleted_at IS NULL AND (?1 = '' OR name LIKE ?1 OR target LIKE ?1)",
-        [q],
+        "SELECT COUNT(*) FROM monitors WHERE deleted_at IS NULL AND (?1 = '' OR name LIKE ?2 ESCAPE '\\' OR target LIKE ?2 ESCAPE '\\')",
+        rusqlite::params![q, like],
         |row| row.get(0),
     )?;
     let sql = format!(
         "SELECT {MONITOR_COLUMNS} FROM monitors \
-         WHERE deleted_at IS NULL AND (?1 = '' OR name LIKE ?1 OR target LIKE ?1) \
-         ORDER BY {sort_column} {direction}, id ASC LIMIT ?2 OFFSET ?3"
+         WHERE deleted_at IS NULL AND (?1 = '' OR name LIKE ?2 ESCAPE '\\' OR target LIKE ?2 ESCAPE '\\') \
+         ORDER BY {sort_column} {direction}, id ASC LIMIT ?3 OFFSET ?4"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
-        .query_map(rusqlite::params![q, limit, offset], monitor_from)?
+        .query_map(rusqlite::params![q, like, limit, offset], monitor_from)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok((rows, total))
 }
@@ -111,7 +112,9 @@ pub fn monitor_by_id(conn: &Connection, id: i64) -> anyhow::Result<Option<Monito
 }
 
 /// 写入（Go `Save`：新建或全量更新，保留 created_at）。
-pub fn save_monitor(tx: &rusqlite::Transaction<'_>, row: &MonitorRow) -> anyhow::Result<()> {
+/// 返回资源 id：新建走 `last_insert_rowid()`，调用方不必再 `SELECT MAX(id)`
+/// （并发写入下 MAX(id) 会读到别人刚插入的行）。
+pub fn save_monitor(tx: &rusqlite::Transaction<'_>, row: &MonitorRow) -> anyhow::Result<i64> {
     if row.id == 0 {
         tx.execute(
             "INSERT INTO monitors (created_at, updated_at, name, type, target, skip_servers_raw, \
@@ -133,7 +136,7 @@ pub fn save_monitor(tx: &rusqlite::Transaction<'_>, row: &MonitorRow) -> anyhow:
                 row.latency_notify as i64,
             ],
         )?;
-        return Ok(());
+        return Ok(tx.last_insert_rowid());
     }
     tx.execute(
         "UPDATE monitors SET updated_at = CURRENT_TIMESTAMP, name = ?2, type = ?3, target = ?4, \
@@ -156,7 +159,7 @@ pub fn save_monitor(tx: &rusqlite::Transaction<'_>, row: &MonitorRow) -> anyhow:
             row.latency_notify as i64,
         ],
     )?;
-    Ok(())
+    Ok(row.id)
 }
 
 /// 硬删 + 连带监控历史（Go `v2DeleteMonitor`），返回是否命中。
@@ -219,19 +222,20 @@ pub fn list_notifications(
         _ => "id",
     };
     let direction = if ascending { "ASC" } else { "DESC" };
+    let like = format!("%{}%", crate::util::text::like_contains(q));
     let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM notifications WHERE deleted_at IS NULL AND (?1 = '' OR name LIKE ?1)",
-        [q],
+        "SELECT COUNT(*) FROM notifications WHERE deleted_at IS NULL AND (?1 = '' OR name LIKE ?2 ESCAPE '\\')",
+        rusqlite::params![q, like],
         |row| row.get(0),
     )?;
     let sql = format!(
         "SELECT {NOTIFICATION_COLUMNS} FROM notifications \
-         WHERE deleted_at IS NULL AND (?1 = '' OR name LIKE ?1) \
-         ORDER BY {sort_column} {direction}, id ASC LIMIT ?2 OFFSET ?3"
+         WHERE deleted_at IS NULL AND (?1 = '' OR name LIKE ?2 ESCAPE '\\') \
+         ORDER BY {sort_column} {direction}, id ASC LIMIT ?3 OFFSET ?4"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
-        .query_map(rusqlite::params![q, limit, offset], notification_from)?
+        .query_map(rusqlite::params![q, like, limit, offset], notification_from)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok((rows, total))
 }
@@ -248,7 +252,7 @@ pub fn notification_by_id(conn: &Connection, id: i64) -> anyhow::Result<Option<N
 pub fn save_notification(
     tx: &rusqlite::Transaction<'_>,
     row: &NotificationRow,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<i64> {
     if row.id == 0 {
         tx.execute(
             "INSERT INTO notifications (created_at, updated_at, name, tag, url, request_method, \
@@ -265,7 +269,7 @@ pub fn save_notification(
                 row.verify_ssl,
             ],
         )?;
-        return Ok(());
+        return Ok(tx.last_insert_rowid());
     }
     tx.execute(
         "UPDATE notifications SET updated_at = CURRENT_TIMESTAMP, name = ?2, tag = ?3, url = ?4, \
@@ -283,7 +287,7 @@ pub fn save_notification(
             row.verify_ssl,
         ],
     )?;
-    Ok(())
+    Ok(row.id)
 }
 
 pub fn delete_notification(tx: &rusqlite::Transaction<'_>, id: i64) -> anyhow::Result<bool> {
@@ -334,19 +338,20 @@ pub fn list_alert_rules(
         _ => "id",
     };
     let direction = if ascending { "ASC" } else { "DESC" };
+    let like = format!("%{}%", crate::util::text::like_contains(q));
     let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM alert_rules WHERE deleted_at IS NULL AND (?1 = '' OR name LIKE ?1)",
-        [q],
+        "SELECT COUNT(*) FROM alert_rules WHERE deleted_at IS NULL AND (?1 = '' OR name LIKE ?2 ESCAPE '\\')",
+        rusqlite::params![q, like],
         |row| row.get(0),
     )?;
     let sql = format!(
         "SELECT {ALERT_RULE_COLUMNS} FROM alert_rules \
-         WHERE deleted_at IS NULL AND (?1 = '' OR name LIKE ?1) \
-         ORDER BY {sort_column} {direction}, id ASC LIMIT ?2 OFFSET ?3"
+         WHERE deleted_at IS NULL AND (?1 = '' OR name LIKE ?2 ESCAPE '\\') \
+         ORDER BY {sort_column} {direction}, id ASC LIMIT ?3 OFFSET ?4"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
-        .query_map(rusqlite::params![q, limit, offset], alert_rule_from)?
+        .query_map(rusqlite::params![q, like, limit, offset], alert_rule_from)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok((rows, total))
 }
@@ -360,7 +365,8 @@ pub fn alert_rule_by_id(conn: &Connection, id: i64) -> anyhow::Result<Option<Ale
         .map_err(Into::into)
 }
 
-pub fn save_alert_rule(tx: &rusqlite::Transaction<'_>, row: &AlertRuleRow) -> anyhow::Result<()> {
+/// 写入：新建或全量更新。返回资源 id（新建走 `last_insert_rowid()`）。
+pub fn save_alert_rule(tx: &rusqlite::Transaction<'_>, row: &AlertRuleRow) -> anyhow::Result<i64> {
     if row.id == 0 {
         tx.execute(
             "INSERT INTO alert_rules (created_at, updated_at, name, rules_raw, enable, \
@@ -374,7 +380,7 @@ pub fn save_alert_rule(tx: &rusqlite::Transaction<'_>, row: &AlertRuleRow) -> an
                 row.notification_tag
             ],
         )?;
-        return Ok(());
+        return Ok(tx.last_insert_rowid());
     }
     tx.execute(
         "UPDATE alert_rules SET updated_at = CURRENT_TIMESTAMP, name = ?2, rules_raw = ?3, \
@@ -389,7 +395,7 @@ pub fn save_alert_rule(tx: &rusqlite::Transaction<'_>, row: &AlertRuleRow) -> an
             row.notification_tag,
         ],
     )?;
-    Ok(())
+    Ok(row.id)
 }
 
 pub fn delete_alert_rule(tx: &rusqlite::Transaction<'_>, id: i64) -> anyhow::Result<bool> {

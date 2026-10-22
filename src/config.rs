@@ -109,6 +109,8 @@ pub struct TelemetryConfig {
     pub heartbeat_interval_seconds: u64,
     pub offline_threshold_seconds: u64,
     pub ingest_batch_size: usize,
+    pub replication_batch_size: usize,
+    pub probe_batch_size: usize,
     pub ingest_queue_size: usize,
     pub sequence_hole_grace_seconds: i64,
     pub credential_validity_days: u64,
@@ -348,6 +350,7 @@ impl Config {
     /// 读取配置：env `SANTAIZI_*` 打底，YAML 覆盖，随后补默认值并校验。
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let env_tree = env_tree();
+        reject_unknown_env_keys(&env_tree)?;
         let file_tree = if Path::new(path).exists() {
             let text = std::fs::read_to_string(path)
                 .map_err(|err| anyhow::anyhow!("read config {path}: {err}"))?;
@@ -428,6 +431,15 @@ impl Config {
         }
         if t.ingest_batch_size == 0 {
             t.ingest_batch_size = 256;
+        }
+        // 复制批次默认值与从端 `REPLICATION_BATCH_SIZE` 对齐，探测批次默认值与
+        // 从端 `ProbeEngine::MAX_BATCH` 对齐：默认配置下自家从端永远不被自己
+        // 的上限挡住，上限只用来拦住异常/恶意的巨型批次。
+        if t.replication_batch_size == 0 {
+            t.replication_batch_size = 512;
+        }
+        if t.probe_batch_size == 0 {
+            t.probe_batch_size = 512;
         }
         if t.ingest_queue_size == 0 {
             t.ingest_queue_size = 4096;
@@ -666,6 +678,28 @@ impl Config {
             anyhow::bail!("config file path is empty");
         }
         let text = serde_yaml::to_string(self)?;
+        // 原子写：直接 truncate + write 会在序列化成功但写入中途失败
+        // （磁盘满 / 断电 / 进程被杀）时留下半份 YAML，下次启动解析失败即
+        // 无法恢复。改为同目录临时文件 + rename，POSIX rename 在同一文件
+        // 系统内是原子的。
+        let path = std::path::Path::new(&self.file_path);
+        let parent = path.parent().filter(|dir| !dir.as_os_str().is_empty());
+        let temp = match parent {
+            Some(dir) => dir.join(format!(
+                ".{}.tmp.{}",
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("config"),
+                std::process::id()
+            )),
+            None => std::path::PathBuf::from(format!(
+                ".{}.tmp.{}",
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("config"),
+                std::process::id()
+            )),
+        };
         #[cfg(unix)]
         {
             use std::io::Write as _;
@@ -675,11 +709,28 @@ impl Config {
                 .create(true)
                 .truncate(true)
                 .mode(0o600)
-                .open(&self.file_path)?;
-            file.write_all(text.as_bytes())?;
+                .open(&temp)?;
+            // 先落盘再 rename：保证 rename 之后目标文件内容必然完整。
+            if let Err(err) = file
+                .write_all(text.as_bytes())
+                .and_then(|_| file.sync_all())
+            {
+                let _ = std::fs::remove_file(&temp);
+                return Err(err.into());
+            }
+            drop(file);
         }
         #[cfg(not(unix))]
-        std::fs::write(&self.file_path, text.as_bytes())?;
+        {
+            if let Err(err) = std::fs::write(&temp, text.as_bytes()) {
+                let _ = std::fs::remove_file(&temp);
+                return Err(err.into());
+            }
+        }
+        if let Err(err) = std::fs::rename(&temp, path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(err.into());
+        }
         Ok(())
     }
 }
@@ -756,6 +807,82 @@ fn insert_dotted(
         current = entry.as_object_mut().expect("object after ensure");
     }
     current.insert(last.to_string(), value);
+}
+
+/// 已知配置键全集（点分小写路径）：由 `Config` 自身序列化得到，避免手抄清单
+/// 与结构体漂移。`#[serde(skip)]` 的派生字段不进 schema，另行白名单。
+fn known_config_paths() -> std::collections::HashSet<String> {
+    let value = serde_json::to_value(Config::default()).unwrap_or(serde_json::Value::Null);
+    let value = lowercase_keys(value);
+    let mut out = std::collections::HashSet::new();
+    collect_leaf_paths(&value, String::new(), &mut out);
+    // 派生字段：由 `ignoredipnotification` 文本解析而来，没有对应 env 键。
+    out.insert("ignoredipnotificationserverids".to_string());
+    out.insert("file_path".to_string());
+    // 非配置项环境变量：不经 `Config` 反序列化，直接 `env::var` 读取。
+    // `SANTAIZI_BUILD_VERSION` 由 CI 注入作编译期版本号（`lib.rs` 的
+    // `option_env!`）；`SANTAIZI_GEOIP_DB` / `SANTAIZI_GEOIP_DOWNLOAD`
+    // 是启动期开关。它们按同样的点分规则落进 env 树，但不是配置字段。
+    for key in ["build.version", "geoip.db", "geoip.download"] {
+        out.insert(key.to_string());
+    }
+    out
+}
+
+fn collect_leaf_paths(
+    value: &serde_json::Value,
+    prefix: String,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                collect_leaf_paths(child, path, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            // 数组整体作为一个键；元素路径由 YAML 侧负责。
+            if !prefix.is_empty() {
+                out.insert(prefix);
+            }
+            let _ = items;
+        }
+        other => {
+            if !prefix.is_empty() {
+                out.insert(prefix);
+            }
+            let _ = other;
+        }
+    }
+}
+
+/// 拒绝拼错/失效的 `SANTAIZI_*` 键。
+///
+/// 原来只依赖 `serde_json::from_value` 的类型检查：命中已知字段才会报错，
+/// 拼错字段名（或少写一层下划线，如 `SEQUENCEHOLEGRACESECONDS` 而非
+/// `SEQUENCE_HOLE_GRACE_SECONDS`）会被静默丢弃——运维以为改了配置，
+/// 实际跑的是默认值，且启动日志一片绿色。这里在加载早期就把它们拦下来。
+fn reject_unknown_env_keys(env_tree: &serde_json::Value) -> anyhow::Result<()> {
+    let known = known_config_paths();
+    let mut paths = std::collections::HashSet::new();
+    collect_leaf_paths(env_tree, String::new(), &mut paths);
+    let mut unknown: Vec<String> = paths
+        .into_iter()
+        .filter(|path| !known.contains(path))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    unknown.sort();
+    anyhow::bail!(
+        "unknown env config key(s): {}. 嵌套段键须与 YAML 字段名逐段对应（下划线不可省）",
+        unknown.join(", ")
+    );
 }
 
 /// YAML → JSON。YAML mapping 保留为 JSON object。
@@ -840,6 +967,18 @@ fn lowercase_keys(value: serde_json::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Config::load` 读进程环境。凡是要临时改 `SANTAIZI_*` 的测试必须持锁，
+    /// 其余调 `load` 的测试也走同一把锁——否则并行跑会互相看见对方临时的覆盖
+    /// （`save_is_atomic` 曾被邻测试的残留 env 打挂）。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn load_locked(path: &str) -> anyhow::Result<Config> {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let out = Config::load(path);
+        drop(guard);
+        out
+    }
 
     #[test]
     fn defaults_for_empty_file() {
@@ -993,6 +1132,103 @@ mod tests {
         assert!(Config::load(path.to_str().unwrap()).is_err());
         std::fs::write(&path, "mode: primary\noauth2:\n  type: mock\n  admin: u1\n").unwrap();
         assert!(Config::load(path.to_str().unwrap()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_unknown_and_mistyped_env_keys() {
+        let dir = std::env::temp_dir().join(format!("santaizi-cfg-envkey-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dashboard.yaml");
+        std::fs::write(&path, "mode: primary\n").unwrap();
+
+        // 嵌套段键少写下划线：键落在树里但对不上任何字段，旧行为是静默丢弃
+        // （运维以为改生效了，实际跑默认值）。
+        let cases: &[(&str, &str)] = &[
+            ("SANTAIZI_TELEMETRY_SEQUENCEHOLEGRACESECONDS", "30"),
+            ("SANTAIZI_TELEMETRY_INGESTQUEUESIZE", "1024"),
+            ("SANTAIZI_ROLLUP_INTERVAL_MINUTES", "5"),
+            ("SANTAIZI_RETENTION_RAW_EVENTS_DAYS", "7"),
+            ("SANTAIZI_SITE_BRNAD", "x"),
+        ];
+        // 持锁跨越 set_var → load → restore：set_var 改的是进程全局环境，
+        // 不持锁时邻测试的 `load` 会在窗口期内看见这里的临时覆盖。
+        let guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        for (key, value) in cases {
+            let previous = std::env::var(key).ok();
+            unsafe { std::env::set_var(key, value) };
+            let result = Config::load(path.to_str().unwrap());
+            match previous {
+                Some(old) => unsafe { std::env::set_var(key, old) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+            let err = result.expect_err(&format!("{key} 应被拒绝"));
+            assert!(
+                err.to_string().contains("unknown env config key"),
+                "{key} 的错误信息应指明未知键，实际：{err}"
+            );
+        }
+        drop(guard);
+
+        // 正确键名 + 错误数值形态：decode 阶段就必须失败。
+        let numeric: &[(&str, &str)] = &[
+            ("SANTAIZI_TELEMETRY_INGEST_QUEUE_SIZE", "not-a-number"),
+            ("SANTAIZI_TELEMETRY_INGEST_QUEUE_SIZE", "-1"),
+            ("SANTAIZI_TELEMETRY_INGEST_QUEUE_SIZE", ""),
+            ("SANTAIZI_GRPC_TLS_REQUIRE_AGENT_MTLS", "yes-please"),
+            ("SANTAIZI_TELEMETRY_AVAILABILITY_BUCKET_SECONDS", "1e9"),
+        ];
+        let guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        for (key, value) in numeric {
+            let previous = std::env::var(key).ok();
+            unsafe { std::env::set_var(key, value) };
+            let result = Config::load(path.to_str().unwrap());
+            match previous {
+                Some(old) => unsafe { std::env::set_var(key, old) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+            assert!(
+                result.is_err(),
+                "{key}={value} 应让启动失败，而不是静默回落"
+            );
+        }
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_is_atomic_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("santaizi-cfg-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dashboard.yaml");
+        std::fs::write(
+            &path,
+            "mode: primary\noauth2:\n  type: mock\n  admin: u1\ndebug: true\n",
+        )
+        .unwrap();
+        let conf = load_locked(path.to_str().unwrap()).unwrap();
+        conf.save().unwrap();
+
+        // 目标文件内容完整可解析。
+        let reloaded = load_locked(path.to_str().unwrap()).unwrap();
+        assert_eq!(reloaded.file_path, conf.file_path);
+
+        // 同目录不得残留临时文件。
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "不得残留临时文件: {leftovers:?}");
+
+        // 权限保持 0600（配置文件含机密字段）。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

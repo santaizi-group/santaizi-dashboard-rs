@@ -225,9 +225,9 @@ pub fn load_connection_summary(
 #[derive(Debug, Clone, Default)]
 pub struct PathSink {
     pub connected: bool,
-    pub pending_events: i64,
+    pub pending_events: u64,
     pub last_error: String,
-    pub ack_through: i64,
+    pub ack_through: u64,
     pub last_rtt_ms: Option<f64>,
     pub rtt_sampled_at: i64,
 }
@@ -396,9 +396,9 @@ pub fn load_connection_paths(
                 (node.clone(), sink.endpoint_id.clone()),
                 PathSink {
                     connected: sink.connected,
-                    pending_events: sink.pending_events as i64,
+                    pending_events: sink.pending_events,
                     last_error: sink.last_error,
-                    ack_through: sink.ack_through as i64,
+                    ack_through: sink.ack_through,
                     last_rtt_ms: Some(sink.last_rtt_ms),
                     rtt_sampled_at: sink.rtt_sampled_at_unix_nano,
                 },
@@ -523,47 +523,51 @@ pub fn list_connection_latency(
         let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|boxed| boxed.as_ref()).collect();
         stmt.query_row(refs.as_slice(), |row| row.get(0))?
     };
+    // limit / offset 同为动态值，必须并入 params：直插文本会绕过类型检查。
+    params.push(Box::new(limit.max(1)));
+    let limit_index = params.len();
+    params.push(Box::new(offset.max(0)));
+    let offset_index = params.len();
     let sql = format!(
         "SELECT b.kind, b.collector_uuid, b.node_uuid, b.observer_id, b.bucket_start, \
          COALESCE(b.min_ms, 0), COALESCE(b.max_ms, 0), COALESCE(b.sum_ms, 0), b.count \
          FROM connection_latency_buckets b {where_clause} \
-         ORDER BY b.bucket_start DESC LIMIT {} OFFSET {}",
-        limit, offset
+         ORDER BY b.bucket_start DESC LIMIT ?{limit_index} OFFSET ?{offset_index}"
     );
     let mut stmt = conn.prepare(&sql)?;
     let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|boxed| boxed.as_ref()).collect();
-    let rows = stmt.query_map(refs.as_slice(), |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, Vec<u8>>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, i64>(4)?,
-            row.get::<_, f64>(5)?,
-            row.get::<_, f64>(6)?,
-            row.get::<_, f64>(7)?,
-            row.get::<_, i64>(8)?,
-        ))
-    })?;
+    let rows = stmt
+        .query_map(refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, f64>(5)?,
+                row.get::<_, f64>(6)?,
+                row.get::<_, f64>(7)?,
+                row.get::<_, i64>(8)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    // node → server 批量解析：`server_id` 必须是行的真值（Go `idx.host(row.NodeUUID)`），
+    // 回显过滤参数会让「按 A 服务器过滤」的响应里出现 B 的 server_id。
+    let nodes: Vec<Vec<u8>> = rows.iter().map(|row| row.2.clone()).collect();
+    let index = HostIndex::load(conn, &nodes, &[])?;
     let mut items = Vec::new();
-    for row in rows {
-        let (kind, collector_id, node, observer_id, bucket_start, min, max, sum, count) = row?;
-        let server_name: Option<String> = conn
-            .query_row(
-                "SELECT s.name FROM server_node_bindings b JOIN servers s ON s.id = b.server_id \
-                 WHERE b.node_uuid = ?1 AND b.current = 1",
-                [&node],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten();
+    for (kind, collector_id, node, observer_id, bucket_start, min, max, sum, count) in rows {
+        let (server_id, server_name) = match index.server(&node) {
+            Some((id, name, _, _)) => (id, name),
+            None => (0, String::new()),
+        };
         let node_hex = hex_uuid(&node);
         let zero_node = node_hex == "00000000000000000000000000000000";
         items.push(json!({
             "kind": kind,
             "collector_id": collector_id,
-            "server_id": server_id.unwrap_or(0),
-            "server_name": server_name.unwrap_or_default(),
+            "server_id": server_id,
+            "server_name": server_name,
             "node_uuid": if zero_node { Value::String(String::new()) } else { Value::String(node_hex) },
             "observer_id": observer_id,
             "bucket_start": optional_rfc3339(bucket_start),
@@ -1166,12 +1170,20 @@ pub fn list_monitor_history(
 ) -> anyhow::Result<(Vec<Value>, String)> {
     let mut conditions = vec!["monitor_id = ?1".to_string()];
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(monitor_id)];
+    // limit 必须 ≥1：下方 `rows[limit - 1]` 与 `take(limit)` 都以它为准。
+    let limit = limit.max(1);
     if let Some(from) = from_nanos {
-        params.push(Box::new(util_time::unix_nanos_to_sqlite(from)));
+        // `created_at` 由 `CURRENT_TIMESTAMP` 写成无后缀串，直接与
+        // `unix_nanos_to_sqlite` 的 `…+00:00` 混比会在同秒边界漏行，故归一化。
+        params.push(Box::new(util_time::sqlite_to_datetime_text(
+            &util_time::unix_nanos_to_sqlite(from),
+        )));
         conditions.push(format!("created_at >= ?{}", params.len()));
     }
     if let Some(to) = to_nanos {
-        params.push(Box::new(util_time::unix_nanos_to_sqlite(to)));
+        params.push(Box::new(util_time::sqlite_to_datetime_text(
+            &util_time::unix_nanos_to_sqlite(to),
+        )));
         conditions.push(format!("created_at <= ?{}", params.len()));
     }
     if let Some(cursor) = cursor.filter(|value| *value > 0) {
@@ -1179,12 +1191,6 @@ pub fn list_monitor_history(
         conditions.push(format!("id < ?{}", params.len()));
     }
     let where_clause = conditions.join(" AND ");
-    let total_sql = format!("SELECT COUNT(*) FROM monitor_histories WHERE {where_clause}");
-    {
-        let mut stmt = conn.prepare(&total_sql)?;
-        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|boxed| boxed.as_ref()).collect();
-        stmt.query_row(refs.as_slice(), |row| row.get::<_, i64>(0))?;
-    }
     let sql = format!(
         "SELECT id, created_at, updated_at, deleted_at, monitor_id, server_id, \
          COALESCE(avg_delay, 0), COALESCE(up, 0), COALESCE(down, 0), COALESCE(data, '') \
@@ -1211,7 +1217,9 @@ pub fn list_monitor_history(
         .collect::<Result<Vec<_>, _>>()?;
     let has_more = rows.len() as i64 > limit;
     let next_cursor = if has_more {
-        rows[limit as usize - 1].0.to_string()
+        rows.get(limit as usize - 1)
+            .map(|row| row.0.to_string())
+            .unwrap_or_default()
     } else {
         String::new()
     };
@@ -1305,7 +1313,9 @@ pub fn list_admin_availability(
         .collect::<Result<Vec<_>, _>>()?;
     let has_more = rows.len() as i64 > limit;
     let next_cursor = if has_more {
-        rows[limit as usize - 1].0.to_string()
+        rows.get(limit as usize - 1)
+            .map(|row| row.0.to_string())
+            .unwrap_or_default()
     } else {
         String::new()
     };
@@ -1392,72 +1402,102 @@ pub fn load_probe_summary(conn: &Connection, now_nanos: i64) -> anyhow::Result<V
     let unknown = collectors.iter().filter(|(.., s)| *s == "unknown").count() as i64;
     let mut paths_assigned = 0i64;
     let mut paths_no_target = 0i64;
-    for (uuid, _, _) in &collectors {
-        let (enable_icmp, enable_tcp, enable_mtr, enable_ipv4, enable_ipv6) = conn.query_row(
-            "SELECT enable_icmp, enable_tcp, enable_mtr, enable_ipv4, enable_ipv6 \
-             FROM collectors WHERE collector_uuid = ?1",
-            [uuid],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)? != 0,
+    // 服务器清单与 collector 能力/范围都只查一次：旧实现在 collector 循环里
+    // 逐端重跑「全表 servers」查询，O(collector × server) 行 + 2×collector 条语句。
+    let servers: Vec<(i64, String, String, bool, bool, bool)> = {
+        let mut stmt = conn.prepare(
+            "SELECT s.id, COALESCE(s.tag, ''), COALESCE(r.last_ip, ''), \
+             COALESCE(s.probe_enable_icmp, 1), COALESCE(s.probe_enable_tcp, 1), \
+             COALESCE(s.probe_enable_mtr, 1) \
+             FROM servers s \
+             LEFT JOIN server_runtimes r ON r.server_id = s.id \
+             WHERE s.deleted_at IS NULL",
+        )?;
+        let mapped = stmt.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get::<_, i64>(3)? != 0,
+                row.get::<_, i64>(4)? != 0,
+                row.get::<_, i64>(5)? != 0,
+            ))
+        })?;
+        mapped.collect::<Result<Vec<_>, _>>()?
+    };
+    let probe_targets: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, COALESCE(probe_target, '') FROM servers WHERE deleted_at IS NULL",
+        )?;
+        let mapped = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        mapped.collect::<Result<Vec<_>, _>>()?
+    };
+    let target_of: std::collections::HashMap<i64, String> = probe_targets.into_iter().collect();
+    let mut capabilities: std::collections::HashMap<String, (bool, bool, bool, bool, bool)> =
+        std::collections::HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT collector_uuid, enable_icmp, enable_tcp, enable_mtr, enable_ipv4, enable_ipv6 \
+             FROM collectors",
+        )?;
+        let mapped = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (
                     row.get::<_, i64>(1)? != 0,
                     row.get::<_, i64>(2)? != 0,
                     row.get::<_, i64>(3)? != 0,
                     row.get::<_, i64>(4)? != 0,
-                ))
-            },
-        )?;
-        let scopes: Vec<(String, String)> = {
-            let mut stmt = conn.prepare(
-                "SELECT scope_type, scope_value FROM collector_scopes WHERE collector_uuid = ?1",
-            )?;
-            let mapped = stmt.query_map([uuid], |row| Ok((row.get(0)?, row.get(1)?)))?;
-            let mut out = Vec::new();
-            for row in mapped {
-                out.push(row?);
-            }
-            out
-        };
-        let servers: Vec<(i64, String, String, String, bool, bool, bool)> = {
-            let mut stmt = conn.prepare(
-                "SELECT s.id, COALESCE(s.tag, ''), COALESCE(s.probe_target, ''), COALESCE(r.last_ip, ''), \
-                 COALESCE(s.probe_enable_icmp, 1), COALESCE(s.probe_enable_tcp, 1), COALESCE(s.probe_enable_mtr, 1) \
-                 FROM servers s \
-                 LEFT JOIN server_runtimes r ON r.server_id = s.id \
-                 WHERE s.deleted_at IS NULL",
-            )?;
-            let mapped = stmt.query_map([], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get::<_, i64>(4)? != 0,
                     row.get::<_, i64>(5)? != 0,
-                    row.get::<_, i64>(6)? != 0,
-                ))
-            })?;
-            let mut out = Vec::new();
-            for row in mapped {
-                out.push(row?);
+                ),
+            ))
+        })?;
+        for row in mapped {
+            let (uuid, caps) = row?;
+            capabilities.insert(uuid, caps);
+        }
+    }
+    let mut scopes_by_collector: std::collections::HashMap<String, Vec<(String, String)>> =
+        std::collections::HashMap::new();
+    {
+        let mut stmt =
+            conn.prepare("SELECT collector_uuid, scope_type, scope_value FROM collector_scopes")?;
+        let mapped = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, String>(1)?, row.get::<_, String>(2)?),
+            ))
+        })?;
+        for row in mapped {
+            let (uuid, scope) = row?;
+            scopes_by_collector.entry(uuid).or_default().push(scope);
+        }
+    }
+    for (uuid, _, _) in &collectors {
+        let (enable_icmp, enable_tcp, enable_mtr, enable_ipv4, enable_ipv6) = capabilities
+            .get(uuid)
+            .copied()
+            .unwrap_or((false, false, false, false, false));
+        let scopes = scopes_by_collector
+            .get(uuid)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        for (server_id, tag, last_ip, server_icmp, server_tcp, server_mtr) in &servers {
+            if !scopes_include_server(scopes, &server_id.to_string(), tag) {
+                continue;
             }
-            out
-        };
-        for (server_id, tag, probe_target, last_ip, server_icmp, server_tcp, server_mtr) in servers
-        {
-            if scopes_include_server(&scopes, &server_id.to_string(), &tag) {
-                paths_assigned += 1;
-                let target = probe_ingest::apply_ip_families(
-                    probe_ingest::resolve_probe_target(&probe_target, &last_ip),
-                    enable_ipv4,
-                    enable_ipv6,
-                );
-                let active = (enable_icmp && server_icmp)
-                    || (enable_tcp && server_tcp)
-                    || (enable_mtr && server_mtr);
-                if !active || target.source == "none" {
-                    paths_no_target += 1;
-                }
+            paths_assigned += 1;
+            let probe_target = target_of.get(server_id).map(String::as_str).unwrap_or("");
+            let target = probe_ingest::apply_ip_families(
+                probe_ingest::resolve_probe_target(probe_target, last_ip),
+                enable_ipv4,
+                enable_ipv6,
+            );
+            let active = (enable_icmp && *server_icmp)
+                || (enable_tcp && *server_tcp)
+                || (enable_mtr && *server_mtr);
+            if !active || target.source == "none" {
+                paths_no_target += 1;
             }
         }
     }
@@ -1504,6 +1544,31 @@ struct ProbePathServer {
     enable_mtr: bool,
 }
 
+/// collector 能力开关（Go `Collector.EnableICMP` 等）。
+type CollectorCaps = (bool, bool, bool, bool, bool);
+/// `probe_latests` 一行：按 (collector_uuid, server_id) 批量预载。
+type ProbeLatestRow = (
+    Option<i64>,
+    Option<i64>,
+    Option<f64>,
+    Option<String>,
+    Option<i64>,
+    Option<f64>,
+    Option<f64>,
+    Option<i64>,
+    Option<i64>,
+    Option<Vec<u8>>,
+    Option<i64>,
+);
+/// `probe_traces` 一行：按 (collector_uuid, server_id) 批量预载。
+type ProbeTraceRow = (
+    Option<Vec<u8>>,
+    Option<i64>,
+    Option<Vec<u8>>,
+    Option<i64>,
+    Option<i64>,
+);
+
 /// Go `LoadProbePaths`：目标来自覆盖地址或运行态 IP，MTR 摘要取末跳丢包。
 pub fn load_probe_paths(
     conn: &Connection,
@@ -1535,12 +1600,15 @@ pub fn load_probe_paths(
                 enable_mtr: row.get::<_, i64>(8)? != 0,
             })
         })?;
-        let mut out = Vec::new();
-        for row in mapped {
-            out.push(row?);
-        }
-        out
+        mapped.collect::<Result<Vec<_>, _>>()?
     };
+    // collector 能力与范围一次性载入；旧实现在 collector 循环里逐端查询，
+    // collector 数 × server 数就是语句数。
+    let (capabilities, scopes_by_collector) = load_collector_caps_and_scopes(conn)?;
+    // probe_latests / probe_traces 同样按 (collector, server) 批量预载：
+    // 逐对查询是 O(collector × server) 次往返。
+    let latests = load_probe_latests(conn, filter_collector)?;
+    let traces = load_probe_traces(conn, filter_collector)?;
     let mut items = Vec::new();
     for (collector_id, collector_name, _status) in &collectors {
         if let Some(filter) = filter_collector.filter(|value| !value.is_empty())
@@ -1548,38 +1616,21 @@ pub fn load_probe_paths(
         {
             continue;
         }
-        let (enable_icmp, enable_tcp, enable_mtr, enable_ipv4, enable_ipv6) = conn.query_row(
-            "SELECT enable_icmp, enable_tcp, enable_mtr, enable_ipv4, enable_ipv6 \
-             FROM collectors WHERE collector_uuid = ?1",
-            [collector_id],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)? != 0,
-                    row.get::<_, i64>(1)? != 0,
-                    row.get::<_, i64>(2)? != 0,
-                    row.get::<_, i64>(3)? != 0,
-                    row.get::<_, i64>(4)? != 0,
-                ))
-            },
-        )?;
-        let scopes: Vec<(String, String)> = {
-            let mut stmt = conn.prepare(
-                "SELECT scope_type, scope_value FROM collector_scopes WHERE collector_uuid = ?1",
-            )?;
-            let mapped = stmt.query_map([collector_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
-            let mut out = Vec::new();
-            for row in mapped {
-                out.push(row?);
-            }
-            out
-        };
+        let (enable_icmp, enable_tcp, enable_mtr, enable_ipv4, enable_ipv6) = capabilities
+            .get(collector_id)
+            .copied()
+            .unwrap_or((false, false, false, false, false));
+        let scopes = scopes_by_collector
+            .get(collector_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         for server in &servers {
             if let Some(filter) = filter_server_id.filter(|id| *id > 0)
                 && filter != server.id
             {
                 continue;
             }
-            if !scopes_include_server(&scopes, &server.id.to_string(), &server.tag) {
+            if !scopes_include_server(scopes, &server.id.to_string(), &server.tag) {
                 continue;
             }
             let server_id = server.id;
@@ -1602,41 +1653,7 @@ pub fn load_probe_paths(
                     ipv6: String::new(),
                 };
             }
-            let latest: Option<(
-                Option<i64>,
-                Option<i64>,
-                Option<f64>,
-                Option<String>,
-                Option<i64>,
-                Option<f64>,
-                Option<f64>,
-                Option<i64>,
-                Option<i64>,
-                Option<Vec<u8>>,
-                Option<i64>,
-            )> = {
-                let mut stmt = conn.prepare(
-                    "SELECT sampled_at, reachable, display_rtt_ms, last_error, icmp_ok, icmp_rtt_ms, \
-                     icmp_loss, icmp_sent, icmp_recv, tcp_json, has_trace \
-                     FROM probe_latests WHERE collector_uuid = ?1 AND server_id = ?2",
-                )?;
-                stmt.query_row(rusqlite::params![collector_id, server_id], |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
-                        row.get(8)?,
-                        row.get(9)?,
-                        row.get(10)?,
-                    ))
-                })
-                .optional()?
-            };
+            let latest = latests.get(&(collector_id.clone(), server_id)).cloned();
             let tcp = latest
                 .as_ref()
                 .and_then(|(.., tcp_json, _)| tcp_json.clone())
@@ -1685,21 +1702,23 @@ pub fn load_probe_paths(
                 item["sampled_at"] = optional_rfc3339(sampled_at);
                 item["display_rtt_ms"] = json!(latest.as_ref().and_then(|row| row.2));
             }
-            if path_mtr
-                && let Some(summary) =
-                    probe_path_mtr(conn, collector_id, server_id, path_icmp, path_tcp)?
-            {
-                let mut mtr = json!({
-                    "loss": summary.loss,
-                    "hop_count": summary.hop_count,
-                    "sampled_at": optional_rfc3339(summary.sampled_at),
-                    "protocol": summary.protocol,
-                });
-                if summary.port > 0 {
-                    mtr["port"] = json!(summary.port);
+            if path_mtr {
+                let summary = traces
+                    .get(&(collector_id.clone(), server_id))
+                    .and_then(|row| mtr_summary_from_row(row, path_icmp, path_tcp));
+                if let Some(summary) = summary {
+                    let mut mtr = json!({
+                        "loss": summary.loss,
+                        "hop_count": summary.hop_count,
+                        "sampled_at": optional_rfc3339(summary.sampled_at),
+                        "protocol": summary.protocol,
+                    });
+                    if summary.port > 0 {
+                        mtr["port"] = json!(summary.port);
+                    }
+                    item["mtr"] = mtr;
+                    item["has_trace"] = json!(true);
                 }
-                item["mtr"] = mtr;
-                item["has_trace"] = json!(true);
             }
             items.push(item);
         }
@@ -1707,38 +1726,154 @@ pub fn load_probe_paths(
     Ok(items)
 }
 
-fn probe_path_mtr(
+fn load_collector_caps_and_scopes(
     conn: &Connection,
-    collector_id: &str,
-    server_id: i64,
+) -> anyhow::Result<(
+    HashMap<String, CollectorCaps>,
+    HashMap<String, Vec<(String, String)>>,
+)> {
+    let mut capabilities: HashMap<String, CollectorCaps> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT collector_uuid, enable_icmp, enable_tcp, enable_mtr, enable_ipv4, enable_ipv6 \
+             FROM collectors",
+        )?;
+        let mapped = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (
+                    row.get::<_, i64>(1)? != 0,
+                    row.get::<_, i64>(2)? != 0,
+                    row.get::<_, i64>(3)? != 0,
+                    row.get::<_, i64>(4)? != 0,
+                    row.get::<_, i64>(5)? != 0,
+                ),
+            ))
+        })?;
+        for row in mapped {
+            let (uuid, caps) = row?;
+            capabilities.insert(uuid, caps);
+        }
+    }
+    let mut scopes: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    {
+        let mut stmt =
+            conn.prepare("SELECT collector_uuid, scope_type, scope_value FROM collector_scopes")?;
+        let mapped = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, String>(1)?, row.get::<_, String>(2)?),
+            ))
+        })?;
+        for row in mapped {
+            let (uuid, scope) = row?;
+            scopes.entry(uuid).or_default().push(scope);
+        }
+    }
+    Ok((capabilities, scopes))
+}
+
+fn load_probe_latests(
+    conn: &Connection,
+    filter_collector: Option<&str>,
+) -> anyhow::Result<HashMap<(String, i64), ProbeLatestRow>> {
+    let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match filter_collector
+        .filter(|value| !value.is_empty())
+    {
+        Some(collector) => (
+            "SELECT collector_uuid, server_id, sampled_at, reachable, display_rtt_ms, last_error, \
+             icmp_ok, icmp_rtt_ms, icmp_loss, icmp_sent, icmp_recv, tcp_json, has_trace \
+             FROM probe_latests WHERE collector_uuid = ?1"
+                .to_string(),
+            vec![Box::new(collector.to_string())],
+        ),
+        None => (
+            "SELECT collector_uuid, server_id, sampled_at, reachable, display_rtt_ms, last_error, \
+             icmp_ok, icmp_rtt_ms, icmp_loss, icmp_sent, icmp_recv, tcp_json, has_trace \
+             FROM probe_latests"
+                .to_string(),
+            Vec::new(),
+        ),
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|boxed| boxed.as_ref()).collect();
+    let rows = stmt.query_map(refs.as_slice(), |row| {
+        let collector: String = row.get(0)?;
+        Ok((
+            collector,
+            row.get::<_, i64>(1)?,
+            (
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+                row.get(11)?,
+                row.get(12)?,
+            ),
+        ))
+    })?;
+    let mut out: HashMap<(String, i64), ProbeLatestRow> = HashMap::new();
+    for row in rows {
+        let (collector, server_id, value) = row?;
+        out.insert((collector, server_id), value);
+    }
+    Ok(out)
+}
+
+fn load_probe_traces(
+    conn: &Connection,
+    filter_collector: Option<&str>,
+) -> anyhow::Result<HashMap<(String, i64), ProbeTraceRow>> {
+    let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) =
+        match filter_collector.filter(|value| !value.is_empty()) {
+            Some(collector) => (
+                "SELECT collector_uuid, server_id, hops_json, sampled_at, tcp_hops_json, \
+             tcp_sampled_at, tcp_port FROM probe_traces WHERE collector_uuid = ?1"
+                    .to_string(),
+                vec![Box::new(collector.to_string())],
+            ),
+            None => (
+                "SELECT collector_uuid, server_id, hops_json, sampled_at, tcp_hops_json, \
+             tcp_sampled_at, tcp_port FROM probe_traces"
+                    .to_string(),
+                Vec::new(),
+            ),
+        };
+    let mut stmt = conn.prepare(&sql)?;
+    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|boxed| boxed.as_ref()).collect();
+    let rows = stmt.query_map(refs.as_slice(), |row| {
+        let collector: String = row.get(0)?;
+        Ok((
+            collector,
+            row.get::<_, i64>(1)?,
+            (
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ),
+        ))
+    })?;
+    let mut out: HashMap<(String, i64), ProbeTraceRow> = HashMap::new();
+    for row in rows {
+        let (collector, server_id, value) = row?;
+        out.insert((collector, server_id), value);
+    }
+    Ok(out)
+}
+
+fn mtr_summary_from_row(
+    row: &ProbeTraceRow,
     enable_icmp: bool,
     enable_tcp: bool,
-) -> anyhow::Result<Option<probe_ingest::MtrSummary>> {
-    let row: Option<(
-        Option<Vec<u8>>,
-        Option<i64>,
-        Option<Vec<u8>>,
-        Option<i64>,
-        Option<i64>,
-    )> = conn
-        .query_row(
-            "SELECT hops_json, sampled_at, tcp_hops_json, tcp_sampled_at, tcp_port \
-             FROM probe_traces WHERE collector_uuid = ?1 AND server_id = ?2",
-            rusqlite::params![collector_id, server_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((hops, sampled_at, tcp_hops, tcp_sampled_at, tcp_port)) = row else {
-        return Ok(None);
-    };
+) -> Option<probe_ingest::MtrSummary> {
+    let (hops, sampled_at, tcp_hops, tcp_sampled_at, tcp_port) = row;
     let icmp = if enable_icmp {
         hops.as_deref()
             .and_then(|raw| probe_ingest::mtr_from_blob(raw, sampled_at.unwrap_or(0), "icmp", 0))
@@ -1753,7 +1888,7 @@ fn probe_path_mtr(
     } else {
         None
     };
-    Ok(probe_ingest::select_mtr(icmp, tcp))
+    probe_ingest::select_mtr(icmp, tcp)
 }
 
 /// Go `ListProbeSamples`（probe_sample_buckets，bucket_start DESC）。
@@ -1791,16 +1926,25 @@ pub fn list_probe_samples(
     };
     let total: i64 = {
         let sql = format!("SELECT COUNT(*) FROM probe_sample_buckets {where_clause}");
-        conn.query_row(&sql, [], |row| row.get(0))?
+        let mut stmt = conn.prepare(&sql)?;
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|boxed| boxed.as_ref()).collect();
+        stmt.query_row(refs.as_slice(), |row| row.get(0))?
     };
+    // limit / offset 同为动态值，必须并入 params：直插文本会绕过类型检查。
+    params.push(Box::new(limit.max(1)));
+    let limit_index = params.len();
+    params.push(Box::new(offset.max(0)));
+    let offset_index = params.len();
     let sql = format!(
         "SELECT collector_uuid, server_id, kind, port, bucket_start, \
          COALESCE(min_ms, 0), COALESCE(max_ms, 0), COALESCE(sum_ms, 0), count, \
          COALESCE(loss_sum, 0), COALESCE(success_count, 0), COALESCE(fail_count, 0) \
-         FROM probe_sample_buckets {where_clause} ORDER BY bucket_start DESC LIMIT {limit} OFFSET {offset}"
+         FROM probe_sample_buckets {where_clause} ORDER BY bucket_start DESC \
+         LIMIT ?{limit_index} OFFSET ?{offset_index}"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |row| {
+    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|boxed| boxed.as_ref()).collect();
+    let rows = stmt.query_map(refs.as_slice(), |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, i64>(1)?,
@@ -1817,7 +1961,35 @@ pub fn list_probe_samples(
         ))
     })?;
     let mut items = Vec::new();
-    for row in rows {
+    let mut rows = rows.collect::<Result<Vec<_>, _>>()?;
+    // server_name 批量解析：逐行反查在分页满载时是 N+1。
+    let mut names: HashMap<i64, String> = HashMap::new();
+    let ids: Vec<i64> = {
+        let mut seen = std::collections::BTreeSet::new();
+        rows.iter()
+            .filter(|row| seen.insert(row.1))
+            .map(|row| row.1)
+            .collect()
+    };
+    if !ids.is_empty() {
+        let placeholders = vec!["?"; ids.len()].join(", ");
+        let sql =
+            format!("SELECT id, COALESCE(name, '') FROM servers WHERE id IN ({placeholders})");
+        let params: Vec<Box<dyn rusqlite::ToSql>> = ids
+            .iter()
+            .map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|boxed| boxed.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let found = stmt.query_map(refs.as_slice(), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in found {
+            let (id, name) = row?;
+            names.insert(id, name);
+        }
+    }
+    for row in rows.drain(..) {
         let (
             collector_id,
             server_id,
@@ -1831,19 +2003,12 @@ pub fn list_probe_samples(
             loss_sum,
             success,
             fail,
-        ) = row?;
-        let server_name: Option<String> = conn
-            .query_row(
-                "SELECT COALESCE(name, '') FROM servers WHERE id = ?1",
-                [server_id],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten();
+        ) = row;
+        let server_name = names.get(&server_id).cloned().unwrap_or_default();
         items.push(json!({
             "collector_id": collector_id,
             "server_id": server_id,
-            "server_name": server_name.unwrap_or_default(),
+            "server_name": server_name,
             "kind": kind,
             "port": port,
             "bucket_start": optional_rfc3339(bucket_start),

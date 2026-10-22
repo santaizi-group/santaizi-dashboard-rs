@@ -95,8 +95,9 @@ pub fn policy_window(policy: &TrafficPolicyRow, now_nanos: i64) -> Option<(i64, 
         return None;
     }
     let anchor = policy.cycle_start_nanos.filter(|nanos| *nanos != 0)?;
-    let interval = policy.cycle_interval;
-    if interval == 0 {
+    // 读侧同样要防：库里可能已有超限的历史行（写侧校验是后加的）。
+    let interval = i64::try_from(policy.cycle_interval).ok()?;
+    if interval <= 0 {
         return None;
     }
     let unit = policy.cycle_unit.as_str();
@@ -109,28 +110,34 @@ pub fn policy_window(policy: &TrafficPolicyRow, now_nanos: i64) -> Option<(i64, 
     let start = match unit {
         "hour" => {
             // Go 用 Unix 秒差取整再加回 anchor，保留亚秒部分。
-            let step_secs = interval as i64 * 3600;
+            // `checked_mul`：回绕成 0 会让下一行除零 panic。
+            let step_secs = interval.checked_mul(3600)?;
             let elapsed = (now_nanos - anchor) / 1_000_000_000;
-            anchor + elapsed / step_secs * step_secs * 1_000_000_000
+            let step_nanos = step_secs.checked_mul(1_000_000_000)?;
+            anchor + elapsed / step_secs * step_nanos
         }
         "day" => {
             let days = (now_nanos - anchor) / DAY_NANOS;
-            let step = days / interval as i64 * interval as i64;
+            let step = days / interval * interval;
             anchor + step * DAY_NANOS
         }
         "week" => {
             let days = (now_nanos - anchor) / DAY_NANOS;
-            let step_days = 7 * interval as i64;
+            let step_days = 7 * interval;
             let step = days / step_days * step_days;
             anchor + step * DAY_NANOS
         }
         // 月/年按日历推进：月末与闰年走 AddDate 归一化语义。
         "month" | "year" => {
+            // 负数步长会让 add_months 永远推不过 now → 死循环。
             let step_months = if unit == "year" {
-                interval as i64 * 12
+                interval.checked_mul(12)?
             } else {
-                interval as i64
+                interval
             };
+            if step_months <= 0 {
+                return None;
+            }
             let mut start = anchor;
             loop {
                 let next = util_time::add_months(start, step_months)?;
@@ -147,13 +154,13 @@ pub fn policy_window(policy: &TrafficPolicyRow, now_nanos: i64) -> Option<(i64, 
 }
 
 /// Go `addCycle`：按周期单位推进一个步长。
-fn add_cycle(nanos: i64, interval: u64, unit: &str) -> Option<i64> {
+fn add_cycle(nanos: i64, interval: i64, unit: &str) -> Option<i64> {
     match unit {
-        "year" => util_time::add_months(nanos, interval as i64 * 12),
-        "month" => util_time::add_months(nanos, interval as i64),
-        "week" => nanos.checked_add(7 * interval as i64 * DAY_NANOS),
-        "day" => nanos.checked_add(interval as i64 * DAY_NANOS),
-        "hour" => nanos.checked_add(interval as i64 * HOUR_NANOS),
+        "year" => util_time::add_months(nanos, interval.checked_mul(12)?),
+        "month" => util_time::add_months(nanos, interval),
+        "week" => nanos.checked_add(interval.checked_mul(7)?.checked_mul(DAY_NANOS)?),
+        "day" => nanos.checked_add(interval.checked_mul(DAY_NANOS)?),
+        "hour" => nanos.checked_add(interval.checked_mul(HOUR_NANOS)?),
         _ => None,
     }
 }
@@ -304,6 +311,22 @@ pub fn validate(write: &mut PolicyWrite) -> Result<(), String> {
             "hour" | "day" | "week" | "month" | "year"
         ) {
             return Err("cycle unit must be hour, day, week, month, or year".into());
+        }
+        // 上限保证 `interval * 单位跨度` 永不回绕：hour 的回绕会得到 step_secs = 0
+        // → 除零 panic；month/year 的回绕会得到负数步长 → add_months 死循环。
+        let max_interval = match write.cycle_unit.as_str() {
+            "hour" => 100_000,
+            "day" => 100_000,
+            "week" => 10_000,
+            "month" => 1_200,
+            "year" => 100,
+            _ => 1,
+        };
+        if write.cycle_interval > max_interval {
+            return Err(format!(
+                "cycle_interval for unit {} must not exceed {max_interval}",
+                write.cycle_unit
+            ));
         }
     } else {
         write.cycle_interval = 1;
@@ -797,7 +820,12 @@ mod tests {
     /// 2026-10-16T00:00:00Z。
     const BASE: i64 = 1_792_108_800_000_000_000;
 
-    fn policy(mode: &str, cycle_start: Option<i64>, interval: u64, unit: &str) -> TrafficPolicyRow {
+    pub(super) fn policy(
+        mode: &str,
+        cycle_start: Option<i64>,
+        interval: u64,
+        unit: &str,
+    ) -> TrafficPolicyRow {
         TrafficPolicyRow {
             id: 1,
             server_id: 1,
@@ -814,7 +842,7 @@ mod tests {
         }
     }
 
-    fn write(name: &str) -> PolicyWrite {
+    pub(super) fn write(name: &str) -> PolicyWrite {
         PolicyWrite {
             name: name.into(),
             direction: rollup::TRAFFIC_DIRECTION_TOTAL.into(),
@@ -1117,5 +1145,82 @@ mod tests {
             vec![1]
         );
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod cycle_interval_guard_tests {
+    use super::tests::{policy, write};
+    use super::validate;
+    use super::{DAY_NANOS as DAY, HOUR_NANOS as HOUR, TRAFFIC_MODE_RECURRING, policy_window};
+
+    /// 2026-10-16T00:00:00Z。
+    const BASE: i64 = 1_792_108_800_000_000_000;
+
+    /// `interval * 3600` 回绕成 0 → 除零 panic（hour）。
+    /// 这里用远超上限的 interval 触发回绕路径，确认返回 None 而不是 panic。
+    #[test]
+    fn oversized_hour_interval_does_not_panic_or_wrap() {
+        // 2^63 / 3600 ≈ 2.56e15；再大就会让 `interval * 3600` 回绕成负数或 0。
+        let interval = u64::MAX / 3_600 + 10;
+        let row = policy(TRAFFIC_MODE_RECURRING, Some(BASE), interval, "hour");
+        assert_eq!(policy_window(&row, BASE + DAY), None);
+    }
+
+    /// `interval * 12` 回绕成负数 → add_months 死循环（month/year）。
+    #[test]
+    fn oversized_year_interval_does_not_hang() {
+        let interval = u64::MAX / 6 + 10;
+        let row = policy(TRAFFIC_MODE_RECURRING, Some(BASE), interval, "year");
+        assert_eq!(policy_window(&row, BASE + DAY), None);
+    }
+
+    /// 读侧同样要防超限（写侧校验是后加的，库里可能已有历史行）。
+    #[test]
+    fn oversized_interval_is_rejected_on_read_side() {
+        let row = policy(TRAFFIC_MODE_RECURRING, Some(BASE), u64::MAX, "month");
+        assert_eq!(policy_window(&row, BASE + DAY), None);
+    }
+
+    /// 写侧按单位设上限。
+    #[test]
+    fn write_side_caps_interval_per_unit() {
+        let mut w = write("p");
+        w.mode = TRAFFIC_MODE_RECURRING.into();
+        w.cycle_start_nanos = Some(BASE);
+        w.cycle_unit = "hour".into();
+        w.cycle_interval = 100_001;
+        assert!(validate(&mut w).is_err(), "hour 超过 100000 应拒");
+
+        w.cycle_interval = 100_000;
+        assert!(validate(&mut w).is_ok(), "hour 100000 应放行");
+
+        w.cycle_unit = "year".into();
+        w.cycle_interval = 101;
+        assert!(validate(&mut w).is_err(), "year 超过 100 应拒");
+
+        w.cycle_interval = 100;
+        assert!(validate(&mut w).is_ok(), "year 100 应放行");
+    }
+
+    /// 上限之内的正常策略行为不变（回归护栏）。
+    #[test]
+    fn sane_interval_still_computes_windows() {
+        assert_eq!(
+            policy_window(
+                &policy(TRAFFIC_MODE_RECURRING, Some(BASE), 6, "hour"),
+                BASE + 13 * HOUR
+            ),
+            Some((BASE + 12 * HOUR, Some(BASE + 18 * HOUR)))
+        );
+        // 3 个月步长：BASE=2026-10-16，+90 天 = 2027-01-14，再 +3 个月 = 2027-04-14。
+        // 期望值按日历月推进（add_months），不是固定的 90 天。
+        let (start, end) = policy_window(
+            &policy(TRAFFIC_MODE_RECURRING, Some(BASE), 3, "month"),
+            BASE + 100 * DAY,
+        )
+        .expect("3 个月步长应算出窗口");
+        assert!(start > BASE, "窗口起点应晚于锚点");
+        assert!(end.expect("recurring 应有窗口终点") > start);
     }
 }

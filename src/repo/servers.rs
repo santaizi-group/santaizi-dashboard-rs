@@ -308,21 +308,24 @@ pub fn list_admin(
         _ => "COALESCE(s.display_index, 0)",
     };
     let direction = if ascending { "ASC" } else { "DESC" };
+    // `q` 是用户输入：`%`/`_` 必须转义，否则「100%」会匹配所有行。
+    // COUNT 与 SELECT 用同一个转义值，避免计数与行数不一致。
+    let like = format!("%{}%", crate::util::text::like_contains(q));
     let total: i64 = conn.query_row(
         "SELECT COUNT(*) FROM servers s WHERE s.deleted_at IS NULL \
-         AND (?1 = '' OR s.name LIKE ?1 OR s.tag LIKE ?1 OR s.note LIKE ?1)",
-        [q],
+         AND (?1 = '' OR s.name LIKE ?2 ESCAPE '\\' OR s.tag LIKE ?2 ESCAPE '\\' OR s.note LIKE ?2 ESCAPE '\\')",
+        rusqlite::params![q, like],
         |row| row.get(0),
     )?;
     let sql = format!(
         "SELECT {ADMIN_SELECT} FROM servers s \
          LEFT JOIN server_runtimes r ON r.server_id = s.id \
-         WHERE s.deleted_at IS NULL AND (?2 = '' OR s.name LIKE ?2 OR s.tag LIKE ?2 OR s.note LIKE ?2) \
-         ORDER BY {sort_column} {direction}, s.id ASC LIMIT ?3 OFFSET ?4"
+         WHERE s.deleted_at IS NULL AND (?2 = '' OR s.name LIKE ?3 ESCAPE '\\' OR s.tag LIKE ?3 ESCAPE '\\' OR s.note LIKE ?3 ESCAPE '\\') \
+         ORDER BY {sort_column} {direction}, s.id ASC LIMIT ?4 OFFSET ?5"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
-        rusqlite::params![now_nanos, q, limit, offset],
+        rusqlite::params![now_nanos, q, like, limit, offset],
         admin_row_from,
     )?;
     let mut items = Vec::new();
@@ -408,10 +411,37 @@ pub fn update_admin_server(
     )?)
 }
 
-/// 硬删服务器与其监控历史（Go `v2DeleteServer`：Server + MonitorHistory）。
+/// 硬删服务器及其所有关联数据。
+///
+/// Go `onServerDelete` 还会 `EndServerNodeBinding` + `OnDeleteServer` + 删
+/// `Transfer` / `ServerRuntime` / `ServerOfflineHistory`；Rust 侧原先只删
+/// `servers` + `monitor_histories`，留下一堆引用已删 server_id 的孤儿行
+/// （重新占用同一 id 时会读到上一任的传输量与运行态）。
+///
+/// `server_node_bindings` 只终结未来 assignment（`current=0` + `valid_to`），
+/// **不删行**：历史观测与可用性证据必须保持不可变（Go 注释同义）。
+/// `availability_incidents` / `incident_revisions` 同样保留。
 pub fn delete_server(tx: &Transaction<'_>, id: i64) -> anyhow::Result<usize> {
     tx.execute("DELETE FROM servers WHERE id = ?1", [id])?;
-    Ok(tx.execute("DELETE FROM monitor_histories WHERE server_id = ?1", [id])?)
+    let deleted = tx.execute("DELETE FROM monitor_histories WHERE server_id = ?1", [id])?;
+    tx.execute("DELETE FROM transfers WHERE server_id = ?1", [id])?;
+    tx.execute("DELETE FROM server_runtimes WHERE server_id = ?1", [id])?;
+    tx.execute(
+        "DELETE FROM server_offline_histories WHERE server_id = ?1",
+        [id],
+    )?;
+    tx.execute(
+        "DELETE FROM observer_assignments WHERE node_uuid IN \
+         (SELECT node_uuid FROM server_node_bindings WHERE server_id = ?1)",
+        [id],
+    )?;
+    tx.execute(
+        "UPDATE server_node_bindings SET current = 0, valid_to = COALESCE(valid_to, \
+         CAST(strftime('%s', 'now') AS INTEGER) * 1000000000) \
+         WHERE server_id = ?1 AND current = 1",
+        [id],
+    )?;
+    Ok(deleted)
 }
 
 /// 重置可用性（Go `ResetServerAvailability`）：硬删离线历史并复位运行态；

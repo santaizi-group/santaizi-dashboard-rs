@@ -5,14 +5,16 @@ use std::path::{Path, PathBuf};
 
 use sha2::Digest as _;
 
-pub struct Source {
-    pub url: &'static str,
+/// 带生命周期的源描述：`SOURCES` 是 `'static`，测试里的本地 stub 用短生命周期即可，
+/// 不必再靠 `Box::leak` 伪造 `'static`（那会在进程里永久泄漏内存）。
+pub struct Source<'a> {
+    pub url: &'a str,
     /// 可选 sha256 伴生文件（`<hex>  <filename>` 或纯 hex）。
-    pub checksum_url: Option<&'static str>,
+    pub checksum_url: Option<&'a str>,
 }
 
 /// 源表顺序即回退顺序；全部来自 GitHub release 资产，免令牌。
-pub const SOURCES: &[Source] = &[
+pub const SOURCES: &[Source<'_>] = &[
     Source {
         url: "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat",
         checksum_url: Some(
@@ -36,7 +38,7 @@ pub const SOURCES: &[Source] = &[
 ];
 
 /// 拉取成功返回落盘路径；全部源失败返回 None。
-pub fn fetch_first(sources: &[Source], dest: &Path) -> Option<PathBuf> {
+pub fn fetch_first(sources: &[Source<'_>], dest: &Path) -> Option<PathBuf> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .user_agent(concat!("santaizi-dashboard/", env!("CARGO_PKG_VERSION")))
@@ -58,7 +60,7 @@ pub fn fetch_first(sources: &[Source], dest: &Path) -> Option<PathBuf> {
 
 fn fetch_one(
     client: &reqwest::blocking::Client,
-    source: &Source,
+    source: &Source<'_>,
     dest: &Path,
 ) -> Result<PathBuf, String> {
     let response = client
@@ -161,14 +163,12 @@ mod tests {
         let dest = std::env::temp_dir().join(format!("santaizi-geoip-dl-{}", std::process::id()));
         let sources = [
             Source {
-                url: Box::leak(format!("{base}/bad.dat").into_boxed_str()),
+                url: &format!("{base}/bad.dat"),
                 checksum_url: None,
             },
             Source {
-                url: Box::leak(format!("{base}/good.dat").into_boxed_str()),
-                checksum_url: Some(Box::leak(
-                    format!("{base}/good.dat.sha256sum").into_boxed_str(),
-                )),
+                url: &format!("{base}/good.dat"),
+                checksum_url: Some(&format!("{base}/good.dat.sha256sum")),
             },
         ];
         let path = fetch_first(&sources, &dest).expect("第二源应成功");
@@ -190,10 +190,8 @@ mod tests {
         let dest =
             std::env::temp_dir().join(format!("santaizi-geoip-dl-bad-{}", std::process::id()));
         let sources = [Source {
-            url: Box::leak(format!("{base}/good.dat").into_boxed_str()),
-            checksum_url: Some(Box::leak(
-                format!("{base}/good.dat.sha256sum").into_boxed_str(),
-            )),
+            url: &format!("{base}/good.dat"),
+            checksum_url: Some(&format!("{base}/good.dat.sha256sum")),
         }];
         assert!(fetch_first(&sources, &dest).is_none());
         assert!(!dest.exists());
