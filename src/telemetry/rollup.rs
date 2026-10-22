@@ -464,11 +464,17 @@ pub(crate) fn upsert_state_rollup(
         return Ok(());
     }
     let encoded = prost::Message::encode_to_vec(rollup);
+    // 晚到的 StateRollup（补传/乱序）不得覆盖已经卷好的窗口：那会用一份
+    // 样本更少的局部聚合换掉完整聚合，且 `rollup_hour_window` 下一轮还会
+    // 把这个被污染的分钟值卷进小时桶，错误就此固化。
+    // 只接受「样本数不劣于已存行」的更新；相等时保留先到者（在时限内到达的
+    // 通常是按轮次正常聚合出来的那份）。
     tx.execute(
         "INSERT INTO state_rollups (node_uuid, resolution, window_start, window_end, sample_count, payload, net_in_total, net_out_total, created_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP) \
          ON CONFLICT (node_uuid, resolution, window_start) DO UPDATE SET \
-         window_end = ?4, sample_count = ?5, payload = ?6, net_in_total = ?7, net_out_total = ?8",
+         window_end = ?4, sample_count = ?5, payload = ?6, net_in_total = ?7, net_out_total = ?8 \
+         WHERE excluded.sample_count >= state_rollups.sample_count",
         rusqlite::params![
             node_uuid,
             resolution,
@@ -1251,5 +1257,132 @@ mod tests {
         assert_eq!(hour_rows[0].2, 2);
         assert_eq!(hour_rows[0].3, 700);
         assert_eq!(hour_rows[0].4, 300);
+    }
+}
+
+#[cfg(test)]
+mod late_state_rollup_tests {
+    use super::*;
+    use crate::db::migrate;
+    use std::sync::Arc;
+
+    const NODE: [u8; 16] = [0x5a; 16];
+    const MINUTE: i64 = 60 * 1_000_000_000;
+    /// 2026-10-16T00:00:00Z。
+    const BASE: i64 = 1_792_108_800_000_000_000;
+
+    fn worker(name: &str) -> RollupWorker {
+        let dir = std::env::temp_dir().join(format!(
+            "santaizi-rollup-late-{name}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("panel.db").to_string_lossy().into_owned();
+        RollupWorker::new(
+            migrate::open_primary(&path).unwrap(),
+            RetentionPolicy::default().normalized(),
+            Arc::new(StateSampleBuffer::new()),
+        )
+    }
+
+    fn payload(start: i64, end: i64, samples: u32, net_in: u64) -> proto::StateRollupPayload {
+        proto::StateRollupPayload {
+            window_start_unix_nano: start,
+            window_end_unix_nano: end,
+            sample_count: samples,
+            net_in_total: net_in,
+            net_out_total: net_in / 2,
+            ..Default::default()
+        }
+    }
+
+    fn row(worker: &RollupWorker, start: i64) -> (u32, u64) {
+        worker
+            .db
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT sample_count, net_in_total FROM state_rollups WHERE window_start = ?1",
+                    [start],
+                    |r| Ok((r.get::<_, u32>(0)?, r.get::<_, u64>(1)?)),
+                )?)
+            })
+            .unwrap()
+    }
+
+    /// 晚到（样本更少）的 StateRollup 不得覆盖已卷好的窗口。
+    #[test]
+    fn late_partial_rollup_does_not_clobber_complete_window() {
+        let worker = worker("clobber");
+        worker
+            .db
+            .write(|tx| {
+                upsert_state_rollup(
+                    tx,
+                    &NODE,
+                    RESOLUTION_1M,
+                    &payload(BASE, BASE + MINUTE, 60, 600),
+                )?;
+                // 乱序补传：只覆盖了窗口的一小段。
+                upsert_state_rollup(
+                    tx,
+                    &NODE,
+                    RESOLUTION_1M,
+                    &payload(BASE, BASE + MINUTE, 3, 30),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(row(&worker, BASE), (60, 600), "完整聚合必须保留");
+    }
+
+    /// 更完整的重算（样本数不劣）应当生效——否则窗口永远停在首次的劣化值。
+    #[test]
+    fn fuller_rollup_still_updates() {
+        let worker = worker("fuller");
+        worker
+            .db
+            .write(|tx| {
+                upsert_state_rollup(
+                    tx,
+                    &NODE,
+                    RESOLUTION_1M,
+                    &payload(BASE, BASE + MINUTE, 3, 30),
+                )?;
+                upsert_state_rollup(
+                    tx,
+                    &NODE,
+                    RESOLUTION_1M,
+                    &payload(BASE, BASE + MINUTE, 60, 600),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(row(&worker, BASE), (60, 600), "更完整的重算应生效");
+    }
+
+    /// 样本数相等时放行：同窗口重投（复制重试）携带的是同一份数据，
+    /// 覆盖无差别；真正的劣化——样本更少——才被挡住。
+    #[test]
+    fn equal_sample_count_is_allowed_through() {
+        let worker = worker("equal");
+        worker
+            .db
+            .write(|tx| {
+                upsert_state_rollup(
+                    tx,
+                    &NODE,
+                    RESOLUTION_1M,
+                    &payload(BASE, BASE + MINUTE, 10, 100),
+                )?;
+                upsert_state_rollup(
+                    tx,
+                    &NODE,
+                    RESOLUTION_1M,
+                    &payload(BASE, BASE + MINUTE, 10, 999),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(row(&worker, BASE), (10, 999), "相等样本数应放行");
     }
 }

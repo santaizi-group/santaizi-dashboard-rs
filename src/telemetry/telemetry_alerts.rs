@@ -58,7 +58,9 @@ pub struct PendingNotice {
     pub mute_key: String,
 }
 
+#[derive(Clone)]
 struct Incident {
+    id: i64,
     node_uuid: Vec<u8>,
     initial: String,
     current: String,
@@ -120,19 +122,20 @@ fn scan_incidents(
 ) -> anyhow::Result<()> {
     let cutoff = now_nanos.saturating_sub(3_600_000_000_000);
     let mut stmt = conn.prepare(
-        "SELECT node_uuid, initial_classification, current_classification, revision, started_at, \
+        "SELECT id, node_uuid, initial_classification, current_classification, revision, started_at, \
          COALESCE(ended_at, 0) FROM availability_incidents \
          WHERE current_classification IN ('HOST_OFFLINE', 'CONNECTIVITY_DEGRADED') \
            AND (COALESCE(ended_at, 0) = 0 OR started_at >= ?1)",
     )?;
     let rows = stmt.query_map([cutoff], |row| {
         Ok(Incident {
-            node_uuid: row.get(0)?,
-            initial: row.get(1)?,
-            current: row.get(2)?,
-            revision: row.get(3)?,
-            started_at: row.get(4)?,
-            ended_at: row.get(5)?,
+            id: row.get(0)?,
+            node_uuid: row.get(1)?,
+            initial: row.get(2)?,
+            current: row.get(3)?,
+            revision: row.get(4)?,
+            started_at: row.get(5)?,
+            ended_at: row.get(6)?,
         })
     })?;
     let mut incidents = Vec::new();
@@ -140,8 +143,8 @@ fn scan_incidents(
         incidents.push(row?);
     }
     drop(stmt);
-    let episodes = episode_starts(&incidents, policy.availability_bucket_nanos);
-    for (index, incident) in incidents.iter().enumerate() {
+    let bucket = policy.availability_bucket_nanos;
+    for incident in incidents.iter() {
         let mut notify = match incident.current.as_str() {
             HOST_OFFLINE => policy.notify_host_offline && !policy.suppress_host_offline_notify,
             CONNECTIVITY_DEGRADED => policy.notify_connectivity,
@@ -159,7 +162,7 @@ fn scan_incidents(
             "episode/{}/{}/{}",
             incident.current,
             hex(&incident.node_uuid),
-            episodes[index]
+            episode_anchor(conn, incident, bucket)?
         );
         if create_alert(
             conn,
@@ -488,34 +491,67 @@ fn episode_from_dedup(dedup: &str) -> i64 {
         .unwrap_or(0)
 }
 
-fn episode_starts(incidents: &[Incident], bucket: i64) -> Vec<i64> {
+/// episode 锚点：沿 `bucket` 链一路回溯到链头事件。
+///
+/// **必须与 1h 扫描窗无关**。扫描窗只决定「哪些事件值得发告警」，不决定
+/// 「它们属于哪个 episode」。若锚点按窗口内的集合分组算，窗口每滑过一次，
+/// 链头事件（`started_at` 早于 `now - 1h` 且已结束）就掉出集合，锚点随之
+/// 变成晚一步的事件 → 去重键更换 → 同一 episode 反复告警、反复通知。
+///
+/// 回溯不带时间下限，因此链头多老都能找到；`started_at` 严格递减保证终止。
+/// 步数上限只为兜住病态库（持续抖动会让链极长），截断后取当时最老的一环。
+fn episode_anchor(conn: &Connection, incident: &Incident, bucket: i64) -> anyhow::Result<i64> {
     let bucket = if bucket <= 0 { 30_000_000_000 } else { bucket };
-    let mut order: Vec<usize> = (0..incidents.len()).collect();
-    order.sort_by(|&left, &right| {
-        let a = &incidents[left];
-        let b = &incidents[right];
-        a.node_uuid
-            .cmp(&b.node_uuid)
-            .then_with(|| a.current.cmp(&b.current))
-            .then_with(|| a.started_at.cmp(&b.started_at))
-    });
-    let mut starts = vec![0; incidents.len()];
-    let mut prev: Option<usize> = None;
-    let mut prev_start = 0i64;
-    for index in order {
-        let incident = &incidents[index];
-        if let Some(previous) = prev
-            && same_episode(&incidents[previous], incident, bucket)
-        {
-            starts[index] = prev_start;
-        } else {
-            starts[index] = incident.started_at;
-            prev_start = incident.started_at;
+    let mut anchor = incident.started_at;
+    let mut cursor = Incident {
+        id: incident.id,
+        node_uuid: incident.node_uuid.clone(),
+        initial: incident.initial.clone(),
+        current: incident.current.clone(),
+        revision: incident.revision,
+        started_at: incident.started_at,
+        ended_at: incident.ended_at,
+    };
+    for _ in 0..EPISODE_WALK_LIMIT {
+        let previous: Option<Incident> = conn
+            .query_row(
+                "SELECT id, node_uuid, initial_classification, current_classification, revision, \
+                      started_at, COALESCE(ended_at, 0) \
+                 FROM availability_incidents \
+                 WHERE node_uuid = ?1 AND current_classification = ?2 \
+                   AND (started_at < ?3 OR (started_at = ?3 AND id < ?4)) \
+                 ORDER BY started_at DESC, id DESC LIMIT 1",
+                params![
+                    cursor.node_uuid,
+                    cursor.current,
+                    cursor.started_at,
+                    cursor.id
+                ],
+                |row| {
+                    Ok(Incident {
+                        id: row.get(0)?,
+                        node_uuid: row.get(1)?,
+                        initial: row.get(2)?,
+                        current: row.get(3)?,
+                        revision: row.get(4)?,
+                        started_at: row.get(5)?,
+                        ended_at: row.get(6)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(previous) = previous else { break };
+        if !same_episode(&previous, &cursor, bucket) {
+            break;
         }
-        prev = Some(index);
+        anchor = previous.started_at;
+        cursor = previous;
     }
-    starts
+    Ok(anchor)
 }
+
+/// 单次回溯的步数上限：兜住病态库，不影响正常链（每环 ≤ bucket）。
+const EPISODE_WALK_LIMIT: usize = 512;
 
 fn same_episode(prev: &Incident, curr: &Incident, bucket: i64) -> bool {
     if prev.node_uuid != curr.node_uuid || prev.current != curr.current {
@@ -573,7 +609,7 @@ mod tests {
         migrate::open_primary(dir.join("panel.db").to_str().unwrap()).unwrap()
     }
 
-    fn policy(notify: bool, suppress: bool) -> AlertPolicy {
+    pub(super) fn policy(notify: bool, suppress: bool) -> AlertPolicy {
         AlertPolicy {
             notify_host_offline: notify,
             notify_connectivity: false,
@@ -651,5 +687,193 @@ mod tests {
             .read(|conn| scan(conn, &policy(true, false), now))
             .unwrap();
         assert!(second.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod episode_anchor_tests {
+    use super::tests::policy;
+    use super::*;
+    use crate::db::migrate;
+
+    const NODE: [u8; 16] = [0x11; 16];
+    const OTHER: [u8; 16] = [0x22; 16];
+    const BUCKET: i64 = 30_000_000_000;
+
+    fn db(tag: &str) -> crate::db::Db {
+        let dir = std::env::temp_dir().join(format!(
+            "santaizi-episode-anchor-{tag}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        migrate::open_primary(dir.join("panel.db").to_str().unwrap()).unwrap()
+    }
+
+    fn incident(
+        db: &crate::db::Db,
+        node: &[u8],
+        classification: &str,
+        started_at: i64,
+        ended_at: i64,
+    ) {
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO availability_incidents \
+                 (node_uuid, initial_classification, current_classification, revision, started_at, ended_at) \
+                 VALUES (?1, ?2, ?2, 1, ?3, ?4)",
+                params![node, classification, started_at, ended_at],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn load(db: &crate::db::Db, node: &[u8], started_at: i64) -> Incident {
+        db.read(|conn| {
+            Ok(conn.query_row(
+                "SELECT id, node_uuid, initial_classification, current_classification, revision, \
+                        started_at, COALESCE(ended_at, 0) \
+                 FROM availability_incidents WHERE node_uuid = ?1 AND started_at = ?2",
+                params![node, started_at],
+                |row| {
+                    Ok(Incident {
+                        id: row.get(0)?,
+                        node_uuid: row.get(1)?,
+                        initial: row.get(2)?,
+                        current: row.get(3)?,
+                        revision: row.get(4)?,
+                        started_at: row.get(5)?,
+                        ended_at: row.get(6)?,
+                    })
+                },
+            )?)
+        })
+        .unwrap()
+    }
+
+    fn anchor(db: &crate::db::Db, incident: &Incident) -> i64 {
+        db.read(|conn| episode_anchor(conn, incident, BUCKET))
+            .unwrap()
+    }
+
+    /// 核心回归：链头事件已结束且早于 1h 扫描窗，锚点仍须是链头。
+    /// 旧实现按窗口内集合分组，链头一掉出窗口锚点就后移 → 换 key → 重复告警。
+    #[test]
+    fn anchor_ignores_the_one_hour_scan_window() {
+        let db = db("window");
+        let head = 1_000_000_000_000i64;
+        incident(&db, &NODE, HOST_OFFLINE, head, head + 10_000_000_000);
+        // 与链头相隔 20s（≤ bucket）⇒ 同一 episode；且远早于 now - 1h。
+        let tail = head + 20_000_000_000;
+        incident(&db, &NODE, HOST_OFFLINE, tail, 0);
+
+        // now 取 1h + 60s 后：`now - 1h = head + 60s`，晚于 tail(head+20s)。
+        let now = head + 3_600_000_000_000 + 60_000_000_000;
+        assert!(
+            head < now - 3_600_000_000_000,
+            "构造前提：链头必须已在 1h 扫描窗外"
+        );
+        // 晚到事件靠 ended_at = 0 留在窗内（它的 started_at 也早已过窗）。
+        assert_eq!(
+            anchor(&db, &load(&db, &NODE, tail)),
+            head,
+            "锚点必须锚在链头，与扫描窗无关"
+        );
+        // 顺带确认扫描窗确实把链头排除在外（否则测试空转）。
+        let in_window = db
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM availability_incidents \
+                     WHERE current_classification = 'HOST_OFFLINE' \
+                       AND (COALESCE(ended_at, 0) = 0 OR started_at >= ?1)",
+                    [now - 3_600_000_000_000],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(in_window, 1, "扫描窗内应只剩晚到事件");
+    }
+
+    /// 超过 bucket 的间隔 ⇒ 断开，各自成 episode。
+    #[test]
+    fn anchor_breaks_when_gap_exceeds_bucket() {
+        let db = db("gap");
+        let first = 1_000_000_000_000i64;
+        incident(&db, &NODE, HOST_OFFLINE, first, first + 1_000_000_000);
+        // 间隔须超过 `ended_at + bucket`（1s + 30s = 31s），取 32s。
+        let second = first + 32_000_000_000;
+        incident(&db, &NODE, HOST_OFFLINE, second, 0);
+        assert_eq!(anchor(&db, &load(&db, &NODE, second)), second);
+    }
+
+    /// 多环链条：锚点一路回到最老的一环。
+    #[test]
+    fn anchor_walks_back_through_a_long_chain() {
+        let db = db("chain");
+        let mut at = 1_000_000_000_000i64;
+        let head = at;
+        for _ in 0..5 {
+            incident(&db, &NODE, HOST_OFFLINE, at, at + 1_000_000_000);
+            at += BUCKET;
+        }
+        let last = at - BUCKET;
+        assert_eq!(anchor(&db, &load(&db, &NODE, last)), head);
+    }
+
+    /// 别的节点 / 别的分类不得串环。
+    #[test]
+    fn anchor_is_scoped_to_node_and_classification() {
+        let db = db("scope");
+        let start = 1_000_000_000_000i64;
+        incident(&db, &NODE, HOST_OFFLINE, start, start + 1_000_000_000);
+        incident(&db, &OTHER, HOST_OFFLINE, start + 1, 0);
+        incident(&db, &NODE, CONNECTIVITY_DEGRADED, start + 2, 0);
+        assert_eq!(anchor(&db, &load(&db, &NODE, start)), start);
+        assert_eq!(anchor(&db, &load(&db, &OTHER, start + 1)), start + 1);
+        assert_eq!(
+            anchor(&db, &load(&db, &NODE, start + 2)),
+            start + 2,
+            "同节点不同分类不得并入同一 episode"
+        );
+    }
+
+    /// 端到端：同一 episode 在窗口滑动后不得产生第二条告警。
+    #[test]
+    fn sliding_window_does_not_duplicate_the_episode_alert() {
+        let db = db("dup");
+        let head = 1_000_000_000_000i64;
+        incident(&db, &NODE, HOST_OFFLINE, head, head + 10_000_000_000);
+        let tail = head + 20_000_000_000;
+        incident(&db, &NODE, HOST_OFFLINE, tail, 0);
+
+        let early = head + 30_000_000_000;
+        let late = head + 3_600_000_000_000 + 30_000_000_000;
+        // 窗口滑动前：episode 首次告警，一条通知。
+        let first = db
+            .read(|conn| scan(conn, &policy(true, false), early))
+            .unwrap();
+        assert_eq!(first.len(), 1, "episode 首次应告警一次");
+
+        // 窗口滑过链头之后：不得再为同一 episode 发第二条。
+        let second = db
+            .read(|conn| scan(conn, &policy(true, false), late))
+            .unwrap();
+        assert!(
+            second.is_empty(),
+            "同一 episode 不得因扫描窗滑动重复告警：{second:?}"
+        );
+        let keys = db
+            .read(|conn| {
+                let mut stmt =
+                    conn.prepare("SELECT dedup_key FROM telemetry_alerts ORDER BY id")?;
+                let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+                Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            })
+            .unwrap();
+        assert_eq!(keys.len(), 1, "去重键必须稳定：{keys:?}");
+        assert!(
+            keys[0].ends_with(&format!("/{head}")),
+            "锚点应是链头：{keys:?}"
+        );
     }
 }

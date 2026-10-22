@@ -17,6 +17,33 @@ const MINUTE_NANOS: i64 = 60 * 1_000_000_000;
 const ROUTE_JOB_TTL_NANOS: i64 = 10 * 60 * 1_000_000_000;
 const JOB_EXPIRE_ERROR: &str = "从端未领取";
 
+/// 探测样本里错误串的长度上限。探针侧的错误来自系统调用与 nexttrace 输出，
+/// 不设上限时一条异常长的 stderr 就能把 `probe_latests.last_error` 和
+/// `tcp_json` 撑到任意大小。
+const MAX_ERROR_CHARS: usize = 512;
+
+/// 非有限浮点按无效测量处理。
+///
+/// 探针的 `rtt_ms` / `loss` 直接来自被探测主机的回包统计，NaN/Inf 并非不可能
+/// （除以零、解析失败后的零值字段）。SQLite 把 NaN 存成 NULL，于是一个坏样本
+/// 会让整分钟的 `sum_ms` / `min_ms` / `loss_sum` 变 NULL——`COALESCE` 读回 0，
+/// 这一分钟的聚合就此作废。入库前一律收敛到 0。
+fn finite_or(value: f64) -> f64 {
+    if value.is_finite() { value } else { 0.0 }
+}
+
+/// 按字符（而非字节）截断，避免把 UTF-8 多字节序列切断成非法串。
+fn clip_error(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.chars().count() <= MAX_ERROR_CHARS {
+        return trimmed.to_string();
+    }
+    let mut out = String::with_capacity(MAX_ERROR_CHARS * 4);
+    out.extend(trimmed.chars().take(MAX_ERROR_CHARS));
+    out.push('…');
+    out
+}
+
 /// 一次探测告警要发出的通知。调用方在事务提交后交给 `Notifier`。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProbeNotice {
@@ -306,14 +333,15 @@ fn ingest_one(
             now_nanos,
         )?;
     }
+    let last_error = clip_error(&sample.last_error);
     if sample.icmp.is_none() && sample.tcp.is_empty() {
         // MTR / 路由失败样本没有连通性结果，但错误必须留在最新值上。
-        if !sample.last_error.trim().is_empty() {
+        if !last_error.is_empty() {
             touch_probe_error(
                 conn,
                 &collector.collector_uuid,
                 server_id,
-                &sample.last_error,
+                &last_error,
                 now_nanos,
             )?;
         }
@@ -325,8 +353,8 @@ fn ingest_one(
         tcp_views.push(json!({
             "port": item.port,
             "ok": item.ok,
-            "rtt_ms": item.rtt_ms,
-            "error": item.error,
+            "rtt_ms": finite_or(item.rtt_ms),
+            "error": clip_error(&item.error),
         }));
         if item.ok {
             any_tcp = true;
@@ -339,14 +367,14 @@ fn ingest_one(
             i64::from(item.port),
             sampled_at,
             item.ok,
-            item.rtt_ms,
+            finite_or(item.rtt_ms),
             0.0,
             now_nanos,
         )?;
     }
     let icmp_ok = sample.icmp.as_ref().is_some_and(|icmp| icmp.ok);
-    let icmp_rtt = sample.icmp.as_ref().map(|icmp| icmp.rtt_ms).unwrap_or(0.0);
-    let icmp_loss = sample.icmp.as_ref().map(|icmp| icmp.loss).unwrap_or(0.0);
+    let icmp_rtt = finite_or(sample.icmp.as_ref().map(|icmp| icmp.rtt_ms).unwrap_or(0.0));
+    let icmp_loss = finite_or(sample.icmp.as_ref().map(|icmp| icmp.loss).unwrap_or(0.0));
     if let Some(icmp) = &sample.icmp {
         upsert_bucket(
             conn,
@@ -356,8 +384,8 @@ fn ingest_one(
             0,
             sampled_at,
             icmp.ok,
-            icmp.rtt_ms,
-            icmp.loss,
+            finite_or(icmp.rtt_ms),
+            finite_or(icmp.loss),
             now_nanos,
         )?;
     }
@@ -372,7 +400,7 @@ fn ingest_one(
     } else {
         for item in &sample.tcp {
             if item.ok {
-                display = item.rtt_ms;
+                display = finite_or(item.rtt_ms);
                 break;
             }
         }
@@ -405,7 +433,7 @@ fn ingest_one(
             sampled_at,
             i64::from(reachable),
             display,
-            sample.last_error,
+            last_error,
             i64::from(icmp_ok),
             icmp_rtt,
             icmp_loss,
@@ -423,7 +451,7 @@ fn ingest_one(
         reachable,
         has_connectivity,
         display,
-        &sample.last_error,
+        &last_error,
         now_nanos,
     )
 }
@@ -932,12 +960,111 @@ fn u32_from_i64(value: i64) -> u32 {
 }
 
 #[cfg(test)]
+mod sample_sanitize_tests {
+    use super::tests::{seed, temp_db};
+    use super::*;
+    use crate::db::migrate;
+    use crate::repo::collectors;
+
+    #[test]
+    fn clip_error_trims_truncates_and_stays_on_char_boundaries() {
+        assert_eq!(clip_error("  timeout  "), "timeout");
+        assert_eq!(clip_error(""), "");
+        let long = "探".repeat(MAX_ERROR_CHARS + 10);
+        let clipped = clip_error(&long);
+        // 按字符截断：内容 + 一个省略号，且不得出现半个 UTF-8 序列。
+        assert_eq!(clipped.chars().count(), MAX_ERROR_CHARS + 1);
+        assert!(clipped.ends_with('…'));
+        assert_eq!(clipped, "探".repeat(MAX_ERROR_CHARS) + "…");
+    }
+
+    #[test]
+    fn finite_or_zeroes_non_finite_values() {
+        assert_eq!(finite_or(12.5), 12.5);
+        assert_eq!(finite_or(0.0), 0.0);
+        assert_eq!(finite_or(f64::NAN), 0.0);
+        assert_eq!(finite_or(f64::INFINITY), 0.0);
+        assert_eq!(finite_or(f64::NEG_INFINITY), 0.0);
+    }
+
+    /// 核心回归：NaN 时延不得污染整分钟的桶聚合。
+    /// SQLite 把 NaN 存成 NULL，`COALESCE(...,0)` 读回 0——一个坏样本
+    /// 就让这一分钟的 sum/min 全部作废。
+    #[test]
+    fn nan_rtt_does_not_wipe_the_minute_bucket() {
+        let path = temp_db("nan");
+        let db = migrate::open_primary(&path).unwrap();
+        seed(&db);
+        let now = 1_700_000_000_000_000_000;
+        db.write(|tx| {
+            let collector = collectors::find_by_uuid_tx(tx, "probe-1")?.unwrap();
+            let good = proto::ProbeSampleBatch {
+                samples: vec![proto::ProbeSample {
+                    server_id: 7,
+                    sampled_at_unix_nano: now,
+                    icmp: Some(proto::ProbeIcmpSample {
+                        ok: true,
+                        rtt_ms: 20.0,
+                        loss: 0.0,
+                        packets_sent: 3,
+                        packets_received: 3,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            };
+            ingest_probe_samples(tx, &collector, &good, now)?;
+            let bad = proto::ProbeSampleBatch {
+                samples: vec![proto::ProbeSample {
+                    server_id: 7,
+                    sampled_at_unix_nano: now + 1_000_000_000,
+                    icmp: Some(proto::ProbeIcmpSample {
+                        ok: true,
+                        rtt_ms: f64::NAN,
+                        loss: f64::INFINITY,
+                        packets_sent: 3,
+                        packets_received: 3,
+                        ..Default::default()
+                    }),
+                    last_error: "e".repeat(MAX_ERROR_CHARS + 50),
+                    ..Default::default()
+                }],
+            };
+            ingest_probe_samples(tx, &collector, &bad, now)?;
+            let row: (Option<f64>, Option<f64>, Option<f64>, i64) = tx.query_row(
+                "SELECT min_ms, max_ms, sum_ms, count FROM probe_sample_buckets \
+                 WHERE collector_uuid = 'probe-1' AND server_id = 7 AND kind = 'icmp'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+            assert_eq!(row.3, 2, "两个样本都计入");
+            // min 会被收敛后的 0.0 拉下去——这是 `min_ms == 0.0` 当未置位哨兵的
+            // 既有语义（合法 0ms 时延同样如此），与本次修复无关；
+            // 关键是聚合不得变 NULL。
+            assert!(row.0.is_some(), "min 不得变 NULL");
+            assert_eq!(row.1, Some(20.0), "max 不得被 NaN 抹掉");
+            assert_eq!(row.2, Some(20.0), "sum 不得被 NaN 抹成 NULL");
+            let latest: (Option<f64>, String) = tx.query_row(
+                "SELECT display_rtt_ms, last_error FROM probe_latests \
+                 WHERE collector_uuid = 'probe-1' AND server_id = 7",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(latest.0, Some(0.0), "非有限时延按无效测量收敛到 0");
+            assert_eq!(latest.1.chars().count(), MAX_ERROR_CHARS + 1);
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::migrate;
     use crate::repo::collectors;
 
-    fn temp_db(tag: &str) -> String {
+    pub(super) fn temp_db(tag: &str) -> String {
         let dir = std::env::temp_dir().join(format!(
             "santaizi-probe-ingest-{tag}-{}-{}",
             std::process::id(),
@@ -947,7 +1074,7 @@ mod tests {
         dir.join("panel.db").to_string_lossy().into_owned()
     }
 
-    fn seed(db: &crate::db::Db) {
+    pub(super) fn seed(db: &crate::db::Db) {
         db.write(|tx| {
             tx.execute(
                 "INSERT INTO servers (id, name, tag, secret_ciphertext, probe_target, probe_tcp_ports) \

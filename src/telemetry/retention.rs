@@ -67,6 +67,16 @@ pub fn drain_retention(db: &Db, policy: &RetentionPolicy, now_nanos: i64) -> any
     let completed_minute = now_nanos / MINUTE_NANOS * MINUTE_NANOS;
     if sqlite_table_exists(db, "telemetry_events") {
         let hot = high_frequency_event_types_sql();
+        // 原始 STATE 层：raw STATE / STATE_ROLLUP 事件连同行内 payload 一起
+        // 保留 `state_raw`（默认 6 小时），之后剥成空壳、下一轮按完成分钟清掉。
+        //
+        // Go 在这里把高频事件一律按完成分钟删，等于把原始层压成 1 分钟，
+        // `retention.state_raw_hours` 因此是个死配置——三级保留（raw / 1m / 1h）
+        // 里第一级名存实亡。这里把第一级接上：`state_raw_hours` 调小即可
+        // 收回空间，默认值即用户声明的保留时长。
+        //
+        // 心跳不在此列：它没有回读价值，仍按完成分钟清（见下）。
+        let state_raw_before = now_nanos - policy.state_raw;
         deleted += drain_until(
             db,
             deadline,
@@ -75,7 +85,7 @@ pub fn drain_retention(db: &Db, policy: &RetentionPolicy, now_nanos: i64) -> any
             &format!(
                 "event_id IN (SELECT event_id FROM telemetry_events WHERE event_type IN ({hot}) AND collected_at < ?)"
             ),
-            &[&completed_minute],
+            &[&state_raw_before],
         )?;
         deleted += drain_until(
             db,
@@ -83,22 +93,43 @@ pub fn drain_retention(db: &Db, policy: &RetentionPolicy, now_nanos: i64) -> any
             batch,
             "telemetry_events",
             &format!("collected_at < ? AND event_type IN ({hot})"),
-            &[&completed_minute],
+            &[&state_raw_before],
         )?;
         // HOST payload 与 server_runtimes.host_payload 重复且无人回读；
-        // 与 STATE 一并剥掉，只留事件骨架。
+        // 与 STATE 一并剥掉，只留事件骨架。STATE 的 raw payload 活到
+        // `state_raw`，HOST 的一完成分钟就剥（重复数据不留两份）。
         deleted += update_until(
             db,
             deadline,
             batch,
             "UPDATE telemetry_events SET payload = NULL, payload_retained = 0 \
              WHERE rowid IN (SELECT rowid FROM telemetry_events \
-             WHERE event_type IN (?, ?) AND payload_retained = 1 AND collected_at < ? LIMIT ?)",
+             WHERE event_type = ? AND payload_retained = 1 AND collected_at < ? LIMIT ?)",
             &[
                 &(proto::TelemetryEventType::State as i32),
-                &(proto::TelemetryEventType::Host as i32),
-                &completed_minute,
+                &state_raw_before,
             ],
+        )?;
+        deleted += update_until(
+            db,
+            deadline,
+            batch,
+            "UPDATE telemetry_events SET payload = NULL, payload_retained = 0 \
+             WHERE rowid IN (SELECT rowid FROM telemetry_events \
+             WHERE event_type = ? AND payload_retained = 1 AND collected_at < ? LIMIT ?)",
+            &[&(proto::TelemetryEventType::Host as i32), &completed_minute],
+        )?;
+        // 心跳行无回读价值，按完成分钟清（原来是连同 STATE 一起清）。
+        deleted += drain_until(
+            db,
+            deadline,
+            batch,
+            "telemetry_events",
+            &format!(
+                "collected_at < ? AND event_type = {}",
+                proto::TelemetryEventType::Heartbeat as i32
+            ),
+            &[&completed_minute],
         )?;
     }
 
@@ -379,6 +410,7 @@ fn retention_table_allowed(table: &str) -> bool {
         "telemetry_observations"
             | "telemetry_events"
             | "telemetry_gaps"
+            | "telemetry_sequence_receipts"
             | "availability_buckets"
             | "availability_incidents"
             | "incident_revisions"
@@ -732,7 +764,7 @@ mod tests {
     const MINUTE: i64 = MINUTE_NANOS;
     const HOUR: i64 = HOUR_NANOS;
     /// 2026-10-16T00:00:00Z，整分整小时。
-    const NOW: i64 = 1_792_108_800_000_000_000;
+    pub(super) const NOW: i64 = 1_792_108_800_000_000_000;
 
     fn db(name: &str) -> (Db, String) {
         let dir =
@@ -758,7 +790,13 @@ mod tests {
             .unwrap()
     }
 
-    fn insert_event(db: &Db, event_id: u8, event_type: i32, collected_at: i64, retained: bool) {
+    pub(super) fn insert_event(
+        db: &Db,
+        event_id: u8,
+        event_type: i32,
+        collected_at: i64,
+        retained: bool,
+    ) {
         db.write(|tx| {
             tx.execute(
                 "INSERT INTO telemetry_events (event_id, node_uuid, session_id, sequence, event_type, priority, collected_at, \
@@ -1162,5 +1200,133 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].resolution, RESOLUTION_SPAN);
         assert_eq!(spans[0].window_end, NOW + BUCKET_NANOS);
+    }
+}
+
+#[cfg(test)]
+mod state_raw_retention_tests {
+    use super::super::rollup::RetentionPolicy;
+    use super::tests::{NOW, insert_event};
+    use super::*;
+    use crate::db::migrate;
+    use crate::proto;
+
+    const HOUR: i64 = 60 * 60 * 1_000_000_000;
+
+    fn open(tag: &str) -> (Db, String) {
+        let dir = std::env::temp_dir().join(format!(
+            "santaizi-retention-raw-{tag}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("panel.db").to_string_lossy().into_owned();
+        (migrate::open_primary(&path).unwrap(), path)
+    }
+
+    fn count(db: &Db, event_type: i32) -> i64 {
+        db.read(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM telemetry_events WHERE event_type = ?1",
+                [event_type],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap()
+    }
+
+    fn retained_payloads(db: &Db, event_type: i32) -> i64 {
+        db.read(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM telemetry_events \
+                 WHERE event_type = ?1 AND payload_retained = 1",
+                [event_type],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap()
+    }
+
+    fn policy(state_raw_hours: i64) -> RetentionPolicy {
+        RetentionPolicy {
+            state_raw: state_raw_hours * HOUR,
+            ..RetentionPolicy::default()
+        }
+        .normalized()
+    }
+
+    /// 核心回归：`state_raw_hours` 必须真的管住原始 STATE 层。
+    /// Go 把高频事件一律按完成分钟删，等于把这一级压成 1 分钟，配置名存实亡。
+    #[test]
+    fn state_raw_hours_governs_the_raw_state_tier() {
+        let (db, _path) = open("raw-tier");
+        let fresh = NOW - 10 * 60 * 1_000_000_000; // 10 分钟前：完成分钟之后
+        let stale = NOW - 3 * HOUR; // 3 小时前：早于默认 6h
+        let ancient = NOW - 9 * HOUR; // 9 小时前：早于默认 6h
+
+        insert_event(&db, 1, proto::TelemetryEventType::State as i32, fresh, true);
+        insert_event(&db, 2, proto::TelemetryEventType::State as i32, stale, true);
+        insert_event(
+            &db,
+            3,
+            proto::TelemetryEventType::State as i32,
+            ancient,
+            true,
+        );
+        insert_event(
+            &db,
+            4,
+            proto::TelemetryEventType::Heartbeat as i32,
+            stale,
+            false,
+        );
+
+        drain_retention(&db, &policy(6), NOW).unwrap();
+
+        // 未过 state_raw 的原始 STATE 连同行内 payload 一起留下。
+        assert_eq!(count(&db, proto::TelemetryEventType::State as i32), 2);
+        assert_eq!(
+            retained_payloads(&db, proto::TelemetryEventType::State as i32),
+            2,
+            "未过 state_raw 的 payload 不得提前剥掉"
+        );
+        // 上面两条已覆盖：只留 2 行即 ancient 那行已被清掉。
+        // 心跳不占原始层，仍按完成分钟清。
+        assert_eq!(count(&db, proto::TelemetryEventType::Heartbeat as i32), 0);
+    }
+
+    /// 调小 `state_raw_hours` 应立即收紧原始层——否则配置仍是死的。
+    #[test]
+    fn shrinking_state_raw_reclaims_sooner() {
+        let (db, _path) = open("raw-shrink");
+        let stale = NOW - 3 * HOUR;
+        insert_event(&db, 1, proto::TelemetryEventType::State as i32, stale, true);
+        drain_retention(&db, &policy(1), NOW).unwrap();
+        assert_eq!(count(&db, proto::TelemetryEventType::State as i32), 0);
+
+        let (db2, _path2) = open("raw-keep");
+        insert_event(
+            &db2,
+            1,
+            proto::TelemetryEventType::State as i32,
+            stale,
+            true,
+        );
+        drain_retention(&db2, &policy(6), NOW).unwrap();
+        assert_eq!(count(&db2, proto::TelemetryEventType::State as i32), 1);
+    }
+
+    /// HOST payload 与 `server_runtimes.host_payload` 重复，仍按完成分钟剥。
+    #[test]
+    fn host_payload_is_stripped_at_the_completed_minute() {
+        let (db, _path) = open("host-strip");
+        let recent = NOW - 10 * 60 * 1_000_000_000;
+        insert_event(&db, 1, proto::TelemetryEventType::Host as i32, recent, true);
+        drain_retention(&db, &policy(6), NOW).unwrap();
+        // 行还在（HOST 不受 state_raw 管），但 payload 已剥。
+        assert_eq!(count(&db, proto::TelemetryEventType::Host as i32), 1);
+        assert_eq!(
+            retained_payloads(&db, proto::TelemetryEventType::Host as i32),
+            0
+        );
     }
 }

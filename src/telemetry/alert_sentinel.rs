@@ -10,6 +10,10 @@ use serde::Deserialize;
 
 use crate::proto;
 
+/// `server_runtimes.protocol` 的 V2 取值。
+const V2_PROTOCOL: &str = "v2";
+/// `availability_buckets.host_state` 的离线取值（可用性共识的唯一信源）。
+const HOST_STATE_OFFLINE: &str = "offline";
 const CHECK_FAIL: u8 = 1;
 const CHECK_PASS: u8 = 2;
 const MODE_ALWAYS: i64 = 0;
@@ -54,6 +58,12 @@ struct ServerSample {
     last_seen_unix: i64,
     state: Option<proto::State>,
     host: Option<proto::Host>,
+    /// V2 协议标记（`server_runtimes.protocol`）。
+    protocol: Option<String>,
+    /// 当前绑定节点（16 字节）。None/长度不足 = 无 V2 绑定。
+    current_node_uuid: Option<Vec<u8>>,
+    /// 最新**已封窗**可用性桶的 host_state。None = 还没有共识证据。
+    consensus_host_state: Option<String>,
 }
 
 pub fn scan(
@@ -201,15 +211,39 @@ fn load_rules(conn: &Connection) -> anyhow::Result<Vec<StoredRule>> {
     Ok(rules)
 }
 
+/// `load_servers` 用：纳秒时间戳（可用性子查询的 `window_end <= ?1` 用纳秒）。
+fn now_nanos_millis() -> i64 {
+    crate::util::time::now_nanos()
+}
+
+impl ServerSample {
+    /// Go `ServerConsensusOffline`：返回 None 表示「无 V2 共识可用」，
+    /// 调用方应退回 V1 的 `last_seen` 时间窗。
+    fn consensus_offline(&self) -> Option<bool> {
+        if self.protocol.as_deref() != Some(V2_PROTOCOL) {
+            return None;
+        }
+        let node = self.current_node_uuid.as_ref()?;
+        if node.len() != 16 {
+            return None;
+        }
+        // 已绑定但还没有已封窗的桶 → 不判离线（Go：ok=true, offline=false）。
+        Some(self.consensus_host_state.as_deref() == Some(HOST_STATE_OFFLINE))
+    }
+}
+
 fn load_servers(conn: &Connection) -> anyhow::Result<Vec<ServerSample>> {
     let mut stmt = conn.prepare(
         "SELECT s.id, COALESCE(s.name, ''), COALESCE(r.last_ip, ''), COALESCE(r.last_seen_at, 0), \
-         r.state_payload, r.host_payload \
+         r.state_payload, r.host_payload, r.protocol, r.current_node_uuid, \
+         (SELECT b.host_state FROM availability_buckets b \
+          WHERE b.node_uuid = r.current_node_uuid AND b.window_end <= ?1 \
+          ORDER BY b.window_end DESC, b.bucket_start DESC LIMIT 1) \
          FROM servers s \
          LEFT JOIN server_runtimes r ON r.server_id = s.id \
          WHERE s.deleted_at IS NULL",
     )?;
-    let rows = stmt.query_map([], |row| {
+    let rows = stmt.query_map(rusqlite::params![now_nanos_millis()], |row| {
         let state_blob: Option<Vec<u8>> = row.get(4)?;
         let host_blob: Option<Vec<u8>> = row.get(5)?;
         Ok(ServerSample {
@@ -219,6 +253,9 @@ fn load_servers(conn: &Connection) -> anyhow::Result<Vec<ServerSample>> {
             last_seen_unix: row.get::<_, i64>(3)? / 1_000_000_000,
             state: state_blob.and_then(|blob| proto::State::decode(blob.as_slice()).ok()),
             host: host_blob.and_then(|blob| proto::Host::decode(blob.as_slice()).ok()),
+            protocol: row.get(6)?,
+            current_node_uuid: row.get(7)?,
+            consensus_host_state: row.get(8)?,
         })
     })?;
     let mut servers = Vec::new();
@@ -265,6 +302,12 @@ impl Rule {
             "net_out_speed" => state.net_out_speed as f64,
             "net_all_speed" => (state.net_in_speed + state.net_out_speed) as f64,
             "offline" => {
+                // Go `ServerConsensusOffline` 三态：V2 绑定 + 有桶 → 只信共识；
+                // 无 V2 绑定/无证据 → 退回 `now - last_seen > 6` 秒。
+                // 少了共识分支的移植回归：V1 时间窗会把共识判为在线的主机误报离线。
+                if let Some(offline) = server.consensus_offline() {
+                    return offline.then_some(());
+                }
                 if server.last_seen_unix == 0 || now_unix.saturating_sub(server.last_seen_unix) > 6
                 {
                     return Some(());
@@ -423,5 +466,112 @@ mod tests {
         let resolved = db.read(|conn| scan(conn, &mut memory, now)).unwrap();
         assert_eq!(resolved.len(), 1);
         assert!(resolved[0].message.contains("[Resolved]"));
+    }
+
+    /// 插一个 V2 绑定的服务器 + 一条已封窗共识桶。
+    /// `host_state` 传 `Some("offline")` / `Some("healthy")` / `None`（无桶）。
+    fn seed_v2(db: &crate::db::Db, host_state: Option<&str>, last_seen_ago_secs: i64) {
+        let now = crate::util::time::now_nanos();
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO servers (id, name, secret_ciphertext) VALUES (9, 'v2node', X'00')",
+                [],
+            )?;
+            // Go `Rule.Snapshot` 开头就要求 State 非空，offline 分支也不例外；
+            // 不灌 state_payload 的话整条规则对任何服务器都返回 None。
+            let state = proto::State {
+                cpu: 1.0,
+                ..Default::default()
+            };
+            tx.execute(
+                "INSERT INTO server_runtimes (server_id, protocol, current_node_uuid, last_ip, last_seen_at, state_payload) \
+                 VALUES (9, 'v2', X'09090909090909090909090909090909', '203.0.113.1', ?1, ?2)",
+                params![now - last_seen_ago_secs * 1_000_000_000, state.encode_to_vec()],
+            )?;
+            if let Some(state) = host_state {
+                // 一个早已封窗的桶（window_end 在过去）。
+                tx.execute(
+                    "INSERT INTO availability_buckets (node_uuid, bucket_start, window_end, resolution, \
+                     host_state, connectivity_state, expected_observers, healthy_observers, \
+                     seen_observers, observer_summary, revision, finalized, recalculated_at) \
+                     VALUES (X'09090909090909090909090909090909', 0, ?1, 'minute', ?2, 'ok', 1, 1, 1, \
+                     X'5b5d', 1, 1, ?1)",
+                    params![now - 60_000_000_000, state],
+                )?;
+            }
+            tx.execute(
+                "INSERT INTO alert_rules (id, name, rules_raw, enable, trigger_mode, notification_tag) \
+                 VALUES (10, 'offline', '[{\"type\":\"offline\"}]', 1, 1, 'ops')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn offline_notice_count(db: &crate::db::Db) -> usize {
+        let mut memory = SentinelMemory::default();
+        let now = crate::util::time::now_nanos() / 1_000_000_000;
+        db.read(|conn| scan(conn, &mut memory, now)).unwrap().len()
+    }
+
+    #[test]
+    fn offline_rule_prefers_v2_consensus_over_last_seen() {
+        // 共识判在线，但 last_seen 已是 60 秒前（V1 时间窗会误报）。
+        let db = temp_db();
+        seed_v2(&db, Some("healthy"), 60);
+        assert_eq!(
+            offline_notice_count(&db),
+            0,
+            "共识 healthy 时必须覆盖 V1 时间窗，否则移植回归"
+        );
+    }
+
+    #[test]
+    fn offline_rule_fires_when_consensus_says_offline() {
+        // 共识判离线，即使 last_seen 刚刚更新（V1 时间窗会漏报）。
+        let db = temp_db();
+        seed_v2(&db, Some("offline"), 0);
+        assert_eq!(offline_notice_count(&db), 1, "共识 offline 必须触发告警");
+    }
+
+    #[test]
+    fn offline_rule_falls_back_when_no_v2_binding() {
+        // 无 V2 绑定（protocol 非 v2）：退回 V1 时间窗。
+        let db = temp_db();
+        seed_v2(&db, None, 0);
+        // 手动把 protocol 打成 v1，节点也清掉 → 共识不可用。
+        db.write(|tx| {
+            tx.execute(
+                "UPDATE server_runtimes SET protocol = 'v1', current_node_uuid = NULL WHERE server_id = 9",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            offline_notice_count(&db),
+            0,
+            "刚上报过的 V1 服务器不应被判离线"
+        );
+
+        // last_seen 推到 60 秒前 → V1 时间窗报警。
+        db.write(|tx| {
+            tx.execute(
+                "UPDATE server_runtimes SET last_seen_at = ?1 WHERE server_id = 9",
+                params![crate::util::time::now_nanos() - 60_000_000_000],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(offline_notice_count(&db), 1, "V1 回退按 6 秒窗口判定");
+    }
+
+    #[test]
+    fn offline_rule_not_fired_for_bound_but_bucketless_v2() {
+        // 已绑定 V2 但还没有任何已封窗桶：Go 语义是 ok=true, offline=false。
+        let db = temp_db();
+        seed_v2(&db, None, 600);
+        assert_eq!(offline_notice_count(&db), 0, "绑定但无证据时不得判离线");
     }
 }

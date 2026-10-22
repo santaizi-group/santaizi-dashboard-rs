@@ -105,14 +105,28 @@ pub fn record_agent_sink_latency(
 
 /// `RecordLatencySample`：游标去重（`last_sampled_at >= sampled_at` 跳过）+
 /// 分钟桶聚合 upsert。两写在同一个事务里，与 Go 一致。
+///
+/// 桶起点一律按**主端钟**取整：`sampled_at` 来自从端/探针自己的钟，既可漂移
+/// 也可伪造。直接拿它算桶起点，等于让对端把数据写进任意一分钟——轻则曲线
+/// 出现未来/远古点，重则写进已过保留期的桶里躲过清理。游标去重仍用对端
+/// 时间戳：它在那里是重放判重的序号，不是事实时间。
 pub fn record_latency_sample(db: &Db, sample: &LatencySample) -> anyhow::Result<()> {
-    if sample.sampled_at <= 0 || sample.rtt_ms < 0.0 || sample.kind.is_empty() {
+    // NaN 也过不了 `< 0.0`（比较恒为假），而非有限值会让 sum_ms 变 NULL，
+    // 一整分钟的聚合随之作废（SQLite 把 NaN 存成 NULL）。
+    // NaN 也过不了 `< 0.0`（比较恒为假），而非有限值会让 sum_ms 变 NULL，
+    // 一整分钟的聚合随之作废（SQLite 把 NaN 存成 NULL）。
+    if sample.sampled_at <= 0
+        || !sample.rtt_ms.is_finite()
+        || sample.rtt_ms < 0.0
+        || sample.kind.is_empty()
+    {
         return Ok(());
     }
     if !valid_latency_kind(&sample.kind) {
         anyhow::bail!("unknown connection latency kind");
     }
     let node_uuid = latency_node_key(&sample.node_uuid);
+    let bucket_start = now_nanos() / MINUTE_NANOS * MINUTE_NANOS;
     db.write(|tx| {
         let last: Option<i64> = tx
             .query_row(
@@ -132,7 +146,7 @@ pub fn record_latency_sample(db: &Db, sample: &LatencySample) -> anyhow::Result<
         {
             return Ok(());
         }
-        upsert_bucket(tx, sample, &node_uuid)?;
+        upsert_bucket(tx, sample, &node_uuid, bucket_start)?;
         upsert_cursor(tx, sample, &node_uuid)?;
         Ok(())
     })
@@ -142,8 +156,8 @@ fn upsert_bucket(
     tx: &Transaction<'_>,
     sample: &LatencySample,
     node_uuid: &[u8],
+    bucket_start: i64,
 ) -> anyhow::Result<()> {
-    let bucket_start = sample.sampled_at / MINUTE_NANOS * MINUTE_NANOS;
     tx.execute(
         "INSERT INTO connection_latency_buckets \
          (kind, collector_uuid, node_uuid, observer_id, bucket_start, min_ms, max_ms, sum_ms, count, updated_at) \
@@ -358,6 +372,62 @@ mod tests {
         };
         record_latency_sample(&db, &empty).unwrap();
         assert!(bucket(&db, LATENCY_KIND_PATH, "primary").is_none());
+    }
+
+    /// 核心回归：桶起点必须按主端钟取整，不能跟着对端时间戳走。
+    ///
+    /// 对端时间戳可漂移也可伪造：拿它算桶起点，等于允许把数据写进任意一分钟
+    /// ——未来的点会让曲线翘到右边，远古的点能塞进已过保留期的桶里躲过清理。
+    #[test]
+    fn bucket_start_follows_the_primary_clock_not_the_peer_timestamp() {
+        let (primary_db, _path) = db("primary-clock");
+        // 一个伪造的「1970 年」时间戳：按对端钟会落到 1970-01-01 那一分钟。
+        let forged = 1_000_000_000i64;
+        record_latency_sample(&primary_db, &sample(LATENCY_KIND_PATH, 7.0, forged)).unwrap();
+        let (_, _, sum, count) = bucket(&primary_db, LATENCY_KIND_PATH, "primary").unwrap();
+        assert_eq!((sum, count), (7.0, 1), "样本本身要落库");
+
+        let bucket_start: i64 = primary_db
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT bucket_start FROM connection_latency_buckets \
+                     WHERE kind = ? AND observer_id = 'primary'",
+                    [LATENCY_KIND_PATH],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        let expected = now_nanos() / 60_000_000_000 * 60_000_000_000;
+        assert_eq!(bucket_start, expected, "桶起点必须是主端当前分钟");
+        assert!(bucket_start > forged, "不得按对端时间戳落到 1970 年");
+
+        // 伪造的「遥远的未来」同样被按到当前分钟。
+        let (future_db, _path2) = db("primary-clock-future");
+        record_latency_sample(&future_db, &sample(LATENCY_KIND_PATH, 3.0, i64::MAX / 2)).unwrap();
+        let future: i64 = future_db
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT bucket_start FROM connection_latency_buckets \
+                     WHERE kind = ? AND observer_id = 'primary'",
+                    [LATENCY_KIND_PATH],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(future, expected, "未来时间戳也不得单独成桶");
+    }
+
+    /// NaN 时延会让 sum_ms 变 NULL（SQLite 把 NaN 存成 NULL），
+    /// 一整分钟的聚合随之作废——必须静默跳过。
+    #[test]
+    fn nan_rtt_is_skipped() {
+        let (db, _path) = db("nan");
+        let base = 1_792_100_000_000_000_000i64;
+        record_latency_sample(&db, &sample(LATENCY_KIND_PATH, 5.0, base)).unwrap();
+        record_latency_sample(&db, &sample(LATENCY_KIND_PATH, f64::NAN, base + 1)).unwrap();
+        record_latency_sample(&db, &sample(LATENCY_KIND_PATH, f64::INFINITY, base + 2)).unwrap();
+        let (min, max, sum, count) = bucket(&db, LATENCY_KIND_PATH, "primary").unwrap();
+        assert_eq!((min, max, sum, count), (5.0, 5.0, 5.0, 1));
     }
 
     #[test]

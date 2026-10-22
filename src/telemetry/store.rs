@@ -184,6 +184,20 @@ impl Store {
                         observer_id,
                         received_at_nanos,
                     )?;
+                    // 不落 telemetry_events 的类型（HEARTBEAT/STATE/STATE_ROLLUP）
+                    // 单独留序号回执：否则 advance_cursor 只查 telemetry_events，
+                    // 跨批次把这些序列当空洞，宽限一到就误报「探测丢失」。
+                    if !meta.persist {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO telemetry_sequence_receipts                              (receiver_id, node_uuid, session_id, sequence)                              VALUES (?1, ?2, ?3, ?4)",
+                            rusqlite::params![
+                                observer_id,
+                                event.node_uuid,
+                                event.session_id,
+                                event.sequence
+                            ],
+                        )?;
+                    }
                     let key = session_key(&event.node_uuid, &event.session_id);
                     if event.sequence > *max_by_session.get(&key).unwrap_or(&0) {
                         max_by_session.insert(key.clone(), event.sequence);
@@ -205,8 +219,8 @@ impl Store {
                             gap.gap_id,
                             gap.node_uuid,
                             gap.session_id,
-                            gap.start_sequence as i64,
-                            gap.end_sequence as i64,
+                            gap.start_sequence,
+                            gap.end_sequence,
                             gap.reason,
                             gap.replacement_event_id,
                             gap.created_at_unix_nano,
@@ -281,7 +295,7 @@ impl Store {
                 rusqlite::params![
                     batch.collector_uuid,
                     batch.replication_session,
-                    batch.batch_sequence as i64
+                    batch.batch_sequence
                 ],
                 |row| row.get(0),
             )
@@ -357,8 +371,8 @@ impl Store {
                     gap.gap_id,
                     gap.node_uuid,
                     gap.session_id,
-                    gap.start_sequence as i64,
-                    gap.end_sequence as i64,
+                    gap.start_sequence,
+                    gap.end_sequence,
                     gap.reason,
                     gap.replacement_event_id,
                     gap.created_at_unix_nano,
@@ -421,9 +435,9 @@ impl Store {
                     fact.collector_uuid,
                     fact.occurred_at_unix_nano,
                     fact.reason,
-                    fact.first_spool_id as i64,
-                    fact.last_spool_id as i64,
-                    fact.lost_records as i64,
+                    fact.first_spool_id,
+                    fact.last_spool_id,
+                    fact.lost_records,
                     fact.detail,
                 ],
             )?;
@@ -438,8 +452,8 @@ impl Store {
             rusqlite::params![
                 batch.collector_uuid,
                 batch.replication_session,
-                batch.batch_sequence as i64,
-                batch.spool_through_id as i64,
+                batch.batch_sequence,
+                batch.spool_through_id,
             ],
         )?;
         Ok(batch.spool_through_id)
@@ -486,7 +500,7 @@ impl Store {
                 event.event_id,
                 event.node_uuid,
                 event.session_id,
-                event.sequence as i64,
+                event.sequence,
                 event.event_type,
                 event.priority,
                 event.collected_at_unix_nano,
@@ -569,16 +583,26 @@ impl Store {
 
         let mut present: HashSet<u64> = HashSet::new();
         {
+            // 落表事件 + 不落表事件的序号回执，合起来才是「已收到的序列」全集。
             let mut stmt = tx.prepare(
                 "SELECT sequence FROM telemetry_events \
-                 WHERE node_uuid = ? AND session_id = ? AND sequence > ? AND sequence <= ?",
+                 WHERE node_uuid = ? AND session_id = ? AND sequence > ? AND sequence <= ? \
+                 UNION \
+                 SELECT sequence FROM telemetry_sequence_receipts \
+                 WHERE receiver_id = ? AND node_uuid = ? AND session_id = ? \
+                   AND sequence > ? AND sequence <= ?",
             )?;
             let rows = stmt.query_map(
                 rusqlite::params![
                     node_uuid,
                     session_id,
-                    cursor.ack_through as i64,
-                    max_sequence as i64
+                    cursor.ack_through,
+                    max_sequence,
+                    receiver_id,
+                    node_uuid,
+                    session_id,
+                    cursor.ack_through,
+                    max_sequence
                 ],
                 |row| Ok(row.get::<_, i64>(0)?.max(0) as u64),
             )?;
@@ -598,12 +622,7 @@ impl Store {
                  WHERE node_uuid = ? AND session_id = ? AND end_sequence > ? AND start_sequence <= ?",
             )?;
             let rows = stmt.query_map(
-                rusqlite::params![
-                    node_uuid,
-                    session_id,
-                    cursor.ack_through as i64,
-                    max_sequence as i64
-                ],
+                rusqlite::params![node_uuid, session_id, cursor.ack_through, max_sequence],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?.max(0) as u64,
@@ -677,10 +696,16 @@ impl Store {
                 receiver_id,
                 node_uuid,
                 session_id,
-                cursor.ack_through as i64,
-                if cursor.hole_sequence == 0 { None } else { Some(cursor.hole_sequence as i64) },
+                cursor.ack_through,
+                if cursor.hole_sequence == 0 { None } else { Some(cursor.hole_sequence) },
                 if cursor.hole_since == 0 { None } else { Some(cursor.hole_since) },
             ],
+        )?;
+        // 已确认收到的序号不再需要回执：只保留 ack_through 之上的桥接行。
+        tx.execute(
+            "DELETE FROM telemetry_sequence_receipts \
+             WHERE receiver_id = ?1 AND node_uuid = ?2 AND session_id = ?3 AND sequence <= ?4",
+            rusqlite::params![receiver_id, node_uuid, session_id, cursor.ack_through],
         )?;
         Ok(cursor.ack_through)
     }
@@ -721,8 +746,8 @@ fn infer_compacted_hole(
             gap_id.as_slice(),
             node_uuid,
             session_id,
-            start as i64,
-            end as i64,
+            start,
+            end,
             proto::GapReason::Compacted as i32,
             received_at_nanos,
         ],
@@ -735,9 +760,11 @@ fn infer_compacted_hole(
             receiver_id,
             received_at_nanos,
             proto::GapReason::Compacted as i32,
-            start as i64,
-            end as i64,
-            (end - start + 1) as i64,
+            start,
+            end,
+            // `start`/`end` 是序列号区间，u64 直接绑定；`ToSql for u64` 是 fallible 的，
+            // 越界会响亮报错，而不是 `as i64` 那样静默回绕成负数。
+            end.saturating_sub(start).saturating_add(1),
             format!("receiver inferred compacted hole {start}-{end}"),
         ],
     )?;
@@ -854,6 +881,160 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 2);
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    /// HEARTBEAT/STATE 不落 `telemetry_events`，但它们的 sequence 同样占位。
+    /// 游标推进只查 `telemetry_events` 时，跨批次会把 3、5 当成空洞，
+    /// 宽限一到就 infer_compacted_hole + data loss —— 误报「探测丢失」。
+    #[test]
+    fn unpersisted_event_sequences_do_not_look_like_holes() {
+        let path = temp_db("receipts");
+        let db = migrate::open_primary(&path).unwrap();
+        let store = Store::new(30);
+        let received = 1_700_000_000_000_000_000i64;
+        // 宽限给 0：任何被当成空洞的序列都会立刻推断成缺口。
+        let grace = 0i64;
+
+        // 批次 1：seq 1 (Host，落表) + seq 2 (STATE，不落表)。
+        let first = proto::TelemetryBatch {
+            records: vec![
+                proto::TelemetryRecord {
+                    record: Some(proto::telemetry_record::Record::Event(event(
+                        1,
+                        proto::TelemetryEventType::Host,
+                    ))),
+                },
+                proto::TelemetryRecord {
+                    record: Some(proto::telemetry_record::Record::Event(event(
+                        2,
+                        proto::TelemetryEventType::State,
+                    ))),
+                },
+            ],
+        };
+        let result = db
+            .write(|tx| store.ingest(tx, &first, PRIMARY_OBSERVER_ID, received, grace))
+            .unwrap();
+        assert_eq!(result.acks[0].ack_through, 2);
+
+        // 批次 2：只有 seq 4 (Host)。seq 3 是个 STATE（不落表）——它必须被
+        // 序号回承认出来，不能算空洞。
+        let second = proto::TelemetryBatch {
+            records: vec![
+                proto::TelemetryRecord {
+                    record: Some(proto::telemetry_record::Record::Event(event(
+                        3,
+                        proto::TelemetryEventType::Heartbeat,
+                    ))),
+                },
+                proto::TelemetryRecord {
+                    record: Some(proto::telemetry_record::Record::Event(event(
+                        4,
+                        proto::TelemetryEventType::Host,
+                    ))),
+                },
+            ],
+        };
+        let result = db
+            .write(|tx| store.ingest(tx, &second, PRIMARY_OBSERVER_ID, received, grace))
+            .unwrap();
+        assert_eq!(result.acks[0].ack_through, 4, "回执应桥接 seq 3");
+
+        let gaps: i64 = db
+            .read(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM telemetry_gaps", [], |r| r.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(gaps, 0, "不得推断出任何缺口");
+        let losses: i64 = db
+            .read(|conn| {
+                Ok(
+                    conn.query_row("SELECT COUNT(*) FROM telemetry_data_losses", [], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert_eq!(losses, 0, "不得误报数据丢失");
+
+        // 回执表只保留 ack 之上的行：推进完成后应被清空。
+        let receipts: i64 = db
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM telemetry_sequence_receipts",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(receipts, 0, "已确认的序号回执应被清理");
+
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    #[test]
+    fn genuinely_missing_sequence_still_reports_loss() {
+        // 反向对照：真的丢了 seq 3（连回执都没有）时，缺口推断必须照旧工作。
+        let path = temp_db("real-hole");
+        let db = migrate::open_primary(&path).unwrap();
+        let store = Store::new(30);
+        let received = 1_700_000_000_000_000_000i64;
+        // 宽限必须 > 0：`hole_grace_nanos <= 0` 是「关闭空洞推断」的保险阀。
+        let grace = 1i64;
+        let first = proto::TelemetryBatch {
+            records: vec![proto::TelemetryRecord {
+                record: Some(proto::telemetry_record::Record::Event(event(
+                    1,
+                    proto::TelemetryEventType::Host,
+                ))),
+            }],
+        };
+        db.write(|tx| store.ingest(tx, &first, PRIMARY_OBSERVER_ID, received, grace))
+            .unwrap();
+        let second = proto::TelemetryBatch {
+            records: vec![proto::TelemetryRecord {
+                record: Some(proto::telemetry_record::Record::Event(event(
+                    4,
+                    proto::TelemetryEventType::Host,
+                ))),
+            }],
+        };
+        // 第一次看到空洞只登记 hole_sequence 并 break（需要两次相隔宽限的观测）。
+        let result = db
+            .write(|tx| store.ingest(tx, &second, PRIMARY_OBSERVER_ID, received, grace))
+            .unwrap();
+        assert_eq!(result.acks[0].ack_through, 1, "首次目击空洞不推进游标");
+
+        // 第三个批次（时间越过宽限）：空洞 2-3 被推断成 COMPACTED 缺口。
+        let third = proto::TelemetryBatch {
+            records: vec![proto::TelemetryRecord {
+                record: Some(proto::telemetry_record::Record::Event(event(
+                    5,
+                    proto::TelemetryEventType::Host,
+                ))),
+            }],
+        };
+        let result = db
+            .write(|tx| store.ingest(tx, &third, PRIMARY_OBSERVER_ID, received + grace + 1, grace))
+            .unwrap();
+        assert_eq!(result.acks[0].ack_through, 5, "空洞被跳过并推进游标");
+        let gaps: i64 = db
+            .read(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM telemetry_gaps", [], |r| r.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(gaps, 1, "真实空洞必须推断出缺口");
+        let losses: i64 = db
+            .read(|conn| {
+                Ok(
+                    conn.query_row("SELECT COUNT(*) FROM telemetry_data_losses", [], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert_eq!(losses, 1, "真实空洞必须记数据丢失");
         let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
     }
 

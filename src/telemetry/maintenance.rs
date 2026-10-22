@@ -119,7 +119,7 @@ impl DatabaseMaintainer {
     pub fn status(&self) -> DatabaseStatus {
         let (file_bytes, wal_bytes) = database_file_sizes(&self.ctx.path);
         let reclaimable = reclaimable_bytes(&self.ctx.db).unwrap_or(0);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         DatabaseStatus {
             file_bytes,
             wal_bytes,
@@ -131,7 +131,11 @@ impl DatabaseMaintainer {
 
     /// `RunOnce`：同步跑一轮（测试 / 一次性调用用）。
     pub fn run_once(&self, compact: bool) -> DatabaseOptimizeRun {
-        let last_compact_at = self.state.lock().unwrap().last_compact_at;
+        let last_compact_at = self
+            .state
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .last_compact_at;
         let outcome = run_maintenance(&self.ctx, compact, last_compact_at);
         let run = outcome.run.clone();
         self.record(outcome);
@@ -147,7 +151,11 @@ impl DatabaseMaintainer {
 
     async fn execute_locked(&self, compact: bool) {
         let ctx = self.ctx_clone();
-        let last_compact_at = self.state.lock().unwrap().last_compact_at;
+        let last_compact_at = self
+            .state
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .last_compact_at;
         let outcome =
             tokio::task::spawn_blocking(move || run_maintenance(&ctx, compact, last_compact_at))
                 .await
@@ -162,7 +170,7 @@ impl DatabaseMaintainer {
     }
 
     fn record(&self, outcome: MaintenanceOutcome) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         state.running = false;
         state.last = Some(outcome.run);
         if let Some(at) = outcome.last_compact_at {
@@ -171,7 +179,7 @@ impl DatabaseMaintainer {
     }
 
     fn begin(&self) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         if state.running {
             return false;
         }
@@ -239,7 +247,9 @@ fn run_maintenance(
         }
     }
     let mut compacted_at = None;
-    if want_compact && reclaimable >= policy.compact_min_bytes {
+    // 手动 compact 是操作者显式下的令：不能再被 `compact_min_bytes`（默认 64MB）
+    // 这道自动阈值吞掉——小库点「优化」会毫无反馈地空转。自动路径仍走原阈值。
+    if want_compact && (compact || reclaimable >= policy.compact_min_bytes) {
         let (compacted, skipped, compact_err) = compact_if_possible(ctx);
         result.compacted = compacted;
         result.skipped = skipped;
@@ -368,7 +378,6 @@ fn incremental_vacuum_budget(db: &Db, pages: i64, rounds: i64) -> anyhow::Result
 fn compact_database(db: &Db) -> anyhow::Result<()> {
     let conn = db.get()?;
     conn.execute_batch(&format!("PRAGMA busy_timeout={VACUUM_BUSY_TIMEOUT_MS}"))?;
-    let restored = conn.execute_batch(&format!("PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}"));
     let compacted = (|| {
         conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL")?;
         conn.execute_batch("VACUUM")?;
@@ -376,6 +385,9 @@ fn compact_database(db: &Db) -> anyhow::Result<()> {
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
         anyhow::Ok(())
     })();
+    // 还原必须排在 compact **之后**：排在前面等于 VACUUM 仍跑在默认 5s
+    // busy_timeout 上，放大完全白做（并发写一多就 SQLITE_BUSY 失败）。
+    let restored = conn.execute_batch(&format!("PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}"));
     restored?;
     compacted
 }
@@ -442,12 +454,25 @@ mod tests {
         pragma_i64(db, "PRAGMA page_count").unwrap()
     }
 
+    /// 手动 compact 不能再被 `compact_min_bytes`（默认 64MB）吞掉：
+    /// 操作者显式点了「优化」，小库也必须真的跑，否则毫无反馈地空转。
     #[test]
-    fn run_once_skips_compact_below_threshold() {
-        let (db, path) = db("skip");
-        let maintainer = DatabaseMaintainer::new(db, path, policy(1 << 30), None);
+    fn run_once_compacts_when_manual_even_below_threshold() {
+        let (db, path) = db("manual-small");
+        let maintainer = DatabaseMaintainer::new(db.clone(), path.clone(), policy(1 << 30), None);
         let run = maintainer.run_once(true);
-        assert!(!run.compacted, "{run:?}");
+        assert!(run.compacted, "手动优化不得被自动阈值吞掉：{run:?}");
+        assert!(run.error.is_empty(), "{run:?}");
+        assert!(!run.started_at.is_empty() && !run.ended_at.is_empty());
+    }
+
+    /// 反向对照：自动路径仍然尊重阈值（阈值以下不 compact）。
+    #[test]
+    fn run_once_skips_auto_compact_below_threshold() {
+        let (db, path) = db("auto-small");
+        let maintainer = DatabaseMaintainer::new(db, path, policy(1 << 30), None);
+        let run = maintainer.run_once(false);
+        assert!(!run.compacted, "自动路径在阈值以下不得 compact：{run:?}");
         assert!(run.error.is_empty(), "{run:?}");
         assert!(!run.started_at.is_empty() && !run.ended_at.is_empty());
     }
