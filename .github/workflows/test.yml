@@ -32,9 +32,16 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      # 固定版本直接下载：setup-protoc 每次都会分页请求 GitHub Releases 定版本，
+      # 2026-10-22 起在 Node 24 强制运行时上间歇报 “unable to get latest version”，
+      # 直接卡死 Release 链。这里只取 protoc 二进制，不依赖 REST。
+      - name: Install protoc
+        run: |
+          curl -fsSL --retry 3 --retry-delay 2 -o "$RUNNER_TEMP/protoc.zip" \
+            https://github.com/protocolbuffers/protobuf/releases/download/v23.4/protoc-23.4-linux-x86_64.zip
+          unzip -q -o "$RUNNER_TEMP/protoc.zip" -d "$HOME/.local"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/protoc" --version
 
       - uses: Swatinem/rust-cache@v2
 
@@ -78,9 +85,16 @@ jobs:
         with:
           targets: aarch64-unknown-linux-gnu
 
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      # 固定版本直接下载：setup-protoc 每次都会分页请求 GitHub Releases 定版本，
+      # 2026-10-22 起在 Node 24 强制运行时上间歇报 “unable to get latest version”，
+      # 直接卡死 Release 链。这里只取 protoc 二进制，不依赖 REST。
+      - name: Install protoc
+        run: |
+          curl -fsSL --retry 3 --retry-delay 2 -o "$RUNNER_TEMP/protoc.zip" \
+            https://github.com/protocolbuffers/protobuf/releases/download/v23.4/protoc-23.4-linux-x86_64.zip
+          unzip -q -o "$RUNNER_TEMP/protoc.zip" -d "$HOME/.local"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/protoc" --version
 
       - name: Install aarch64 GNU toolchain
         run: |
