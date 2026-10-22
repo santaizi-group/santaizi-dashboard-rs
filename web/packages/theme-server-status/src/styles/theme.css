@@ -117,6 +117,10 @@ html.dark .server-status-shell,
   border-radius: var(--radius);
 }
 .status-nav__links a:hover { color: var(--sz-text); background: var(--sz-muted); }
+/* 触屏无悬停：hover 反馈只在有悬停能力的设备生效，防 tap 后 sticky 高亮 */
+@media (hover: hover) {
+  .status-nav__links a:hover { color: var(--sz-text); background: var(--sz-muted); }
+}
 .status-nav__links a.router-link-exact-active {
   color: var(--sz-sidebar-active-text);
   background: var(--sz-sidebar-active);
@@ -145,7 +149,9 @@ html.dark .server-status-shell,
   text-decoration: none;
   font-size: 18px;
 }
-.status-icon-btn:hover { background: var(--sz-muted); }
+@media (hover: hover) {
+  .status-icon-btn:hover { background: var(--sz-muted); }
+}
 .status-icon-btn:focus-visible { box-shadow: var(--sz-focus); outline: none; }
 
 .status-mobile-nav {
@@ -175,8 +181,10 @@ html.dark .server-status-shell,
   line-height: 1;
   cursor: pointer;
 }
-.status-mobile-nav a:hover,
-.status-mobile-nav button:hover { color: var(--sz-text); background: var(--sz-muted); }
+@media (hover: hover) {
+  .status-mobile-nav a:hover,
+  .status-mobile-nav button:hover { color: var(--sz-text); background: var(--sz-muted); }
+}
 .status-mobile-nav a.router-link-exact-active {
   color: var(--sz-sidebar-active-text);
   background: var(--sz-sidebar-active);
@@ -224,7 +232,9 @@ html.dark .server-status-shell,
   cursor: pointer;
   font-size: 14px;
 }
-.status-toolbar button:hover { background: var(--sz-muted); }
+@media (hover: hover) {
+  .status-toolbar button:hover { background: var(--sz-muted); }
+}
 .connection-state {
   position: relative;
   display: inline-flex;
@@ -355,9 +365,11 @@ html.dark .server-status-shell,
   line-height: 1;
   opacity: 0;
 }
-.ss-th:hover,
+@media (hover: hover) {
+  .ss-th:hover { background: color-mix(in srgb, var(--ss-accent) 8%, transparent); }
+  .ss-th:hover i { opacity: 0.55; }
+}
 .ss-th:focus-visible { background: color-mix(in srgb, var(--ss-accent) 8%, transparent); }
-.ss-th:hover i,
 .ss-th:focus-visible i { opacity: 0.55; }
 .ss-th.is-sorted {
   color: var(--sz-text);
@@ -382,7 +394,9 @@ html.dark .server-status-shell,
   height: 32px;
   border-radius: var(--radius);
 }
-.ss-sort__order:hover { background: color-mix(in srgb, var(--ss-accent) 10%, transparent); }
+@media (hover: hover) {
+  .ss-sort__order:hover { background: color-mix(in srgb, var(--ss-accent) 10%, transparent); }
+}
 .ss-sort__order:focus-visible { box-shadow: var(--sz-focus); outline: none; }
 .ss-sort-menu .el-dropdown-menu {
   display: flex;
@@ -424,7 +438,9 @@ html.dark .server-status-shell,
   text-align: left;
   cursor: pointer;
 }
-.ss-row__main:hover { background: color-mix(in srgb, var(--ss-accent) 8%, transparent); }
+@media (hover: hover) {
+  .ss-row__main:hover { background: color-mix(in srgb, var(--ss-accent) 8%, transparent); }
+}
 .ss-row__main:focus-visible { box-shadow: var(--sz-focus); outline: none; }
 .ss-cell {
   min-width: 0;
@@ -582,7 +598,9 @@ html.dark .server-status-shell,
   font-size: 13px;
   font-weight: 600;
 }
-.buy-link:hover { background: color-mix(in srgb, var(--ss-accent) 24%, var(--sz-surface)); }
+@media (hover: hover) {
+  .buy-link:hover { background: color-mix(in srgb, var(--ss-accent) 24%, var(--sz-surface)); }
+}
 .ss-detail {
   display: grid;
   gap: 16px;
@@ -705,8 +723,10 @@ html.dark .server-status-shell,
   font-size: 13px;
   line-height: 1;
 }
-.ss-range-chips button:hover {
-  border-color: color-mix(in srgb, var(--ss-accent) 42%, var(--svc-border, var(--sz-border)));
+@media (hover: hover) {
+  .ss-range-chips button:hover {
+    border-color: color-mix(in srgb, var(--ss-accent) 42%, var(--svc-border, var(--sz-border)));
+  }
 }
 .ss-range-chips button:focus-visible {
   box-shadow: var(--sz-focus);
@@ -797,8 +817,10 @@ html.dark .server-status-shell,
   line-height: 1;
 }
 .ss-history__custom-toggle i { font-size: 15px; }
-.ss-history__custom-toggle:hover,
-.ss-history__apply:hover:not(:disabled) { border-color: color-mix(in srgb, var(--ss-accent) 42%, var(--svc-border, var(--sz-border))); }
+@media (hover: hover) {
+  .ss-history__custom-toggle:hover,
+  .ss-history__apply:hover:not(:disabled) { border-color: color-mix(in srgb, var(--ss-accent) 42%, var(--svc-border, var(--sz-border))); }
+}
 .ss-history__custom-toggle:focus-visible,
 .ss-history__apply:focus-visible { box-shadow: var(--sz-focus); outline: none; }
 .ss-history__custom-toggle.is-active {
@@ -1034,7 +1056,9 @@ html.dark .status-globe__canvas,
   text-align: left;
   cursor: pointer;
 }
-.status-globe__host:hover { background: color-mix(in srgb, var(--ss-accent) 8%, transparent); }
+@media (hover: hover) {
+  .status-globe__host:hover { background: color-mix(in srgb, var(--ss-accent) 8%, transparent); }
+}
 .status-globe__host:focus-visible { box-shadow: var(--sz-focus); outline: none; }
 
 .service-panel { padding-bottom: 10px; }
@@ -1158,11 +1182,13 @@ html.dark .status-globe__canvas,
 .network-grid[data-density="mid"] .network-tile {
   content-visibility: visible;
 }
-.network-tile:hover,
-.network-tile:focus-visible {
-  background: color-mix(in srgb, var(--svc-accent, var(--ss-accent)) 8%, var(--svc-surface, var(--sz-surface)));
+@media (hover: hover) {
+  .network-tile:hover {
+    background: color-mix(in srgb, var(--svc-accent, var(--ss-accent)) 8%, var(--svc-surface, var(--sz-surface)));
+  }
 }
 .network-tile:focus-visible {
+  background: color-mix(in srgb, var(--svc-accent, var(--ss-accent)) 8%, var(--svc-surface, var(--sz-surface)));
   outline: 2px solid var(--svc-accent, var(--ss-accent));
   outline-offset: 2px;
 }
@@ -1244,7 +1270,9 @@ html.dark .status-globe__canvas,
   color: var(--ss-accent);
   text-decoration: none;
 }
-.server-status-shell > footer a:hover,
+@media (hover: hover) {
+  .server-status-shell > footer a:hover { text-decoration: underline; }
+}
 .server-status-shell > footer a:focus-visible {
   text-decoration: underline;
 }
@@ -1261,7 +1289,9 @@ html.dark .status-globe__canvas,
 @media (max-width: 860px) {
   /* lock-scroll 用测量盒滚动条宽度写 body.width；叠加滚动条实际为 0，页面会凭空收窄并抖。 */
   body.el-popup-parent--hidden { width: auto !important; }
-  .server-status-shell { --control-height: var(--touch-min-mobile); --ss-nav-height: 56px; --ss-nav-inset: 8px; }
+  /* 内容区控件 36px/32px 档（用户定版：44px 肥大）。44px 触控基线仅保留给
+     主触控目标：列表行、导航入口、地图主机、购买链接。 */
+  .server-status-shell { --control-height: 36px; --ss-nav-height: 56px; --ss-nav-inset: 8px; }
   .status-nav { gap: 8px; }
   .status-nav__links { display: none; }
   .status-menu-btn { display: inline-grid; }
@@ -1270,17 +1300,18 @@ html.dark .status-globe__canvas,
   .status-actions { flex-shrink: 0; gap: 4px; }
   /* 页面动作直达：图标化（文字藏进 span，语义在 aria-label），不再藏进抽屉 */
   .status-toolbar button.status-toolbar__page-action {
-    width: 44px;
+    width: 36px;
     padding: 0;
     justify-content: center;
   }
   .status-toolbar button.status-toolbar__page-action span { display: none; }
   .status-toolbar button.status-toolbar__page-action i { font-size: 18px; }
   .server-status-shell .status-container { width: 100%; padding: 16px; }
-  .status-toolbar button { min-height: 44px; }
-  .ss-range-chips button { min-height: 44px; }
+  /* 首屏节奏：工具条→首卡 12px，不再叠加网格顶部 padding（grid 主题移动块归零） */
+  .status-toolbar { margin-bottom: 12px; }
+  .ss-range-chips button { min-height: 32px; }
   .status-globe__host { min-height: 44px; }
-  .ss-sort__order { width: 44px; height: 44px; }
+  .ss-sort__order { width: 28px; height: 28px; }
   .buy-link { min-height: 44px; }
   .ss-table { overflow: visible; }
   .ss-table__head { display: none; }
@@ -1321,7 +1352,26 @@ html.dark .status-globe__canvas,
   .ss-history__custom { flex-direction: column; align-items: stretch; }
   .ss-history__custom .el-date-editor { --el-date-editor-width: 100%; }
   .ss-latency__grid { grid-template-columns: 1fr; }
-  .ss-latency__switch { min-height: 44px; }
+  .ss-latency__switch { min-height: 32px; }
+  /* 分区头（标题+开关+时间片）整条单行横滑，不折行；滚动条隐藏，滚出即达。
+     内层容器不再各自滚动，整条一起滑。 */
+  .ss-latency__head,
+  .ss-history__head {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .ss-latency__head::-webkit-scrollbar,
+  .ss-history__head::-webkit-scrollbar { display: none; }
+  .ss-latency__head h3,
+  .ss-history__head h3,
+  .ss-latency__toolbar,
+  .ss-latency__toggles,
+  .ss-history__controls,
+  .ss-range-chips {
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+  }
   .network-header { align-items: stretch; flex-direction: column; }
   .network-empty { min-height: 56vh; }
   .network-grid[data-density="few"],
@@ -1348,5 +1398,14 @@ html.dark .status-globe__canvas,
     scroll-behavior: auto !important;
     transition: none !important;
     animation: none !important;
+  }
+}
+/* 触屏（含窄窗口触屏模拟）取消手型光标：tap 后 sticky 的 pointer 光标只会带来
+   奇怪高亮。本样式表只随公开站打包，body 级重置不影响 admin；!important 为压过
+   Element Plus 控件自带 cursor。 */
+@media (hover: none), (pointer: coarse) {
+  body,
+  body * {
+    cursor: auto !important;
   }
 }

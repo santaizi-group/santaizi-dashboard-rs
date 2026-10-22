@@ -85,9 +85,11 @@ html.dark .sg-tile__main {
   --sg-divider: #20252f;
   --sg-hot: #f5b84b;
 }
-.sg-tile__main:hover {
-  border-color: color-mix(in srgb, var(--ss-accent) 42%, var(--sg-border));
-  box-shadow: var(--sz-shadow);
+@media (hover: hover) {
+  .sg-tile__main:hover {
+    border-color: color-mix(in srgb, var(--ss-accent) 42%, var(--sg-border));
+    box-shadow: var(--sz-shadow);
+  }
 }
 .sg-tile__main:focus-visible {
   outline: none;
@@ -265,4 +267,9 @@ html.dark .sg-tile__main {
 .server-status-shell.shell--server-grid .status-container { width: 100%; }
 @media (max-width: 860px) {
   .server-status-shell.shell--server-grid { --ss-nav-inset: 16px; }
+  /* 移动端节奏归一：工具条→首卡/标题→首卡只留 12px 一档（工具条 margin 在
+     theme-server-status 移动块已收 12px），卡间 10px 不变，组间 16px。 */
+  .sg-grid { gap: 10px; padding: 0; }
+  .sg-group { margin-bottom: 16px; }
+  .sg-group__title { padding: 0 0 6px; }
 }

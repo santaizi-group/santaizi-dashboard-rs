@@ -313,7 +313,11 @@ impl MonitorEngine {
         }
         let monitors: Vec<repo::MonitorRow> = blocking_read(&self.db, move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, COALESCE(name, ''), COALESCE(type, 0), COALESCE(target, ''),                      COALESCE(skip_servers_raw, '[]'), COALESCE(duration, 30), 0, '', 0, 0, 0, 0, 0,                      NULL, NULL                      FROM monitors WHERE deleted_at IS NULL",
+                // cover 必须读真实列：include（ignore_all=1）语义靠它区分，硬编码 0 会反转覆盖范围。
+                "SELECT id, COALESCE(name, ''), COALESCE(type, 0), COALESCE(target, ''), \
+                 COALESCE(skip_servers_raw, '[]'), COALESCE(duration, 30), 0, '', COALESCE(cover, 0), \
+                 0, 0, 0, 0, NULL, NULL \
+                 FROM monitors WHERE deleted_at IS NULL",
             )?;
             let mapped = stmt.query_map([], monitor_row_lite)?;
             let mut out = Vec::new();
@@ -404,7 +408,8 @@ fn monitor_row_lite(row: &rusqlite::Row<'_>) -> rusqlite::Result<repo::MonitorRo
         duration: row.get(5)?,
         notify: false,
         notification_tag: String::new(),
-        cover: 0,
+        // 覆盖范围语义的唯一来源：include（ignore_all）靠它识别，硬编码会反转派发范围。
+        cover: row.get(8)?,
         enable_show_in_service: false,
         min_latency: 0.0,
         max_latency: 0.0,
@@ -593,6 +598,66 @@ mod tests {
         // 清理临时库
         std::fs::remove_file(format!("{}{}", std::env::temp_dir().display(), "")).ok();
         let _ = _path_guard;
+    }
+
+    #[test]
+    fn dispatch_respects_monitor_cover() {
+        // include（cover=1）只派列表内；all（cover=0）派列表外。回归：派发查询曾把
+        // cover 硬编码 0，include 被反转成「列表外全派、列表内不派」。
+        let path =
+            std::env::temp_dir().join(format!("santaizi-monitor-cover-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let _path_guard = path.to_string_lossy().into_owned();
+        let db = crate::db::migrate::open_primary(path.to_str().unwrap()).unwrap();
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO monitors (name, type, target, skip_servers_raw, duration, cover) \
+                 VALUES ('only-7', 1, 'https://a.example', '[7]', 30, 1)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO monitors (name, type, target, skip_servers_raw, duration, cover) \
+                 VALUES ('all-but-7', 1, 'https://b.example', '[7]', 30, 0)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let conf = crate::config::new_config_handle(crate::config::Config::default());
+        let notifier = Arc::new(crate::notify::Notifier::new(db.clone(), conf.clone()));
+        let engine = MonitorEngine::new(db, conf, notifier);
+        let capability = proto::AgentCapability::ProbeHttp as i32;
+        let (tx7, _rx7) = mpsc::channel(4);
+        let (tx8, _rx8) = mpsc::channel(4);
+        engine.register_session(7, vec![capability], tx7);
+        engine.register_session(8, vec![capability], tx8);
+
+        let items = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(engine.dispatch_due());
+        // probe_id 形如 "{monitor_id}-{server_id}-{hex}"，首段即 monitor_id。
+        let mut targets: Vec<(i64, i64)> = items
+            .into_iter()
+            .map(|item| {
+                (
+                    item.request
+                        .probe_id
+                        .split('-')
+                        .next()
+                        .and_then(|raw| raw.parse::<i64>().ok())
+                        .unwrap_or(0),
+                    item.server_id,
+                )
+            })
+            .collect();
+        targets.sort_unstable();
+        assert_eq!(
+            targets,
+            vec![(1, 7), (2, 8)],
+            "include 只派列表内(7)，all 排除列表(8)"
+        );
     }
 
     #[test]
