@@ -15,10 +15,12 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::api::pagination::{offset_of, parse_page};
+use crate::db::RepoError;
 use crate::repo::servers::{self, AdminServerRow, ServerWriteFields};
 use crate::repo::traffic::PolicyWrite;
 use crate::repo::{bindings, traffic as traffic_repo};
-use crate::rpc::support::{blocking_read, blocking_write};
+use crate::rpc::support::{blocking_read, blocking_write, blocking_write_repo};
 use crate::secret;
 use crate::util::time as util_time;
 
@@ -273,21 +275,6 @@ fn usage_dto(
     })
 }
 
-fn parse_page(params: &HashMap<String, String>) -> (i64, i64) {
-    let page = params
-        .get("page")
-        .and_then(|raw| raw.parse::<i64>().ok())
-        .filter(|page| *page >= 1)
-        .unwrap_or(1);
-    let size = params
-        .get("page_size")
-        .and_then(|raw| raw.parse::<i64>().ok())
-        .filter(|size| *size >= 1)
-        .unwrap_or(20)
-        .min(200);
-    (page, size)
-}
-
 /// `GET /api/v2/admin/servers`（Go `v2AdminServers`）。
 async fn list_servers(
     State(shared): State<ApiShared>,
@@ -295,24 +282,25 @@ async fn list_servers(
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let (page, size) = parse_page(&params);
-    let q = params.get("q").map(String::as_str).unwrap_or("").trim();
+    // 通配符转义与 `%…%` 包装都在 repo 层（`list_admin`）做，调用方只给原始词。
+    let q = params
+        .get("q")
+        .map(String::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_owned();
     let sort = params.get("sort").cloned().unwrap_or_default();
     let ascending = params
         .get("order")
         .is_some_and(|value| value.eq_ignore_ascii_case("asc"));
-    let q_pattern = if q.is_empty() {
-        String::new()
-    } else {
-        format!("%{q}%")
-    };
     let now_nanos = util_time::now_nanos();
     let result = blocking_read(&shared.db, move |conn| {
         let (rows, total) = servers::list_admin(
             conn,
-            &q_pattern,
+            &q,
             &sort,
             ascending,
-            (page - 1) * size,
+            offset_of(page, size),
             size,
             now_nanos,
         )?;
@@ -674,13 +662,19 @@ async fn reset_secret(
             );
         }
     };
-    let updated = blocking_write(&shared.db, move |tx| {
-        let changed = tx.execute(
-            "UPDATE servers SET secret_ciphertext = ?2, updated_at = CURRENT_TIMESTAMP \
-             WHERE id = ?1 AND deleted_at IS NULL",
-            rusqlite::params![server_id, &ciphertext],
-        )?;
-        anyhow::ensure!(changed > 0, "server not found");
+    // 错误带类型而不是字符串：旧实现用 `err.to_string().contains("server not found")`
+    // 反推 404，文案一改就静默退化成 500。
+    let updated = blocking_write_repo(&shared.db, move |tx| {
+        let changed = tx
+            .execute(
+                "UPDATE servers SET secret_ciphertext = ?2, updated_at = CURRENT_TIMESTAMP \
+                 WHERE id = ?1 AND deleted_at IS NULL",
+                rusqlite::params![server_id, &ciphertext],
+            )
+            .map_err(RepoError::from_rusqlite)?;
+        if changed == 0 {
+            return Err(RepoError::not_found("服务器不存在"));
+        }
         Ok(())
     })
     .await;
@@ -689,7 +683,7 @@ async fn reset_secret(
             shared.secrets.rebind(server_id, &plain);
             data_json(json!({ "secret": plain }))
         }
-        Err(err) if err.to_string().contains("server not found") => {
+        Err(RepoError::NotFound(_)) => {
             problem(StatusCode::NOT_FOUND, "server_not_found", "服务器不存在")
         }
         Err(err) => {

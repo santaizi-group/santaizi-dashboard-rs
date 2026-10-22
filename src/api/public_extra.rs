@@ -437,41 +437,102 @@ struct ServiceMonthSeries {
     current_down: i64,
 }
 
+/// 最近 30 个本地日键，顺序 `[29 天前, …, 今天]`（Go `serviceUpDownDelay` 同序）。
+fn recent_local_days(conn: &rusqlite::Connection) -> anyhow::Result<Vec<String>> {
+    let mut days = Vec::with_capacity(30);
+    for offset in (0..30).rev() {
+        days.push(conn.query_row(
+            "SELECT date('now', 'localtime', ?1)",
+            [format!("-{offset} days")],
+            |row| row.get(0),
+        )?);
+    }
+    Ok(days)
+}
+
+/// 全部 monitor 的 30 天日聚合 + 当前窗口，各一条查询。
+/// 旧实现对每个 monitor 跑 31 条查询（N+1），monitor 上百时单请求几千次往返。
 fn service_month_series(
     conn: &rusqlite::Connection,
-    monitor_id: i64,
-) -> anyhow::Result<ServiceMonthSeries> {
-    let mut up = Vec::with_capacity(30);
-    let mut down = Vec::with_capacity(30);
-    let mut delay = Vec::with_capacity(30);
-    for offset in (0..30).rev() {
-        let modifier = format!("-{offset} days");
-        let (day_up, day_down, day_delay): (i64, i64, f64) = conn.query_row(
-            "SELECT COALESCE(SUM(up), 0), COALESCE(SUM(down), 0), COALESCE(AVG(avg_delay), 0) \
+    days: &[String],
+    monitor_ids: &[i64],
+) -> anyhow::Result<std::collections::HashMap<i64, ServiceMonthSeries>> {
+    let window_start = days
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("empty day window"))?;
+    let mut daily: std::collections::HashMap<(i64, String), (i64, i64, f64)> =
+        std::collections::HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT monitor_id, date(created_at, 'localtime'), \
+             COALESCE(SUM(up), 0), COALESCE(SUM(down), 0), COALESCE(AVG(avg_delay), 0) \
              FROM monitor_histories \
-             WHERE monitor_id = ?1 AND deleted_at IS NULL \
-               AND date(created_at, 'localtime') = date('now', 'localtime', ?2)",
-            rusqlite::params![monitor_id, modifier],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+             WHERE deleted_at IS NULL AND date(created_at, 'localtime') >= ?1 \
+             GROUP BY monitor_id, date(created_at, 'localtime')",
         )?;
-        up.push(day_up);
-        down.push(day_down);
-        delay.push(day_delay);
+        let rows = stmt.query_map([&window_start], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                (
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, f64>(4)?,
+                ),
+            ))
+        })?;
+        for row in rows {
+            let (id, day, value) = row?;
+            daily.insert((id, day), value);
+        }
     }
-    let (current_up, current_down): (i64, i64) = conn.query_row(
-        "SELECT COALESCE(SUM(up), 0), COALESCE(SUM(down), 0) FROM monitor_histories \
-         WHERE monitor_id = ?1 AND deleted_at IS NULL \
-           AND datetime(created_at) >= datetime('now', '-5 minutes')",
-        [monitor_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    Ok(ServiceMonthSeries {
-        up,
-        down,
-        delay,
-        current_up,
-        current_down,
-    })
+    let mut current: std::collections::HashMap<i64, (i64, i64)> = std::collections::HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT monitor_id, COALESCE(SUM(up), 0), COALESCE(SUM(down), 0) \
+             FROM monitor_histories \
+             WHERE deleted_at IS NULL AND datetime(created_at) >= datetime('now', '-5 minutes') \
+             GROUP BY monitor_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                (row.get::<_, i64>(1)?, row.get::<_, i64>(2)?),
+            ))
+        })?;
+        for row in rows {
+            let (id, value) = row?;
+            current.insert(id, value);
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    for id in monitor_ids {
+        let mut up = Vec::with_capacity(days.len());
+        let mut down = Vec::with_capacity(days.len());
+        let mut delay = Vec::with_capacity(days.len());
+        for day in days {
+            let (day_up, day_down, day_delay) = daily
+                .get(&(*id, day.clone()))
+                .copied()
+                .unwrap_or((0, 0, 0.0));
+            up.push(day_up);
+            down.push(day_down);
+            delay.push(day_delay);
+        }
+        let (current_up, current_down) = current.get(id).copied().unwrap_or((0, 0));
+        out.insert(
+            *id,
+            ServiceMonthSeries {
+                up,
+                down,
+                delay,
+                current_up,
+                current_down,
+            },
+        );
+    }
+    Ok(out)
 }
 
 // ---------- services / network（监控派发 Phase 6 接线后启用） ----------
@@ -518,9 +579,17 @@ async fn public_services(
             ))
         })?;
         let mut items = Vec::new();
+        let mut monitor_rows = Vec::new();
         for row in mapped {
-            let (id, name, monitor_type, target, interval, latency_notify, min_ms, max_ms) = row?;
-            let series = service_month_series(conn, id)?;
+            monitor_rows.push(row?);
+        }
+        let days = recent_local_days(conn)?;
+        let monitor_ids: Vec<i64> = monitor_rows.iter().map(|row| row.0).collect();
+        let series = service_month_series(conn, &days, &monitor_ids)?;
+        for (id, name, monitor_type, target, interval, latency_notify, min_ms, max_ms) in
+            monitor_rows
+        {
+            let series = series.get(&id);
             items.push(json!({
                 "id": id,
                 "name": name,
@@ -530,11 +599,11 @@ async fn public_services(
                 "latency_notify": latency_notify,
                 "min_latency_ms": min_ms,
                 "max_latency_ms": max_ms,
-                "up": series.up,
-                "down": series.down,
-                "delay": series.delay,
-                "current_up": series.current_up,
-                "current_down": series.current_down,
+                "up": series.map(|s| s.up.clone()).unwrap_or_default(),
+                "down": series.map(|s| s.down.clone()).unwrap_or_default(),
+                "delay": series.map(|s| s.delay.clone()).unwrap_or_default(),
+                "current_up": series.map(|s| s.current_up).unwrap_or(0),
+                "current_down": series.map(|s| s.current_down).unwrap_or(0),
             }));
         }
         Ok(items)
@@ -582,9 +651,6 @@ async fn public_network(
         return problem(StatusCode::NOT_FOUND, "server_not_found", "服务器不存在");
     }
     let result = blocking_read(&shared.db, move |conn| {
-        let window_start = crate::util::time::unix_nanos_to_sqlite(
-            crate::util::time::now_nanos() - 24 * 3_600_000_000_000,
-        );
         let server_name: String = conn
             .query_row(
                 "SELECT COALESCE(name, '') FROM servers WHERE id = ?1",
@@ -598,6 +664,13 @@ async fn public_network(
              WHERE h.server_id = ?1 AND h.created_at >= ?2 AND m.deleted_at IS NULL \
              ORDER BY h.monitor_id ASC, h.created_at ASC",
         )?;
+        // `unix_nanos_to_sqlite` 产 `…+00:00`，而 `monitor_histories.created_at` 由
+        // `CURRENT_TIMESTAMP` 写成无后缀形态；同秒内无后缀串恒「小于」带后缀串，
+        // 会把窗口边界那一秒的行漏掉。两侧都走 `datetime()` 归一化再比。
+        let window_start =
+            crate::util::time::sqlite_to_datetime_text(&crate::util::time::unix_nanos_to_sqlite(
+                crate::util::time::now_nanos() - 24 * 3_600_000_000_000,
+            ));
         let mapped = stmt.query_map(rusqlite::params![server_id, window_start], |row| {
             Ok((
                 row.get::<_, i64>(0)?,

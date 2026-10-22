@@ -109,7 +109,13 @@ async fn bootstrap(
         "logo_url": safe_asset_url(&conf.site.logo_url, "/static/logo.svg"),
         "footer_text": conf.site.footer_text,
         "primary_color": conf.site.primary_color,
-        "custom_css": conf.site.safe_custom_css,
+        // 写路径已按白名单校验；这里再兜一层——配置文件可被手工编辑，
+        // 而这份 CSS 是 `style.textContent` 直接注入公开站的。
+        "custom_css": if super::admin_settings::css_is_safe(&conf.site.safe_custom_css) {
+            conf.site.safe_custom_css.as_str()
+        } else {
+            ""
+        },
         "requires_view_password": !conf.site.view_password.is_empty(),
         "view_password_verified": verified,
         "show_availability": conf.show_availability_to_guest,
@@ -127,6 +133,9 @@ struct ViewPasswordRequest {
 
 /// `POST /api/v2/public/view-password/session`：校验查看密码并下发
 /// `-vp` Cookie（Go `v2ViewPasswordSession`）。
+///
+/// 查看密码是站点级单值、无账号可锁，失败不限速等于裸奔的爆破面：
+/// 全局桶按尝试速率压住（密钥只有一个，桶也只需要一个）。
 async fn view_password_session(
     State(shared): State<ApiShared>,
     body: axum::body::Bytes,
@@ -141,13 +150,28 @@ async fn view_password_session(
             );
         }
     };
+    // 节流键与查看密码本身无关：锁的是「这个站点的这道门」。
+    const THROTTLE_KEY: &str = "view-password";
+    if let Err(retry) = shared.throttle.check(THROTTLE_KEY) {
+        let mut response = problem(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_attempts",
+            "尝试过于频繁，请稍后重试",
+        );
+        if let Ok(value) = header::HeaderValue::from_str(&retry.seconds().to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+        return response;
+    }
     if request.password != shared.conf().site.view_password {
+        shared.throttle.record_failure(THROTTLE_KEY);
         return problem(
             StatusCode::FORBIDDEN,
             "invalid_view_password",
             "查看密码不正确",
         );
     }
+    shared.throttle.record_success(THROTTLE_KEY);
     let mut response = StatusCode::NO_CONTENT.into_response();
     let cookie = format!(
         "{}={}; Path=/; Max-Age={VIEW_PASSWORD_COOKIE_MAX_AGE}; SameSite=Lax; HttpOnly",

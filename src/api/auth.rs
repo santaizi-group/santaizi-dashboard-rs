@@ -71,6 +71,8 @@ pub struct ApiShared {
     pub maintainer: Option<Arc<crate::telemetry::maintenance::DatabaseMaintainer>>,
     /// 通知引擎（test 端点与语言切换共用）。
     pub notifier: Option<Arc<crate::notify::Notifier>>,
+    /// 公开端点失败节流（查看密码等单值秘密的爆破兜底）。
+    pub throttle: Arc<super::rate_limit::FailureThrottle>,
 }
 
 impl ApiShared {
@@ -81,10 +83,17 @@ impl ApiShared {
 }
 
 /// 从请求读 Cookie 值（取第一个匹配项）。
+/// 取 Cookie 值。
+///
+/// `split_once('=')?` 里的 `?` 会在遇到**没有 `=` 的片段**时直接返回 `None`，
+/// 把后面合法的 cookie 一起吞掉（例如 `Cookie: flag; session=abc` 只因为
+/// 第一个片段没有等号就整体判为未登录）。逐段继续扫描才对。
 pub fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let raw = headers.get(header::COOKIE)?.to_str().ok()?;
     for pair in raw.split(';') {
-        let (key, value) = pair.trim().split_once('=')?;
+        let Some((key, value)) = pair.trim().split_once('=') else {
+            continue;
+        };
         if key == name {
             return Some(value.to_string());
         }
@@ -399,6 +408,30 @@ impl IntoResponse for CurrentUser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cookie_value_skips_malformed_pairs() {
+        let mut headers = HeaderMap::new();
+        // 首个片段没有 `=`：旧实现用 `?` 提前返回 None，把后面的合法 cookie 吞掉。
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("flag; santaizi-dashboard=abc123; other=1"),
+        );
+        assert_eq!(
+            cookie_value(&headers, "santaizi-dashboard").as_deref(),
+            Some("abc123")
+        );
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("a=1; b; santaizi-dashboard=xyz"),
+        );
+        assert_eq!(
+            cookie_value(&headers, "santaizi-dashboard").as_deref(),
+            Some("xyz")
+        );
+        headers.insert(header::COOKIE, HeaderValue::from_static("a=1; b=2"));
+        assert_eq!(cookie_value(&headers, "santaizi-dashboard"), None);
+    }
 
     #[test]
     fn csrf_token_round_trip_and_tamper_rejection() {

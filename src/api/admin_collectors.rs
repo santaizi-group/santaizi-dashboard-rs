@@ -229,7 +229,7 @@ async fn create_collector(
         apply_probe_fields(&mut row, &request, true)?;
         probes::apply_probe_defaults(&mut row);
         if row.name.is_empty() {
-            anyhow::bail!("name is required");
+            anyhow::bail!(CollectorReject::NameRequired);
         }
         let draft = collectors::NewCollector {
             row: row.clone(),
@@ -287,10 +287,10 @@ async fn update_collector(
     let id_for_read = id.clone();
     let saved = blocking_write(&shared.db, move |tx| {
         let Some(mut row) = collectors::find_admin(tx, &id)? else {
-            anyhow::bail!("collector not found");
+            anyhow::bail!(CollectorReject::NotFound);
         };
         if !row.is_probe() && request.address.trim().is_empty() {
-            anyhow::bail!("address is required for observer collectors");
+            anyhow::bail!(CollectorReject::AddressRequired);
         }
         row.name = request.name.trim().to_string();
         row.address = request.address.trim().to_string();
@@ -302,7 +302,7 @@ async fn update_collector(
         probes::apply_probe_defaults(&mut row);
         row.config_version += 1;
         if row.name.is_empty() {
-            anyhow::bail!("name is required");
+            anyhow::bail!(CollectorReject::NameRequired);
         }
         collectors::save_collector(tx, &row, &scopes, now)?;
         Ok(())
@@ -436,7 +436,7 @@ async fn replace_scope(
     let id_for_read = id.clone();
     let saved = blocking_write(&shared.db, move |tx| {
         let Some(mut row) = collectors::find_admin(tx, &id)? else {
-            anyhow::bail!("collector not found");
+            anyhow::bail!(CollectorReject::NotFound);
         };
         row.config_version += 1;
         collectors::save_collector(tx, &row, &scopes, now)
@@ -725,7 +725,7 @@ fn apply_probe_fields(
         .enable_ipv6
         .unwrap_or(if created { true } else { row.enable_ipv6 });
     if !row.enable_ipv4 && !row.enable_ipv6 {
-        anyhow::bail!("enable_ipv4 or enable_ipv6 is required");
+        anyhow::bail!(CollectorReject::IpFamilyRequired);
     }
     row.probe_notify = request.notify;
     row.notification_tag = Some(request.notification_tag.trim().to_string());
@@ -865,18 +865,40 @@ fn database_error(err: impl std::fmt::Display) -> Response {
     )
 }
 
+/// 业务拒绝码：随 anyhow 传递，`map_write_error` 按类型分类而不是按文案匹配
+/// （文案一改，旧的 `message.contains(...)` 就会静默退化成 500）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CollectorReject {
+    NotFound,
+    NameRequired,
+    AddressRequired,
+    IpFamilyRequired,
+}
+
+impl std::fmt::Display for CollectorReject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "collector not found"),
+            Self::NameRequired => write!(f, "name is required"),
+            Self::AddressRequired => write!(f, "address is required for observer collectors"),
+            Self::IpFamilyRequired => write!(f, "enable_ipv4 or enable_ipv6 is required"),
+        }
+    }
+}
+
+impl std::error::Error for CollectorReject {}
+
 fn map_write_error(err: anyhow::Error) -> Response {
-    let message = err.to_string();
-    if message.contains("collector not found") {
-        not_found()
-    } else if message.contains("enable_ipv4") {
-        invalid(
+    match err.downcast_ref::<CollectorReject>() {
+        Some(CollectorReject::NotFound) => not_found(),
+        Some(CollectorReject::IpFamilyRequired) => invalid(
             "invalid_probe_ip_family",
             "enable_ipv4 or enable_ipv6 is required",
-        )
-    } else if message.contains("address is required") || message.contains("name is required") {
-        invalid("invalid_collector", &message)
-    } else {
-        database_error(err)
+        ),
+        Some(CollectorReject::AddressRequired) => {
+            invalid("invalid_collector", "观察型从端必须填写地址")
+        }
+        Some(CollectorReject::NameRequired) => invalid("invalid_collector", "名称不能为空"),
+        None => database_error(err),
     }
 }

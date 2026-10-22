@@ -164,6 +164,19 @@ async fn server_crud_round_trip() {
     assert_eq!(body["data"][0]["name"], "web-1");
     assert!(body["data"][0].get("secret").is_none());
 
+    // LIKE 通配符必须转义：`%` 不能退化成「匹配一切」。
+    for (query, expected) in [("%", 0), ("_", 0), ("w_b", 0), ("web", 1)] {
+        let hits = client()
+            .get(format!("{base}/api/v2/admin/servers?q={query}"))
+            .header(reqwest::header::COOKIE, &cookie_header)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(hits.status(), 200);
+        let body: serde_json::Value = hits.json().await.unwrap();
+        assert_eq!(body["meta"]["total"], expected, "q={query} 的通配符未转义");
+    }
+
     // 更新：显式关 TCP；ICMP 缺省保留 false（Go boolOrKeep）。
     let updated = client()
         .patch(format!("{base}/api/v2/admin/servers/{server_id}"))
@@ -236,6 +249,23 @@ async fn server_crud_round_trip() {
     );
     assert_eq!(fixture.state.secrets().server_id(&secret_plain), None);
 
+    // 预置一条当前绑定 + 一条传输量：验证删除时的连带清理与「只终结不删」。
+    let node = [0x0Cu8; 16];
+    fixture
+        .db
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO server_node_bindings (server_id, node_uuid, valid_from, valid_to, current, reason, created_at) VALUES (?1, ?2, '0', NULL, 1, 'legacy', CURRENT_TIMESTAMP)",
+                rusqlite::params![server_id, node],
+            )?;
+            tx.execute(
+                "INSERT INTO transfers (server_id, \"in\", \"out\") VALUES (?1, 1, 2)",
+                [server_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
     // 删除：204 + 索引清理 + 404。
     let deleted = client()
         .delete(format!("{base}/api/v2/admin/servers/{server_id}"))
@@ -253,6 +283,59 @@ async fn server_crud_round_trip() {
         .await
         .unwrap();
     assert_eq!(missing.status(), 404);
+
+    // 关联数据一并清掉：不得留下引用已删 server_id 的孤儿行
+    // （重新占用同一 id 时会读到上一任的传输量与运行态）。
+    let orphans: Vec<(String, i64)> = fixture
+        .db
+        .read(|conn| {
+            let tables = [
+                "monitor_histories",
+                "transfers",
+                "server_runtimes",
+                "server_offline_histories",
+            ];
+            let mut out = Vec::new();
+            for table in tables {
+                let count: i64 = conn.query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE server_id = ?1"),
+                    [server_id],
+                    |row| row.get(0),
+                )?;
+                out.push((table.to_string(), count));
+            }
+            Ok(out)
+        })
+        .unwrap();
+    for (table, count) in orphans {
+        assert_eq!(count, 0, "{table} 应随服务器一起删除");
+    }
+    // 绑定只终结不删：历史观测与可用性证据保持不可变。
+    let (binding_current, binding_rows, binding_to): (i64, i64, i64) = fixture
+        .db
+        .read(|conn| {
+            Ok((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM server_node_bindings WHERE server_id = ?1 AND current = 1",
+                    [server_id],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM server_node_bindings WHERE server_id = ?1",
+                    [server_id],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM server_node_bindings WHERE server_id = ?1 AND valid_to IS NOT NULL",
+                    [server_id],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(binding_current, 0, "当前绑定必须被终结");
+    assert_eq!(binding_rows, 1, "历史绑定行不得删除");
+    assert_eq!(binding_to, 1, "终结绑定必须写入 valid_to");
 
     cancel.cancel();
     let _ = server.await;

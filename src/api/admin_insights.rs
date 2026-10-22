@@ -17,22 +17,8 @@ use crate::rpc::support::{blocking_read, blocking_write};
 use crate::util::time as util_time;
 
 use super::auth::{AdminUser, ApiShared, data_json, problem};
+use super::pagination::{offset_of, parse_page};
 use super::presentation;
-
-fn parse_page(params: &HashMap<String, String>) -> (i64, i64) {
-    let page = params
-        .get("page")
-        .and_then(|raw| raw.parse::<i64>().ok())
-        .filter(|page| *page >= 1)
-        .unwrap_or(1);
-    let size = params
-        .get("page_size")
-        .and_then(|raw| raw.parse::<i64>().ok())
-        .filter(|size| *size >= 1)
-        .unwrap_or(20)
-        .min(200);
-    (page, size)
-}
 
 /// 游标分页信封（Go monitor history / admin availability：meta 只带 next_cursor）。
 fn list_cursor(data: Vec<Value>, next_cursor: String) -> Response {
@@ -190,7 +176,7 @@ async fn telemetry_dataset(
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let (page, size) = parse_page(&params);
-    let offset = (page - 1) * size;
+    let offset = offset_of(page, size);
     let open_only = params
         .get("open")
         .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
@@ -343,7 +329,7 @@ async fn connection_latency(
             collector_id.as_deref(),
             observer_id.as_deref(),
             server_id,
-            (page - 1) * size,
+            offset_of(page, size),
             size,
         )
     })
@@ -419,7 +405,7 @@ async fn probe_samples(
             kind.as_deref(),
             server_id,
             port,
-            (page - 1) * size,
+            offset_of(page, size),
             size,
         )
     })
@@ -588,7 +574,7 @@ async fn offline_history(
     };
     let (page, size) = parse_page(&params);
     let result = blocking_read(&shared.db, move |conn| {
-        insights::list_offline_history(conn, server_id, (page - 1) * size, size)
+        insights::list_offline_history(conn, server_id, offset_of(page, size), size)
     })
     .await;
     match result {
@@ -662,7 +648,10 @@ async fn cleanup_offline_history(
         }
         None => {
             let retention_days = shared.conf().offline_history_retention_days as i64;
-            util_time::now_nanos() - retention_days * 24 * 3_600_000_000_000
+            // `retention_days` 由 admin 接口直传，可远超 `i64` 纳秒跨度；
+            // 直接 `* 24 * 3_600 * 1_000_000_000` 会溢出 panic（debug）或回绕
+            // 成「未来时刻」（release），导致清理区间为空甚至反向。
+            util_time::now_nanos() - retention_days.saturating_mul(24 * 3_600 * 1_000_000_000)
         }
     };
     let server_id = request.server_id;

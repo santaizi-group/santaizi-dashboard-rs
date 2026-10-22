@@ -57,7 +57,10 @@ fn seed_telemetry(fixture: &PrimaryFixture, now: i64) {
                             santaizi_dashboard::proto::SinkRuntime {
                                 endpoint_id: "primary".into(),
                                 connected: true,
-                                ack_through: 9,
+                                // 超过 i64::MAX 的序列号：旧代码 `as i64` 会回绕成
+                                // 负数，JSON 里于是出现负数序号。
+                                ack_through: u64::MAX,
+                                pending_events: u64::MAX - 1,
                                 last_rtt_ms: 1.5,
                                 rtt_sampled_at_unix_nano: now,
                                 ..Default::default()
@@ -255,7 +258,15 @@ async fn connections_endpoints() {
         .unwrap();
     assert_eq!(primary["server_name"], "node-7");
     assert_eq!(primary["observer_name"], "主面板");
-    assert_eq!(primary["sink"]["ack_through"], 9);
+    assert_eq!(
+        primary["sink"]["ack_through"],
+        serde_json::json!(u64::MAX),
+        "uint64 序列号不得被回绕成负数"
+    );
+    assert_eq!(
+        primary["sink"]["pending_events"],
+        serde_json::json!(u64::MAX - 1)
+    );
     assert_eq!(primary["sink"]["last_rtt_ms"], serde_json::json!(1.5));
 
     // collector 离线（心跳 10 分钟前）→ 非 primary sink 清零。
@@ -306,6 +317,166 @@ async fn connections_endpoints() {
             .len(),
         0
     );
+
+    // 两个不同 node 各一分钟桶：无过滤时 `server_id` 必须是行的真值，
+    // 不得回显过滤参数（旧实现无过滤时恒为 0，有过滤时恒为过滤值）。
+    let other_node = [0x0Au8; 16];
+    fixture
+        .db
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO servers (id, name, tag, secret_ciphertext, display_index, hide_for_guest) VALUES (8, 'node-8', 'tag2', X'00', 2, 0)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO server_node_bindings (server_id, node_uuid, valid_from, valid_to, current, reason, created_at) VALUES (8, ?1, 0, NULL, 1, 'r', CURRENT_TIMESTAMP)",
+                [&other_node],
+            )?;
+            tx.execute(
+                "INSERT INTO connection_latency_buckets (kind, collector_uuid, node_uuid, observer_id, bucket_start, min_ms, max_ms, sum_ms, count, updated_at) \
+                 VALUES ('heartbeat', 'collector-edge', ?1, 'collector-edge', ?2, 1.0, 2.0, 3.0, 2, CURRENT_TIMESTAMP)",
+                rusqlite::params![node(), now - 60_000_000_000i64],
+            )?;
+            tx.execute(
+                "INSERT INTO connection_latency_buckets (kind, collector_uuid, node_uuid, observer_id, bucket_start, min_ms, max_ms, sum_ms, count, updated_at) \
+                 VALUES ('heartbeat', 'collector-edge', ?1, 'collector-edge', ?2, 5.0, 6.0, 11.0, 2, CURRENT_TIMESTAMP)",
+                rusqlite::params![other_node, now - 60_000_000_000i64],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let listed = client()
+        .get(format!("{base}/api/v2/admin/connections/latency"))
+        .header(reqwest::header::COOKIE, &cookie_header)
+        .send()
+        .await
+        .unwrap();
+    let items = listed.json::<serde_json::Value>().await.unwrap()["data"].clone();
+    assert_eq!(items.as_array().unwrap().len(), 2);
+    let mut seen: Vec<i64> = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["server_id"].as_i64().unwrap())
+        .collect();
+    seen.sort_unstable();
+    assert_eq!(seen, vec![7, 8], "server_id 必须是行的真值而非过滤参数");
+    for item in items.as_array().unwrap() {
+        if item["server_id"] == 7 {
+            assert_eq!(item["server_name"], "node-7");
+        } else {
+            assert_eq!(item["server_name"], "node-8");
+        }
+    }
+
+    cancel.cancel();
+    let _ = server.await;
+}
+
+/// 探测样本分页：动态 WHERE 的占位符必须真正绑定（P0 回归）。
+#[tokio::test]
+async fn probe_samples_filtered_pagination() {
+    let fixture = setup_primary("insights-probe-samples", false).await;
+    insert_user(&fixture.db, "vera", true);
+    let now = santaizi_dashboard::util::time::now_nanos();
+    let bucket = |offset: i64, kind: &'static str| {
+        (
+            "probe-1",
+            SERVER_ID,
+            kind,
+            22i64,
+            now - offset,
+            1.0f64,
+            2.0f64,
+            3.0f64,
+            2i64,
+            0.0f64,
+            2i64,
+            0i64,
+        )
+    };
+    fixture
+        .db
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO collectors (collector_uuid, name, address, token_hash, token_ciphertext, kind, tcp_ports, revoked, deleted) VALUES ('probe-1', 'Probe1', 'p:5556', X'00', X'00', 'probe', '22', 0, 0)",
+                [],
+            )?;
+            for (index, kind) in ["icmp", "tcp"].iter().enumerate() {
+                let row = bucket(index as i64 * 60_000_000_000i64, kind);
+                tx.execute(
+                    "INSERT INTO probe_sample_buckets \
+                     (collector_uuid, server_id, kind, port, bucket_start, min_ms, max_ms, sum_ms, count, loss_sum, success_count, fail_count, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, CURRENT_TIMESTAMP)",
+                    rusqlite::params![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let (port, cancel, server) = spawn_http(&fixture).await;
+    let base = base_url(port);
+    let (cookie_header, _csrf) = member_headers(&fixture, port, "vera").await;
+
+    // 无过滤：全部过滤条件都为空，历史上是唯一「能跑」的路径。
+    let all = client()
+        .get(format!("{base}/api/v2/admin/probes/samples"))
+        .header(reqwest::header::COOKIE, &cookie_header)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(all.status(), 200);
+    assert_eq!(
+        all.json::<serde_json::Value>().await.unwrap()["data"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // 任一过滤条件都会触发 `InvalidParameterCount`（P0）。
+    for (query, expected) in [
+        ("?collector_id=probe-1".to_string(), 2usize),
+        ("?collector_id=nope".to_string(), 0),
+        ("?kind=icmp".to_string(), 1),
+        ("?kind=tcp".to_string(), 1),
+        (format!("?server_id={SERVER_ID}"), 2),
+        ("?server_id=999".to_string(), 0),
+        ("?port=22".to_string(), 2),
+        ("?port=23".to_string(), 0),
+        (
+            format!("?collector_id=probe-1&kind=icmp&server_id={SERVER_ID}&port=22"),
+            1,
+        ),
+    ] {
+        let filtered = client()
+            .get(format!("{base}/api/v2/admin/probes/samples{query}"))
+            .header(reqwest::header::COOKIE, &cookie_header)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(filtered.status(), 200, "query {query} 不得 500");
+        let data = filtered.json::<serde_json::Value>().await.unwrap()["data"].clone();
+        assert_eq!(
+            data.as_array().unwrap().len(),
+            expected,
+            "query {query} 行数不符"
+        );
+    }
+
+    // 分页参数同样走绑定：offset 越界返回空而不是报错。
+    let paged = client()
+        .get(format!(
+            "{base}/api/v2/admin/probes/samples?page=2&page_size=1"
+        ))
+        .header(reqwest::header::COOKIE, &cookie_header)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(paged.status(), 200);
+    let data = paged.json::<serde_json::Value>().await.unwrap()["data"].clone();
+    assert_eq!(data.as_array().unwrap().len(), 1);
+    assert_eq!(data[0]["server_name"], "node-7");
 
     cancel.cancel();
     let _ = server.await;

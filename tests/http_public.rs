@@ -815,3 +815,72 @@ async fn cycle_transfer_lists_and_computes_usage() {
     cancel.cancel();
     let _ = server.await;
 }
+
+/// 查看密码不限速 → 裸奔的爆破面。全局桶必须在若干次失败后开始拒绝。
+#[tokio::test]
+async fn view_password_is_throttled() {
+    let fixture = setup_primary_with("public-vp-throttle", false, |conf| {
+        conf.site.view_password = "s3cret".into();
+    })
+    .await;
+    let (port, cancel, server) = spawn_http(&fixture).await;
+    let base = base_url(port);
+
+    // 现取 CSRF（Cookie + 头配对），否则请求在中间件层就 403，
+    // 根本走不到密码比对——那测的是 CSRF 不是节流。
+    let warmup = client()
+        .get(format!("{base}/api/v2/public/bootstrap"))
+        .send()
+        .await
+        .unwrap();
+    let csrf = cookie_value(&warmup, "santaizi-dashboard-csrf").expect("csrf cookie");
+
+    let attempt = |password: &'static str| {
+        let base = base.clone();
+        let csrf = csrf.clone();
+        async move {
+            client()
+                .post(format!("{base}/api/v2/public/view-password/session"))
+                .header("X-CSRF-Token", &csrf)
+                .header(
+                    reqwest::header::COOKIE,
+                    format!("santaizi-dashboard-csrf={csrf}"),
+                )
+                .json(&serde_json::json!({ "password": password }))
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+
+    // 前几次照常 403（错误密码）。
+    for _ in 0..5 {
+        assert_eq!(attempt("wrong").await, 403);
+    }
+    // 之后必须被节流——连正确密码也进不来。
+    assert_eq!(attempt("wrong").await, 429);
+    assert_eq!(attempt("s3cret").await, 429, "节流期间正确密码也应被拒");
+    let throttled = client()
+        .post(format!("{base}/api/v2/public/view-password/session"))
+        .header("X-CSRF-Token", &csrf)
+        .header(
+            reqwest::header::COOKIE,
+            format!("santaizi-dashboard-csrf={csrf}"),
+        )
+        .json(&serde_json::json!({ "password": "s3cret" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(throttled.status(), 429);
+    assert!(
+        throttled
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .is_some(),
+        "429 应带 Retry-After"
+    );
+
+    cancel.cancel();
+    let _ = server.await;
+}

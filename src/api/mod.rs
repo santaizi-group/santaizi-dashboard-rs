@@ -12,9 +12,11 @@ pub mod admin_servers;
 pub mod admin_settings;
 pub mod auth;
 pub mod oauth2;
+pub mod pagination;
 pub mod presentation;
 pub mod public;
 pub mod public_extra;
+pub mod rate_limit;
 pub mod tokens;
 pub mod ws;
 
@@ -248,8 +250,14 @@ async fn get_session(
 }
 
 /// `POST /api/v2/auth/logout`：清会话 Cookie 与库内令牌（Go `v2Logout`）。
+///
+/// 只清理**调用方自己持有的那份凭据**：Bearer API Token 调logout 时不动
+/// `users.token`——那是同账号管理员的登录会话，一个可外发的只读令牌不该能
+/// 把别人的会话踢下线（也不该能销毁自己不拥有的凭据）。
 async fn logout(State(shared): State<ApiShared>, OptionalUser(user): OptionalUser) -> Response {
-    if let Some(current) = user {
+    if let Some(current) = user
+        && !current.is_api
+    {
         let now = util_time::now_nanos();
         let id = current.user.id;
         let _ = crate::rpc::support::blocking_write(&shared.db, move |tx| {
@@ -296,6 +304,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         secrets: state.secrets_arc(),
         maintainer: state.maintainer(),
         notifier: Some(state.notifier()),
+        throttle: Arc::new(rate_limit::FailureThrottle::default()),
     };
     Router::new()
         .route("/api/v2/auth/session", get(get_session))

@@ -212,6 +212,19 @@ async fn settings_validation_failures() {
             serde_json::json!({"custom_css": "a { background: url(https://evil/x.png); }"}),
             "unsafe_custom_css",
         ),
+        // 黑名单时代的漏网：注释劈开关键字、CSS 转义、未知 at-rule。
+        (
+            serde_json::json!({"custom_css": "@im/**/port url('https://evil/x.css');"}),
+            "unsafe_custom_css",
+        ),
+        (
+            serde_json::json!({"custom_css": "a { background: \\75 rl(https://evil/x.png); }"}),
+            "unsafe_custom_css",
+        ),
+        (
+            serde_json::json!({"custom_css": "@unknown-rule { a { color: red } }"}),
+            "unsafe_custom_css",
+        ),
         (
             serde_json::json!({"logo_url": "https://evil.example/x.png"}),
             "unsafe_asset_url",
@@ -369,6 +382,50 @@ async fn api_tokens_lifecycle() {
         .await
         .unwrap();
     assert_eq!(restored.status(), 200);
+
+    // 只读 Token 读不到任何明文：Bearer 调 token 详情只给前缀。
+    // 否则一个可外发的只读凭据就能读出同账号写令牌的明文 → 权限提升。
+    let ro = client()
+        .post(format!("{base}/api/v2/admin/api-tokens"))
+        .header(reqwest::header::COOKIE, &cookie_header)
+        .header("X-CSRF-Token", &csrf)
+        .json(&serde_json::json!({"note": "readonly", "permission": "read"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ro.status(), 201);
+    let ro_plain = ro.json::<serde_json::Value>().await.unwrap()["data"]["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let detail_by_bearer = client()
+        .get(format!("{base}/api/v2/admin/api-tokens/{token_id}"))
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {ro_plain}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(detail_by_bearer.status(), 200);
+    let body: serde_json::Value = detail_by_bearer.json().await.unwrap();
+    assert!(
+        body["data"].get("token").is_none(),
+        "只读 Bearer 不得读到 Token 明文，实际：{body}"
+    );
+    assert!(body["data"]["token_prefix"].as_str().is_some());
+
+    // 写令牌的明文 Bearer 同样不该回显（Bearer 一律不外泄明文）。
+    let detail_by_write_bearer = client()
+        .get(format!("{base}/api/v2/admin/api-tokens/{token_id}"))
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {plain}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(detail_by_write_bearer.status(), 200);
+    let body: serde_json::Value = detail_by_write_bearer.json().await.unwrap();
+    assert!(
+        body["data"].get("token").is_none(),
+        "写令牌 Bearer 也不得回显明文，实际：{body}"
+    );
 
     let deleted = client()
         .delete(format!("{base}/api/v2/admin/api-tokens/{token_id}"))

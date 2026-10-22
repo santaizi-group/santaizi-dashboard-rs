@@ -19,21 +19,7 @@ use crate::rpc::support::{blocking_read, blocking_write};
 use crate::util::time as util_time;
 
 use super::auth::{AdminUser, ApiShared, data_json, list_json_paged, problem};
-
-fn parse_page(params: &HashMap<String, String>) -> (i64, i64) {
-    let page = params
-        .get("page")
-        .and_then(|raw| raw.parse::<i64>().ok())
-        .filter(|page| *page >= 1)
-        .unwrap_or(1);
-    let size = params
-        .get("page_size")
-        .and_then(|raw| raw.parse::<i64>().ok())
-        .filter(|size| *size >= 1)
-        .unwrap_or(20)
-        .min(200);
-    (page, size)
-}
+use super::pagination::{offset_of, parse_page};
 
 /// 列表查询公共参数。
 struct ListQuery {
@@ -214,17 +200,15 @@ async fn list_monitors(
     AdminUser(_admin): AdminUser,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let mut query = list_query(&params);
-    if !query.q.is_empty() {
-        query.q = format!("%{}%", query.q);
-    }
+    // 通配符转义与 `%…%` 包装在 repo 层做，调用方只给原始词。
+    let query = list_query(&params);
     let result = blocking_read(&shared.db, move |conn| {
         repo::list_monitors(
             conn,
             &query.q,
             &query.sort,
             query.ascending,
-            (query.page - 1) * query.size,
+            offset_of(query.page, query.size),
             query.size,
         )
     })
@@ -294,21 +278,17 @@ async fn save_monitor(shared: ApiShared, resource_id: i64, body: axum::body::Byt
         return problem(StatusCode::BAD_REQUEST, "invalid_monitor", &detail);
     }
     let saved = blocking_write(&shared.db, move |tx| repo::save_monitor(tx, &row)).await;
-    match saved {
-        Ok(()) => {}
+    let saved_id = match saved {
+        Ok(id) => id,
         Err(err) => return database_error(err, "保存服务监控失败"),
-    }
+    };
     let reloaded = if resource_id > 0 {
         blocking_read(&shared.db, move |conn| {
             repo::monitor_by_id(conn, resource_id)
         })
         .await
     } else {
-        blocking_read(&shared.db, |conn| {
-            let id: i64 = conn.query_row("SELECT MAX(id) FROM monitors", [], |row| row.get(0))?;
-            repo::monitor_by_id(conn, id)
-        })
-        .await
+        blocking_read(&shared.db, move |conn| repo::monitor_by_id(conn, saved_id)).await
     };
     match reloaded {
         Ok(Some(row)) => {
@@ -475,17 +455,15 @@ async fn list_notifications_handler(
     AdminUser(_admin): AdminUser,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let mut query = list_query(&params);
-    if !query.q.is_empty() {
-        query.q = format!("%{}%", query.q);
-    }
+    // 通配符转义与 `%…%` 包装在 repo 层做，调用方只给原始词。
+    let query = list_query(&params);
     let result = blocking_read(&shared.db, move |conn| {
         repo::list_notifications(
             conn,
             &query.q,
             &query.sort,
             query.ascending,
-            (query.page - 1) * query.size,
+            offset_of(query.page, query.size),
             query.size,
         )
     })
@@ -562,21 +540,19 @@ async fn save_notification_handler(
     if let Err(detail) = apply_notification_write(&mut row, &request) {
         return problem(StatusCode::BAD_REQUEST, "invalid_notification", &detail);
     }
-    match blocking_write(&shared.db, move |tx| repo::save_notification(tx, &row)).await {
-        Ok(()) => {}
-        Err(err) => return database_error(err, "保存通知渠道失败"),
-    }
-    // 新建行回读：按 updated_at 排序的最新行兜底不可靠，直接查最大 id。
+    let saved_id =
+        match blocking_write(&shared.db, move |tx| repo::save_notification(tx, &row)).await {
+            Ok(id) => id,
+            Err(err) => return database_error(err, "保存通知渠道失败"),
+        };
     let reloaded = if resource_id > 0 {
         blocking_read(&shared.db, move |conn| {
             repo::notification_by_id(conn, resource_id)
         })
         .await
     } else {
-        blocking_read(&shared.db, |conn| {
-            let id: i64 =
-                conn.query_row("SELECT MAX(id) FROM notifications", [], |row| row.get(0))?;
-            repo::notification_by_id(conn, id)
+        blocking_read(&shared.db, move |conn| {
+            repo::notification_by_id(conn, saved_id)
         })
         .await
     };
@@ -851,17 +827,15 @@ async fn list_alert_rules_handler(
     AdminUser(_admin): AdminUser,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let mut query = list_query(&params);
-    if !query.q.is_empty() {
-        query.q = format!("%{}%", query.q);
-    }
+    // 通配符转义与 `%…%` 包装在 repo 层做，调用方只给原始词。
+    let query = list_query(&params);
     let result = blocking_read(&shared.db, move |conn| {
         repo::list_alert_rules(
             conn,
             &query.q,
             &query.sort,
             query.ascending,
-            (query.page - 1) * query.size,
+            offset_of(query.page, query.size),
             query.size,
         )
     })
@@ -935,20 +909,19 @@ async fn save_alert_rule_handler(
     if let Err(detail) = apply_alert_rule_write(&mut row, &request) {
         return problem(StatusCode::BAD_REQUEST, "invalid_alert_rule", &detail);
     }
-    match blocking_write(&shared.db, move |tx| repo::save_alert_rule(tx, &row)).await {
-        Ok(()) => {}
+    let saved_id = match blocking_write(&shared.db, move |tx| repo::save_alert_rule(tx, &row)).await
+    {
+        Ok(id) => id,
         Err(err) => return database_error(err, "保存告警规则失败"),
-    }
+    };
     let reloaded = if resource_id > 0 {
         blocking_read(&shared.db, move |conn| {
             repo::alert_rule_by_id(conn, resource_id)
         })
         .await
     } else {
-        blocking_read(&shared.db, |conn| {
-            let id: i64 =
-                conn.query_row("SELECT MAX(id) FROM alert_rules", [], |row| row.get(0))?;
-            repo::alert_rule_by_id(conn, id)
+        blocking_read(&shared.db, move |conn| {
+            repo::alert_rule_by_id(conn, saved_id)
         })
         .await
     };

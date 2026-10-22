@@ -20,23 +20,144 @@ use super::auth::{AdminUser, ApiShared, data_json, list_json, problem};
 use super::public::safe_asset_url;
 use super::tokens::ApiTokenEntry;
 
-/// Go `forbiddenCSS`：远程引入或可执行规则一律拒。
-fn forbidden_css(css: &str) -> bool {
-    let lowered = css.to_lowercase();
-    lowered.contains("@import")
-        || contains_pattern(&lowered, "expression", "(")
-        || contains_pattern(&lowered, "javascript", ":")
-        || lowered.contains("url(") && (lowered.contains("//") || lowered.contains("url(http"))
-        || lowered.contains("</style")
-        || lowered.contains("<style")
+/// 公开的 CSS 安全判定（公开站 bootstrap 兜底用：写路径已校验，这里防手工改配置）。
+pub(crate) fn css_is_safe(css: &str) -> bool {
+    !forbidden_css(css)
 }
 
-fn contains_pattern(text: &str, keyword: &str, suffix: &str) -> bool {
-    text.match_indices(keyword).any(|(index, _)| {
-        text[index + keyword.len()..]
-            .trim_start()
-            .starts_with(suffix)
-    })
+/// 自定义 CSS 白名单校验。
+///
+/// 原实现是黑名单（`contains("@import")` / `contains("url(")`…），CSS 的转义与
+/// 注释语法让它可以被一行绕过：`@im/**/port`、`\75 rl(http://evil)`、
+/// `java\73script:`、`url(\2f\2fevil.com)` 全部原样落地，而这份 CSS 是
+/// `style.textContent` 直接注入公开站的——等于给任意人开远程加载 + 追踪信道。
+///
+/// 改为「先归一化再走白名单」：
+/// 1. 去掉注释（注释可把关键字劈开：`@im/**/port`）；
+/// 2. 解掉 CSS 转义（`\75` = `u`、`\2f` = `/`），混淆在检查面前现形；
+/// 3. 只放行白名单内的 at-rule，且一律禁掉会发起网络请求的函数。
+///
+/// 这是主题字段，不是通用 CSS 沙箱：宁可拒掉正常但罕见的写法。
+fn forbidden_css(css: &str) -> bool {
+    let normalized = normalize_css(css);
+
+    // HTML 结构字符：CSS 里没有合法用途（`<style>` 由 textContent 注入，
+    // 但 `</style` 之类的残留仍应拒）。
+    if normalized.contains(['<', '>', '&']) {
+        return true;
+    }
+
+    // 会发起网络请求 / 执行脚本的构造，一律禁止。
+    for needle in [
+        "url(",
+        "image-set(",
+        "-webkit-image-set(",
+        "src(",
+        "-moz-binding",
+        "behavior",
+        "expression(",
+        "javascript:",
+        "vbscript:",
+        "@import",
+        "@charset",
+        "@namespace",
+        "@font-face",
+        "@document",
+    ] {
+        if normalized.contains(needle) {
+            return true;
+        }
+    }
+
+    // at-rule白名单：其余一律拒（`@import` 上面已挡，这里兜未知新规则）。
+    // 条目统一带 `@`：与下面拼出的 `@{name}` 比对，漏一个前缀就等于漏放一类规则。
+    const ALLOWED_AT_RULES: [&str; 8] = [
+        "@media",
+        "@supports",
+        "@keyframes",
+        "@-webkit-keyframes",
+        "@-moz-keyframes",
+        "@-o-keyframes",
+        "@page",
+        "@layer",
+    ];
+    let mut rest = normalized.as_str();
+    while let Some(index) = rest.find('@') {
+        let tail = &rest[index..];
+        // 从 `@` 之后开始取标识符；从 `@` 本身开始会立刻停下、拿到空串。
+        let name: String = tail
+            .chars()
+            .skip(1)
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+            .collect();
+        if !name.is_empty() {
+            // 白名单条目带 `@`，这里补回去再比。
+            let rule = format!("@{name}");
+            if !ALLOWED_AT_RULES
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(&rule))
+            {
+                return true;
+            }
+        }
+        rest = &tail[name.len().max(1)..];
+    }
+    false
+}
+
+/// 去注释 + 解 CSS 转义 + 转小写。仅用于校验，不改变入库原文。
+fn normalize_css(css: &str) -> String {
+    let without_comments = strip_css_comments(css);
+    decode_css_escapes(&without_comments).to_lowercase()
+}
+
+/// 去掉 `/* … */` 注释（CSS 注释不可嵌套，遇到 `*/` 即结束）。
+fn strip_css_comments(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        match rest[start + 2..].find("*/") {
+            Some(end) => rest = &rest[start + 2 + end + 2..],
+            // 未闭合注释：其后内容全部丢弃（浏览器同样如此）。
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 解 CSS 转义：`\XXXXXX`（1-6 位十六进制，后可跟一个空白）与 `\<任意字符>`。
+fn decode_css_escapes(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut chars = css.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        let mut hex = String::new();
+        while hex.len() < 6 && chars.peek().is_some_and(|next| next.is_ascii_hexdigit()) {
+            hex.push(chars.next().unwrap());
+        }
+        if hex.is_empty() {
+            // `\<字符>`：字面量（`\;` → `;`）。
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+            continue;
+        }
+        // 十六进制转义后可跟一个空白作为终止符，该空白不属于转义值。
+        if chars.peek().is_some_and(|next| next.is_whitespace()) {
+            chars.next();
+        }
+        if let Ok(code) = u32::from_str_radix(&hex, 16)
+            && let Some(decoded) = char::from_u32(code)
+        {
+            out.push(decoded);
+        }
+    }
+    out
 }
 
 /// Go `safeColor`：六位十六进制。
@@ -547,7 +668,12 @@ async fn create_api_token(
     response
 }
 
-/// `GET /api/v2/admin/api-tokens/{tokenId}`（明文回显，Go 同）。
+/// `GET /api/v2/admin/api-tokens/{tokenId}`。
+///
+/// 明文只回给交互式管理员会话（Cookie）。API Token 是设计上可外发给看板 /
+/// CI / 监控的 Bearer 凭据：若它也能读明文，一个**只读**令牌就能读出同账号下
+/// 写令牌的明文值，从而把自己提升成写权限——这正是只读令牌要防的事。
+/// （Go 同源缺陷，这里修掉：`api_v2_spa.go` 的 token 详情不区分调用方。）
 async fn get_api_token(
     State(shared): State<ApiShared>,
     AdminUser(admin): AdminUser,
@@ -556,12 +682,13 @@ async fn get_api_token(
     if token_id <= 0 {
         return problem(StatusCode::BAD_REQUEST, "invalid_id", "资源 ID 无效");
     }
+    let include_plain = !admin.is_api;
     let row = blocking_read(&shared.db, move |conn| {
         api_tokens::get_by_id(conn, admin.user.id, token_id)
     })
     .await;
     match row {
-        Ok(Some(row)) => data_json(api_token_dto(&row, true, util_time::now_nanos())),
+        Ok(Some(row)) => data_json(api_token_dto(&row, include_plain, util_time::now_nanos())),
         Ok(None) => token_not_found(),
         Err(err) => {
             tracing::warn!(error = %err, "api token query failed");
@@ -696,4 +823,84 @@ pub fn routes() -> axum::Router<ApiShared> {
                 .patch(patch_api_token)
                 .delete(delete_api_token),
         )
+}
+
+#[cfg(test)]
+mod css_tests {
+    use super::{css_is_safe, decode_css_escapes, normalize_css, strip_css_comments};
+
+    fn safe(css: &str) -> bool {
+        css_is_safe(css)
+    }
+
+    #[test]
+    fn normal_theme_css_is_allowed() {
+        for css in [
+            ".card { border-radius: 8px; }",
+            "@media (max-width: 720px) { .row { display: none } }",
+            "@supports (display: grid) { .grid { display: grid } }",
+            "@keyframes pulse { from { opacity: .4 } to { opacity: 1 } }",
+            "@-webkit-keyframes spin { to { transform: rotate(360deg) } }",
+            ".a::after { content: \"\\2014\"; }",
+            "body { --brand: #2563eb; color: var(--brand) }",
+            "/* 注释 */ .x { margin: 0 }",
+            "@layer base { .y { padding: 0 } }",
+            ".z { background: linear-gradient(180deg, #fff, #eee) }",
+        ] {
+            assert!(safe(css), "正常主题 CSS 不应被拒：{css}");
+        }
+    }
+
+    #[test]
+    fn remote_and_executable_constructs_are_rejected() {
+        for css in [
+            "@import url('http://evil/x.css');",
+            "@import \"http://evil/x.css\";",
+            ".a { background: url(http://evil/p.png) }",
+            ".a { background: url('//evil/p.png') }",
+            ".a { behavior: url(x.htc) }",
+            ".a { -moz-binding: url(x.xml#a) }",
+            ".a { width: expression(alert(1)) }",
+            ".a { background: javascript:alert(1) }",
+            ".a { background-image: image-set('http://evil/p.png' 1x) }",
+            "@font-face { font-family: x; src: url(http://evil/f.woff2) }",
+            "@namespace url(http://evil);",
+        ] {
+            assert!(!safe(css), "应被拒：{css}");
+        }
+    }
+
+    #[test]
+    fn obfuscation_does_not_slip_through() {
+        for css in [
+            // 注释劈开关键字。
+            "@im/**/port url('http://evil/x.css');",
+            "@import\\\n url('http://evil/x.css');",
+            // 十六进制转义。
+            ".a { background: \\75 rl(http://evil/p.png) }",
+            ".a { background: url(\\2f\\2fevil/p.png) }",
+            // 字符转义。
+            ".a { background: \\6a\\61vascript:alert(1) }",
+            // 大小写混淆。
+            "@IMPORT url('http://evil/x.css');",
+            ".a { BEHAVIOR: url(x.htc) }",
+            // 未知 at-rule。
+            "@unknown-rule foo { .a { color: red } }",
+            // 结构字符。
+            ".a { content: '</style><script>alert(1)</script>' }",
+        ] {
+            assert!(!safe(css), "混淆写法应被拒：{css}");
+        }
+    }
+
+    #[test]
+    fn helpers_normalize_as_expected() {
+        assert_eq!(strip_css_comments("a/*x*/b/*y"), "ab");
+        assert_eq!(strip_css_comments("a/*未闭合"), "a");
+        assert_eq!(decode_css_escapes("\\75 rl"), "url");
+        assert_eq!(decode_css_escapes("\\2f\\2f"), "//");
+        assert_eq!(decode_css_escapes("\\;"), ";");
+        assert_eq!(decode_css_escapes("\\41 "), "A");
+        assert_eq!(normalize_css("@IM/**/PORT \\75 RL(X)"), "@import url(x)");
+    }
 }

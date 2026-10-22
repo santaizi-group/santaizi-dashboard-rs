@@ -255,6 +255,48 @@ async fn bearer_request_skips_csrf() {
     let _ = server.await;
 }
 
+/// Bearer（含只读）调 logout 不得销毁同账号管理员的登录会话：
+/// API Token 是设计上可外发的凭据，`users.token` 不是它拥有的东西。
+#[tokio::test]
+async fn bearer_logout_does_not_kill_admin_session() {
+    let fixture = setup_primary("http-logout-bearer", false).await;
+    let session_token = insert_user(&fixture.db, "gina", false);
+    let user_id = user_id_by_login(&fixture.db, "gina");
+    // 同一账号下再发一个只读令牌——正是会外发给看板的那种。
+    let read_only = insert_api_token(&fixture.db, user_id, "read");
+    let (port, cancel, server) = spawn_http(&fixture).await;
+
+    let logout = client()
+        .post(format!("{}/api/v2/auth/logout", base_url(port)))
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {read_only}"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), 204);
+
+    // 管理员会话必须仍然有效。
+    let after = client()
+        .get(format!("{}/api/v2/auth/session", base_url(port)))
+        .header(
+            reqwest::header::COOKIE,
+            format!("santaizi-dashboard={session_token}"),
+        )
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = after.json().await.unwrap();
+    assert_eq!(
+        body["data"]["authenticated"], true,
+        "只读 Bearer 不得把管理员会话踢下线：{body}"
+    );
+
+    cancel.cancel();
+    let _ = server.await;
+}
+
 /// SPA 回退：前端路由回 index.html 外壳。
 #[tokio::test]
 async fn spa_routes_serve_shell() {

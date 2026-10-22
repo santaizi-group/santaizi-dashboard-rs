@@ -46,7 +46,7 @@ pub struct Oauth2StateStore {
 
 impl Oauth2StateStore {
     fn put(&self, state_key: String, state: String) {
-        let mut entries = self.entries.lock().expect("oauth2 state lock");
+        let mut entries = self.entries.lock().unwrap_or_else(|err| err.into_inner());
         let now = Instant::now();
         entries.retain(|_, (_, expires)| *expires > now);
         entries.insert(state_key, (state, now + STATE_TTL));
@@ -54,7 +54,7 @@ impl Oauth2StateStore {
 
     /// 取出即删（Go `Cache.Get` + `Cache.Delete` 的组合语义）；过期视为未命中。
     fn take(&self, state_key: &str) -> Option<String> {
-        let mut entries = self.entries.lock().expect("oauth2 state lock");
+        let mut entries = self.entries.lock().unwrap_or_else(|err| err.into_inner());
         match entries.get(state_key) {
             Some((state, expires)) if *expires > Instant::now() => {
                 let state = state.clone();
@@ -632,7 +632,7 @@ mod tests {
 
         store.put("old".into(), "stale".into());
         {
-            let mut entries = store.entries.lock().unwrap();
+            let mut entries = store.entries.lock().unwrap_or_else(|err| err.into_inner());
             entries.insert(
                 "old".into(),
                 ("stale".into(), Instant::now() - Duration::from_secs(1)),
