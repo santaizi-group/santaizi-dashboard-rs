@@ -121,7 +121,12 @@ async function submit() {
     headers.value = patch.headers
   }
 
-  await formRef.value?.validate()
+  // Element Plus 的 `validate()` 校验不过会 **reject**。放在 try 外面会变成
+  // 未处理的 promise rejection，且绕过 finally。这里转成布尔值：
+  // 校验失败静默返回（Element Plus 已在字段上标红，不需要再弹消息），
+  // 只有真正的 API 失败才走 notifyAPIError。
+  const formValid = await formRef.value?.validate().then(() => true, () => false)
+  if (!formValid) return
   if (guided.value && !form.url.trim()) {
     ElMessage.warning(t('required'))
     return

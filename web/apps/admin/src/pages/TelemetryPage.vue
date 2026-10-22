@@ -11,6 +11,8 @@ import { deleteCollector, getCollectorToken, listCollectors, revokeCollector, ro
 import { AppDialog, AppDrawer, AppEmpty } from '@santaizi/ui'
 import { formatAdminValue, formatProductVersion } from '@/composables/format'
 import { notifyAPIError } from '@/composables/notify'
+import { copyText } from '@/composables/clipboard'
+
 import { PAGE_SIZES, readStoredPageSize, writeStoredPageSize } from '@/composables/pageSize'
 import CollectorEditorDialog from '@/components/editors/CollectorEditorDialog.vue'
 import InstallCollectorDialog from '@/components/InstallCollectorDialog.vue'
@@ -119,8 +121,9 @@ async function act(item: CollectorRecord, action: string) {
 }
 
 async function copyToken() {
-  await navigator.clipboard.writeText(token.value)
-  ElMessage.success(t('copied'))
+  // 裸调 clipboard 在明文 HTTP / 权限被拒时会变成未处理 rejection：
+  // 控制台一条红字，界面零反馈。失败兜底见 composables/clipboard。
+  await copyText(token.value, t)
 }
 
 function pretty(value: unknown, key = '') {

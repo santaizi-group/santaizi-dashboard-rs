@@ -5,6 +5,8 @@ export interface TrafficUsageView {
   kind: TrafficUsageKind
   valueLabel: string
   statusLevel: CycleStatusLevel | ''
+  /** valueLabel 的原始字节数，供 UI 做数值补间；unlimited / 缺数据时 null。 */
+  valueBytes: number | null
 }
 
 const STATUS_RANK: Record<CycleStatusLevel, number> = {
@@ -132,26 +134,37 @@ export function trafficUsage(
   transferIn: number,
   transferOut: number,
   trafficType: string,
-  cycle?: { remainingLabel: string; statusLevel: CycleStatusLevel } | null,
+  cycle?: { remainingLabel: string; statusLevel: CycleStatusLevel; remainingBytes?: number } | null,
 ): TrafficUsageView {
   if (cycle) {
-    return { kind: 'cycle', valueLabel: cycle.remainingLabel, statusLevel: cycle.statusLevel }
+    return {
+      kind: 'cycle',
+      valueLabel: cycle.remainingLabel,
+      statusLevel: cycle.statusLevel,
+      valueBytes: cycle.remainingBytes ?? null,
+    }
   }
   switch (Number(trafficType)) {
     case 1:
-      return { kind: 'out', valueLabel: formatTransfer(transferOut), statusLevel: '' }
+      return { kind: 'out', valueLabel: formatTransfer(transferOut), statusLevel: '', valueBytes: transferOut }
     case 3: {
       const isOut = transferOut >= transferIn
       return {
         kind: isOut ? 'maxOut' : 'maxIn',
         valueLabel: formatTransfer(isOut ? transferOut : transferIn),
         statusLevel: '',
+        valueBytes: isOut ? transferOut : transferIn,
       }
     }
     case 2:
-      return { kind: 'both', valueLabel: formatTransfer(transferIn + transferOut), statusLevel: '' }
+      return {
+        kind: 'both',
+        valueLabel: formatTransfer(transferIn + transferOut),
+        statusLevel: '',
+        valueBytes: transferIn + transferOut,
+      }
     default:
-      return { kind: 'unlimited', valueLabel: '', statusLevel: '' }
+      return { kind: 'unlimited', valueLabel: '', statusLevel: '', valueBytes: null }
   }
 }
 
@@ -165,7 +178,9 @@ export function pickCycleSummary<T extends { statusLevel: CycleStatusLevel; poli
   return first ?? null
 }
 
-export function usageTone(percent: number): 'ok' | 'warn' | 'danger' {
+/// 用量色调。总量未知（null）时不算告警——不知道用了几成，谈不上告警。
+export function usageTone(percent: number | null): 'ok' | 'warn' | 'danger' {
+  if (percent === null) return 'ok'
   if (percent >= 90) return 'danger'
   if (percent >= 70) return 'warn'
   return 'ok'

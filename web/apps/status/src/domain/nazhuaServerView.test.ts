@@ -136,6 +136,9 @@ describe('Nazhua server view adapter', () => {
   it('keeps format helpers bounded and deterministic', () => {
     expect(clampPercent(140)).toBe(100)
     expect(percentOf(1, 4)).toBe(25)
+    // 与 theme-server-status 的 percentOf 语义一致：总量未知返回 null。
+    expect(percentOf(1024 ** 3, 0)).toBeNull()
+    expect(percentOf(1024 ** 3, undefined)).toBeNull()
     expect(formatCompactBytes(1_073_741_824)).toBe('1024M')
     expect(formatCompactBytes(2 * 1024 ** 3)).toBe('2G')
     expect(formatUptime(172_800)).toBe('2天')

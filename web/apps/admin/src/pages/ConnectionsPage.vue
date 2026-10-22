@@ -248,38 +248,54 @@ function cellTone(cell: MatrixCell) {
   return cell.connected ? 'is-connected' : 'is-disconnected'
 }
 
+/// 抽屉内时延请求的代际：换 collector / 换页都会自增。
+///
+/// 旧请求晚到会把上一个 collector 的时延写进当前抽屉。
+let collectorLatencyGeneration = 0
+
 async function loadCollectorLatency() {
   const collector = activeCollector.value
   if (!collector) return
+  collectorLatencyGeneration += 1
+  const current = collectorLatencyGeneration
   latencyLoading.value = true
   try {
     const result = await listConnectionLatency({
       collector_id: collector.id, page: collectorLatencyMeta.page, page_size: collectorLatencyMeta.page_size,
     })
+    if (current !== collectorLatencyGeneration) return
     collectorLatency.value = result.data
     collectorLatencyMeta.total = result.meta.total || result.data.length
   } catch (error) {
+    if (current !== collectorLatencyGeneration) return
     notifyAPIError(error, t as never, te)
   } finally {
-    latencyLoading.value = false
+    if (current === collectorLatencyGeneration) latencyLoading.value = false
   }
 }
+
+/// 同上，path 抽屉独立计数。
+let pathLatencyGeneration = 0
 
 async function loadPathLatency() {
   const path = activePath.value
   if (!path) return
+  pathLatencyGeneration += 1
+  const current = pathLatencyGeneration
   latencyLoading.value = true
   try {
     const result = await listConnectionLatency({
       kind: 'path', server_id: path.server_id || undefined, observer_id: path.observer_id,
       page: pathLatencyMeta.page, page_size: pathLatencyMeta.page_size,
     })
+    if (current !== pathLatencyGeneration) return
     pathLatency.value = result.data
     pathLatencyMeta.total = result.meta.total || result.data.length
   } catch (error) {
+    if (current !== pathLatencyGeneration) return
     notifyAPIError(error, t as never, te)
   } finally {
-    latencyLoading.value = false
+    if (current === pathLatencyGeneration) latencyLoading.value = false
   }
 }
 

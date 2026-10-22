@@ -1,5 +1,34 @@
-import { describe, expect, it } from 'vitest'
+import { useStatusStore } from './status'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mergeServerSnapshot, normalizeServer } from '@santaizi/status-core'
+
+/** 记录每次 `new WebSocket(...)` 与 close 调用，用来断言代际语义。 */
+class FakeSocket {
+  static instances: FakeSocket[] = []
+  onopen: (() => void) | null = null
+  onmessage: ((event: { data: unknown }) => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: (() => void) | null = null
+  closed = false
+  constructor(public url: string) {
+    FakeSocket.instances.push(this)
+  }
+  close() {
+    this.closed = true
+  }
+  emitOpen() {
+    this.onopen?.()
+  }
+  emitMessage(payload: unknown) {
+    this.onmessage?.({ data: JSON.stringify(payload) })
+  }
+  emitClose() {
+    this.onclose?.()
+  }
+  emitError() {
+    this.onerror?.()
+  }
+}
 
 describe('ServerStatus runtime normalization', () => {
   it('accepts canonical API v2 fields', () => {
@@ -125,5 +154,81 @@ describe('ServerStatus runtime normalization', () => {
     })
     expect(mergeServerSnapshot(prev, next).online).toBe(true)
     expect(mergeServerSnapshot(prev, next).telemetry).toEqual(prev.telemetry)
+  })
+})
+
+describe('status store websocket generation guard', () => {
+  let store: ReturnType<typeof useStatusStore>
+  let timers: Array<() => void>
+
+  beforeEach(async () => {
+    vi.resetModules()
+    FakeSocket.instances = []
+    timers = []
+    vi.stubGlobal('WebSocket', FakeSocket)
+    vi.stubGlobal('location', { protocol: 'https:', host: 'status.test' })
+    vi.stubGlobal('window', {
+      setTimeout: (fn: () => void) => {
+        timers.push(fn)
+        return timers.length
+      },
+      clearTimeout: () => {
+        timers = []
+      },
+    })
+    store = (await import('./status')).useStatusStore()
+  })
+
+  afterEach(() => {
+    store.stop()
+    vi.unstubAllGlobals()
+  })
+
+  it('does not let a stale socket close the current one', () => {
+    store.connect()
+    const first = FakeSocket.instances.at(-1)!
+    store.connect()
+    const second = FakeSocket.instances.at(-1)!
+    expect(FakeSocket.instances).toHaveLength(2)
+    expect(first.closed).toBe(true)
+
+    // 旧 socket 报错：只能关自己，不能把新连接一起带走（互踢）。
+    first.emitError()
+    expect(second.closed).toBe(false)
+    second.emitOpen()
+    expect(store.connected).toBe(true)
+  })
+
+  it('ignores frames and close events from a superseded generation', () => {
+    store.connect()
+    const stale = FakeSocket.instances.at(-1)!
+    store.connect()
+    const current = FakeSocket.instances.at(-1)!
+
+    // 旧连接迟到的帧不得再改当前数据。
+    stale.emitMessage([{ id: 99, name: 'stale' }])
+    expect(store.servers).toHaveLength(0)
+    current.emitMessage([{ id: 7, name: 'current' }])
+    expect(store.servers).toHaveLength(1)
+    expect(store.servers[0]?.name).toBe('current')
+
+    // 旧连接迟到的 close 不得排重连、不得把 connected 打成 false。
+    stale.emitClose()
+    expect(store.connected).toBe(false)
+    expect(timers).toHaveLength(0)
+  })
+
+  it('does not resurrect the connection after stop', () => {
+    store.connect()
+    const current = FakeSocket.instances.at(-1)!
+    current.emitOpen()
+    expect(store.connected).toBe(true)
+
+    store.stop()
+    current.emitClose()
+    // 排过的重连定时器即使到点，也不能把连接拉起来。
+    for (const timer of timers.splice(0)) timer()
+    expect(FakeSocket.instances).toHaveLength(1)
+    expect(store.connected).toBe(false)
   })
 })

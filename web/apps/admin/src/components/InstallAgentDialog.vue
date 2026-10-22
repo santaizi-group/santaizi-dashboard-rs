@@ -7,6 +7,7 @@ import { getProbeCapabilities, getServerCredential, getServerInstallPreview, typ
 import type { InstallPreviewWrite } from '@santaizi/api'
 import { useEditorSnapshot } from '@/composables/editorSnapshot'
 import { notifyAPIError } from '@/composables/notify'
+import { copyText } from '@/composables/clipboard'
 import { DEFAULT_CLEAN_INSTALL, DEFAULT_INSTALL_IMPLEMENTATION, DEFAULT_INSTALL_PLATFORM, DEFAULT_INSTALL_PROFILE, INSTALL_PRESETS, type InstallProfile } from '@/domain/installAgent'
 import type { MonitoringOptions, ProbeCapabilitiesMetadata } from '@/types/admin'
 
@@ -100,13 +101,13 @@ async function copy() {
     return
   }
   await refreshPreview()
-  await navigator.clipboard.writeText(command.value)
+  // 复制失败（明文 HTTP / 权限被拒）在 copyText 内部消化成提示，
+  // 不会冒成未处理 rejection。
+  await copyText(command.value, t)
   capture()
-  ElMessage.success(t('copied'))
 }
 async function copySecret() {
-  await navigator.clipboard.writeText(secret.value)
-  ElMessage.success(t('copied'))
+  await copyText(secret.value, t)
 }
 function selectProfile(value: string | number | boolean) {
   applyProfile(value as InstallProfile)

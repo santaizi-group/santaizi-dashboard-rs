@@ -5,6 +5,8 @@ import { ElMessage } from 'element-plus'
 import { AppDialog } from '@santaizi/ui'
 import { getServerUpgradePreview, type ServerRecord } from '@/api/adminApi'
 import { notifyAPIError } from '@/composables/notify'
+import { copyText } from '@/composables/clipboard'
+
 
 const props = defineProps<{ modelValue: boolean; server?: ServerRecord }>()
 const emit = defineEmits<{ 'update:modelValue': [boolean] }>()
@@ -35,8 +37,7 @@ async function open() {
 
 async function copy() {
   if (!command.value) await refreshPreview()
-  await navigator.clipboard.writeText(command.value)
-  ElMessage.success(t('copied'))
+  await copyText(command.value, t)
 }
 
 watch(() => props.modelValue, value => { if (value) void open() })

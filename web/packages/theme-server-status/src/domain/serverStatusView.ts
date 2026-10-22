@@ -2,7 +2,6 @@ import type { CycleTransfer, ResourceRecord, ServerHost, ServerState, ServerReco
 import { isHostOnline } from '@santaizi/api'
 import {
   buildPublicNoteView,
-  decodeOrderLink,
   flagCode,
   publicLocation,
   type PublicNoteView,
@@ -19,7 +18,8 @@ import {
 } from './transfer'
 
 export interface MetricView {
-  percent: number
+  /// 总量未知时为 null（见 `percentOf`）。
+  percent: number | null
   used: number
   total: number
   usedLabel: string
@@ -41,7 +41,8 @@ export interface CycleTransferView {
   usedLabel: string
   quotaLabel: string
   remainingLabel: string
-  usagePercent: number
+  /// 配额未知时为 null（见 `percentOf`），与 remainingPercent 的「未知」一致。
+  usagePercent: number | null
   remainingPercent: number | null
   status: string
   statusLevel: CycleStatusLevel
@@ -67,6 +68,7 @@ export interface ServerStatusView {
   gpuNames: string[]
   cpuModels: string[]
   cpuCoreCount: number
+  specText: string | null
   platformLabel: string
   speedIn: number
   speedOut: number
@@ -145,8 +147,22 @@ export function clampPercent(value: number) {
   return Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0))
 }
 
-export function percentOf(used: number, total?: number) {
-  return clampPercent(total && total > 0 ? (used / total) * 100 : used)
+/**
+ * 用量百分比：`used / total * 100`，结果钳在 0-100。
+ *
+ * 总量未知（0 / undefined / NaN）时返回 **null**，由调用方显示「未知」。
+ * 旧实现在这种情况下 `clampPercent(used)`——把字节数当百分比，于是
+ * 「已用 1 GiB、总量未上报」会被渲染成 100% 满额红色告警，而事实是
+ * 根本不知道用了几成。字节和百分比是两个量纲，不能互相顶替。
+ */
+export function percentOf(used: number, total?: number): number | null {
+  const ratio = total !== undefined && Number.isFinite(total) && total > 0 ? (used / total) * 100 : null
+  return ratio === null ? null : clampPercent(ratio)
+}
+
+/// 模板用的百分比文本：未知显示「—」，不显示假数字。
+export function percentText(percent: number | null | undefined): string {
+  return percent === null || percent === undefined ? '—' : `${percent.toFixed(1)}%`
 }
 
 export function formatBytes(value: number, decimals = 1) {
@@ -185,6 +201,17 @@ export function parseCpuCores(cpu: unknown) {
     if (match) cores += Number(match[1])
   }
   return cores
+}
+
+/** 规格串 `1C2G10G`（核心+内存+硬盘，G 取二进制 GB 四舍五入）；
+ *  任一项未知即回 null，调用方回落展示系统名。
+ *
+ *  小于 1 GB 的项按 1 起算：512MB 内存四舍五入成 `0G` 会让规格串读作
+ *  「没有内存」，而它确实有内存——只是小。向上取整到 1G 更接近事实。 */
+export function specTextOf(cores: number, memBytes: number, diskBytes: number) {
+  if (!(cores > 0) || !(memBytes > 0) || !(diskBytes > 0)) return null
+  const g = (bytes: number) => Math.max(1, Math.round(bytes / 1024 ** 3))
+  return `${cores}C${g(memBytes)}G${g(diskBytes)}G`
 }
 
 function temperatures(raw: unknown): TempView[] {
@@ -338,7 +365,7 @@ export function toServerStatusView(
     location: publicLocation(server.public_note, country, locale),
     slogan: publicNote.presentation.slogan,
     publicNote,
-    orderLink: decodeOrderLink(publicNote.presentation.orderLink),
+    orderLink: publicNote.presentation.orderLink,
     cpu: metric(pickNumber(state, 'CPU'), 0, true),
     memory: metric(memUsed, memTotal),
     disk: metric(diskUsed, diskTotal),
@@ -346,6 +373,7 @@ export function toServerStatusView(
     gpuNames,
     cpuModels,
     cpuCoreCount: parseCpuCores(cpuRaw),
+    specText: specTextOf(parseCpuCores(cpuRaw), memTotal, diskTotal),
     platformLabel: osLabel(platform),
     speedIn,
     speedOut,
@@ -359,7 +387,13 @@ export function toServerStatusView(
       transferIn,
       transferOut,
       publicNote.bill.trafficType,
-      cycleSummary ? { remainingLabel: cycleSummary.remainingLabel, statusLevel: cycleSummary.statusLevel } : null,
+      cycleSummary
+        ? {
+            remainingLabel: cycleSummary.remainingLabel,
+            statusLevel: cycleSummary.statusLevel,
+            remainingBytes: cycleSummary.remainingBytes,
+          }
+        : null,
     ),
     cycles: cycleRows,
     cycleSummary,

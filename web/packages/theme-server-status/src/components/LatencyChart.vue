@@ -25,21 +25,21 @@ const {
   <section class="ss-latency">
     <header class="ss-latency__head">
       <h3 v-if="!hideHeading">{{ t('nazhua.networkMonitor') }}</h3>
+      <div class="ss-latency__toggles">
+        <label class="ss-latency__switch">
+          <span>{{ t('nazhua.aggregate') }}</span>
+          <el-switch v-model="aggregated" size="small" />
+        </label>
+        <label class="ss-latency__switch">
+          <span>{{ t('nazhua.autoRefresh') }}</span>
+          <el-switch v-model="autoRefresh" size="small" />
+        </label>
+        <label class="ss-latency__switch">
+          <span>{{ t('nazhua.cutPeak') }}</span>
+          <el-switch v-model="cutPeak" size="small" />
+        </label>
+      </div>
       <div class="ss-latency__toolbar">
-        <div class="ss-latency__toggles">
-          <label class="ss-latency__switch">
-            <span>{{ t('nazhua.aggregate') }}</span>
-            <el-switch v-model="aggregated" size="small" />
-          </label>
-          <label class="ss-latency__switch">
-            <span>{{ t('nazhua.autoRefresh') }}</span>
-            <el-switch v-model="autoRefresh" size="small" />
-          </label>
-          <label class="ss-latency__switch">
-            <span>{{ t('nazhua.cutPeak') }}</span>
-            <el-switch v-model="cutPeak" size="small" />
-          </label>
-        </div>
         <TimeRangeChips :hours="hours" label @update:hours="hours = $event" />
       </div>
     </header>

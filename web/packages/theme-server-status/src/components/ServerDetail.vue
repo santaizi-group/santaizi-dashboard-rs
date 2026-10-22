@@ -4,7 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { getPublicServerAvailability, type PublicAvailability } from '@santaizi/api'
 import type { ServerStatusView } from '../domain/serverStatusView'
 import { formatAvailabilityPercent } from '../domain/transfer'
-import { formatTimestamp, formatUptime } from '../domain/serverStatusView'
+import { formatTimestamp, formatUptime, percentText } from '../domain/serverStatusView'
 import {
   billingText,
   cycleStatusLabel,
@@ -43,18 +43,20 @@ const cpuText = computed(() => {
   const cores = props.server.cpuCoreCount
     ? `${props.server.cpuCoreCount} ${t('cores')}`
     : ''
-  const usage = `${props.server.cpu.percent.toFixed(1)}%`
+  // cpu 的 total 恒为 0（CPU 上报即百分比），percent 不会是 null；
+  // 但类型上仍走 percentText 兜住「未知」这一可能。
+  const usage = percentText(props.server.cpu.percent)
   return [models, cores, usage].filter(Boolean).join(' ')
 })
 const memText = computed(() => {
   const metric = props.server.memory
   if (metric.total <= 0) return ''
-  return `${metric.usedLabel} / ${metric.totalLabel} (${metric.percent.toFixed(1)}%)`
+  return `${metric.usedLabel} / ${metric.totalLabel} (${percentText(metric.percent)})`
 })
 const diskText = computed(() => {
   const metric = props.server.disk
   if (metric.total <= 0) return ''
-  return `${metric.usedLabel} / ${metric.totalLabel} (${metric.percent.toFixed(1)}%)`
+  return `${metric.usedLabel} / ${metric.totalLabel} (${percentText(metric.percent)})`
 })
 const swapText = computed(() => {
   if (!props.server.swap) return t('swapOff')
@@ -182,12 +184,12 @@ watch(() => props.server.id, (id) => {
             class="ss-metric-bar"
             role="meter"
             :aria-label="cycle.name || t('cycleTransfer')"
-            :aria-valuenow="Number(cycle.usagePercent.toFixed(1))"
+            :aria-valuenow="cycle.usagePercent === null ? undefined : Number(cycle.usagePercent.toFixed(1))"
             aria-valuemin="0"
             aria-valuemax="100"
           >
-            <span class="ss-metric-bar__fill" :style="{ width: `${Math.max(0, Math.min(100, cycle.usagePercent))}%` }"></span>
-            <span class="ss-metric-bar__label">{{ cycle.usagePercent.toFixed(1) }}%</span>
+            <span class="ss-metric-bar__fill" :style="{ width: cycle.usagePercent === null ? '0%' : `${Math.max(0, Math.min(100, cycle.usagePercent))}%` }"></span>
+            <span class="ss-metric-bar__label">{{ percentText(cycle.usagePercent) }}</span>
           </span>
           <span class="ss-cycle__detail">{{ cycleDetail(cycle) }}</span>
           <span class="ss-cycle__status" :class="`ss-traffic--${cycle.statusLevel}`">{{ cycleStatusLabel(cycle.statusLevel, translate) }}</span>

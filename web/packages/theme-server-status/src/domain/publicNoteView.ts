@@ -230,9 +230,10 @@ export function getPresentation(note: unknown): PublicPresentation {
     locationLabel: text(source.locationLabel),
     location: text(source.location),
     flag: text(source.flag).toLowerCase(),
-    orderLink: text(source.orderLink),
+    // 直接存收敛后的链接：`hasBuy` 由此派生，非法协议连按钮都不会渲染。
+    orderLink: decodeOrderLink(text(source.orderLink)),
     buyBtnText: text(source.buyBtnText),
-    buyBtnIcon: text(source.buyBtnIcon),
+    buyBtnIcon: safeBuyBtnIcon(source.buyBtnIcon),
   }
 }
 
@@ -315,13 +316,56 @@ export function getPlanTags(note: unknown): string[] {
   return tags
 }
 
+/// 购买按钮图标默认值（Remix，见 AGENTS.md §4.5：操作图标只用 Remix）。
+const DEFAULT_BUY_ICON = 'ri-shopping-bag-3-line'
+
+/// 收敛购买按钮图标类名。
+///
+/// 该值存在公开站可见的 `public_note` 里，经 `el-select` 的 allow-create
+/// 可以填进任意字符串，最终原样进 `<i :class>`。虽然 Vue 会把它关在 class
+/// 属性内（不会 breakout 成属性注入），但任意类名足以借既有 CSS 改布局、
+/// 或者借将来新增的类制造意外效果。这里只放行 Remix 图标类名形态。
+export function safeBuyBtnIcon(raw: unknown): string {
+  const value = typeof raw === 'string' ? raw.trim() : ''
+  if (!/^ri-[a-z0-9-]+$/.test(value)) return DEFAULT_BUY_ICON
+  return value
+}
+
+/// 购买链接允许的协议白名单。
+///
+/// 这个值来自公开站可见的 `public_note.customData`，运营/被拿下账号都能改。
+/// 不限协议时 `javascript:` / `data:` / `vbscript:` 会被原样塞进 `href`，
+/// 访客点「购买」即执行脚本——公开站 XSS，不需要任何登录态。
+const ORDER_LINK_PROTOCOLS = ['http:', 'https:']
+
+/// 判断链接是否可安全地当 `href` 用。
+///
+/// 站内相对路径（`/`、`./`、`../` 开头，或不含协议分隔符）一律放行，
+/// 这样换域名/换 CDN 不用改代码；带协议的只认白名单。
+export function isSafeOrderLink(raw: string): boolean {
+  const link = raw.trim()
+  if (!link) return false
+  // 先剥掉可能藏在空白/控制字符里的协议（`java\nscript:` 之类的老套路）。
+  const compact = link.replace(/[\u0000-\u0020\u007f]/g, '')
+  // `scheme[0]` 含结尾冒号，与白名单条目同形，直接比。
+  let scheme = compact.match(/^([a-z][a-z0-9+.-]*):/i)
+  if (!scheme) return true // 相对路径
+  return ORDER_LINK_PROTOCOLS.includes((scheme[0] ?? '').toLowerCase())
+}
+
+/// 解码并收敛购买链接：百分号解码 + 协议白名单。
+///
+/// 不合法的链接一律返回空串——调用方用空串即可让按钮不渲染，
+/// 比留一个「点了没反应」的死链更诚实。
 export function decodeOrderLink(raw: string) {
   if (!raw) return ''
+  let decoded = raw
   try {
-    return decodeURIComponent(raw)
+    decoded = decodeURIComponent(raw)
   } catch {
-    return raw
+    decoded = raw
   }
+  return isSafeOrderLink(decoded) ? decoded.trim() : ''
 }
 
 export function flagCode(note: unknown, countryCode?: unknown) {

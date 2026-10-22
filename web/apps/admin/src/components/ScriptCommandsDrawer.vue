@@ -5,6 +5,8 @@ import { ElMessage } from 'element-plus'
 import { AppDrawer, AppEmpty } from '@santaizi/ui'
 import { listScriptCommands, type ScriptCommand } from '@/api/adminApi'
 import { notifyAPIError } from '@/composables/notify'
+import { copyText } from '@/composables/clipboard'
+
 
 const props = defineProps<{ modelValue: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [boolean] }>()
@@ -66,8 +68,7 @@ async function load() {
 }
 
 async function copy(command: string) {
-  await navigator.clipboard.writeText(command)
-  ElMessage.success(t('copied'))
+  await copyText(command, t)
 }
 
 watch(() => props.modelValue, value => { if (value) void load() })

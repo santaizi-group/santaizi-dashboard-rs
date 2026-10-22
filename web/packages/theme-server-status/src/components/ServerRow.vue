@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { formatConnPair, type ServerStatusView } from '../domain/serverStatusView'
+import { formatConnPair, percentText, type ServerStatusView } from '../domain/serverStatusView'
 import type { StatusTableColumns } from '../domain/statusTableColumns'
 import { usageTone } from '../domain/transfer'
 import { billingText, remainingText, trafficUsageText } from '../domain/publicNoteDisplay'
@@ -74,13 +74,13 @@ const conn = computed(() => formatConnPair(props.server.tcp, props.server.udp) |
         :data-label="t('traffic')"
       >{{ traffic }}</span>
       <span class="ss-cell" :data-label="t('cores')">
-        <span class="ss-usage" :class="`ss-usage--${usageTone(server.cpu.percent)}`">{{ server.cpu.percent.toFixed(1) }}%</span>
+        <span class="ss-usage" :class="`ss-usage--${usageTone(server.cpu.percent)}`">{{ percentText(server.cpu.percent) }}</span>
       </span>
       <span class="ss-cell" :data-label="t('memory')">
-        <span class="ss-usage" :class="`ss-usage--${usageTone(server.memory.percent)}`">{{ server.memory.percent.toFixed(1) }}%</span>
+        <span class="ss-usage" :class="`ss-usage--${usageTone(server.memory.percent)}`">{{ percentText(server.memory.percent) }}</span>
       </span>
       <span class="ss-cell" :data-label="t('disk')">
-        <span class="ss-usage" :class="`ss-usage--${usageTone(server.disk.percent)}`">{{ server.disk.percent.toFixed(1) }}%</span>
+        <span class="ss-usage" :class="`ss-usage--${usageTone(server.disk.percent)}`">{{ percentText(server.disk.percent) }}</span>
       </span>
       <span
         v-if="columns.remaining"

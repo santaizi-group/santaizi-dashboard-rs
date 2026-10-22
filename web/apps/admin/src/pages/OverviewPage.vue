@@ -68,7 +68,10 @@ async function openIncidents() {
   incidentsLoading.value = true
   incidentRows.value = []
   try {
-    const result = await telemetryList('incidents', { page: 1, page_size: 100, open: 1 })
+    // `open` 的契约类型是 boolean（ListIncidentsParams）。传 1 能跑是因为
+    // `ResourceQuery` 的索引签名不拦数字，且后端同时收 "1"/"true"；
+    // 一旦后端收紧成只认 "true"，这里就会静默返回全部事件而不是未结束的。
+    const result = await telemetryList('incidents', { page: 1, page_size: 100, open: true })
     incidentRows.value = result.data as IncidentRecord[]
   } catch (error) {
     incidentRows.value = []

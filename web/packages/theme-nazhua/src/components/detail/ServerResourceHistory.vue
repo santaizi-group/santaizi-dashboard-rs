@@ -63,8 +63,9 @@ function rangeQuery(): { start: string; end: string } | null {
 
 const view = computed(() => toNazhuaServerView(props.server))
 
-function formatPercent(value: number) {
-  return `${Number(value).toFixed(1)}%`
+function formatPercent(value: number | null) {
+  // 总量未知时显示「—」，不显示假百分比。
+  return value === null ? '—' : `${value.toFixed(1)}%`
 }
 
 function seriesOf(rows: PublicMetricPoint[], name: string, color: string, pick: (row: PublicMetricPoint) => number): HistorySeries {

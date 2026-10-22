@@ -54,8 +54,17 @@ describe('formatCycleBytes', () => {
 
 describe('trafficUsage', () => {
   it('prefers cycle remaining over raw totals', () => {
-    const view = trafficUsage(10, 20, '2', { remainingLabel: '861.95G', statusLevel: 'fine' })
-    expect(view).toEqual({ kind: 'cycle', valueLabel: '861.95G', statusLevel: 'fine' })
+    const view = trafficUsage(10, 20, '2', {
+      remainingLabel: '861.95G',
+      statusLevel: 'fine',
+      remainingBytes: 925_512_590_787,
+    })
+    expect(view).toEqual({
+      kind: 'cycle',
+      valueLabel: '861.95G',
+      statusLevel: 'fine',
+      valueBytes: 925_512_590_787,
+    })
   })
 
   it('aggregates by trafficType', () => {
@@ -67,6 +76,16 @@ describe('trafficUsage', () => {
     expect(trafficUsage(100, 200, '3').kind).toBe('maxOut')
     expect(trafficUsage(100, 200, 1 as unknown as string).kind).toBe('out')
     expect(trafficUsage(1, 1, '').kind).toBe('unlimited')
+  })
+
+  it('exposes raw bytes for the UI tween', () => {
+    expect(trafficUsage(100, 200, '1').valueBytes).toBe(200)
+    expect(trafficUsage(100, 200, '2').valueBytes).toBe(300)
+    expect(trafficUsage(500, 200, '3').valueBytes).toBe(500)
+    expect(trafficUsage(100, 500, '3').valueBytes).toBe(500)
+    expect(trafficUsage(1, 1, '').valueBytes).toBeNull()
+    // 周期流量缺原始字节时回落标签，不伪造补间起点
+    expect(trafficUsage(10, 20, '2', { remainingLabel: '861.95G', statusLevel: 'fine' }).valueBytes).toBeNull()
   })
 })
 

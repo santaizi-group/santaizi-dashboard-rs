@@ -671,7 +671,7 @@ html.dark .server-status-shell,
 .ss-latency__head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
   flex-wrap: wrap;
 }
@@ -689,6 +689,7 @@ html.dark .server-status-shell,
   flex-wrap: wrap;
   align-items: center;
   gap: 10px 12px;
+  margin-left: auto;
 }
 .ss-latency__switch {
   display: inline-flex;
@@ -1353,25 +1354,27 @@ html.dark .status-globe__canvas,
   .ss-history__custom .el-date-editor { --el-date-editor-width: 100%; }
   .ss-latency__grid { grid-template-columns: 1fr; }
   .ss-latency__switch { min-height: 32px; }
-  /* 分区头（标题+开关+时间片）整条单行横滑，不折行；滚动条隐藏，滚出即达。
-     内层容器不再各自滚动，整条一起滑。 */
-  .ss-latency__head,
-  .ss-history__head {
+  /* 分区头两行（用户定版）：第一行 标题/开关，第二行 时间筛选整条横滑。
+     筛选行须 flex-start：flex-end + 溢出会把起始侧内容推出可滚区。 */
+  .ss-latency__toggles { flex-wrap: nowrap; }
+  .ss-latency__toolbar,
+  .ss-history__controls {
+    flex: 1 1 100%;
     flex-wrap: nowrap;
+    justify-content: flex-start;
+    min-width: 0;
+    margin-left: 0;
     overflow-x: auto;
     scrollbar-width: none;
   }
-  .ss-latency__head::-webkit-scrollbar,
-  .ss-history__head::-webkit-scrollbar { display: none; }
-  .ss-latency__head h3,
-  .ss-history__head h3,
-  .ss-latency__toolbar,
-  .ss-latency__toggles,
-  .ss-history__controls,
-  .ss-range-chips {
+  .ss-latency__toolbar::-webkit-scrollbar,
+  .ss-history__controls::-webkit-scrollbar { display: none; }
+  /* 滑条内子项不收缩：按钮被压窄会把文字挤成多行 */
+  .ss-latency__toolbar > *,
+  .ss-history__controls > * {
     flex: 0 0 auto;
-    flex-wrap: nowrap;
   }
+  .ss-range-chips { flex: 0 0 auto; flex-wrap: nowrap; }
   .network-header { align-items: stretch; flex-direction: column; }
   .network-empty { min-height: 56vh; }
   .network-grid[data-density="few"],

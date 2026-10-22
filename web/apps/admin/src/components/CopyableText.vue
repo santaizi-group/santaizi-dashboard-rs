@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
+import { copyText } from '@/composables/clipboard'
 
 const props = defineProps<{
   value?: string | null
@@ -10,9 +10,7 @@ const { t } = useI18n()
 
 async function copy(event: MouseEvent) {
   event.stopPropagation()
-  if (!props.value) return
-  await navigator.clipboard.writeText(props.value)
-  ElMessage.success(t('copied'))
+  await copyText(props.value, t)
 }
 </script>
 

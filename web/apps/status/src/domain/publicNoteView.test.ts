@@ -5,10 +5,13 @@ import {
   flagCode,
   getBillAndPlan,
   getCycleMonths,
+  getPresentation,
+  isSafeOrderLink,
   getNextCycleTime,
   getPlanTags,
   publicLocation,
   publicSubtitle,
+  safeBuyBtnIcon,
 } from '@santaizi/theme-server-status'
 
 const sample = {
@@ -101,6 +104,54 @@ describe('publicNoteView', () => {
     expect(decodeOrderLink(sample.customData.orderLink)).toBe('https://buy.example.com')
     expect(getCycleMonths('年')).toBe(12)
     expect(getCycleMonths('季')).toBe(3)
+  })
+
+  it('drops order links with a disallowed protocol', () => {
+    // 公开站 XSS：`href` 不设白名单时，访客点「购买」即执行脚本。
+    expect(decodeOrderLink('javascript:alert(1)')).toBe('')
+    expect(decodeOrderLink('JavaScript:alert(1)')).toBe('')
+    expect(decodeOrderLink('  javascript:alert(1)  ')).toBe('')
+    expect(decodeOrderLink('java%0Ascript:alert(1)')).toBe('')
+    expect(decodeOrderLink('data:text/html,<script>alert(1)</script>')).toBe('')
+    expect(decodeOrderLink('vbscript:msgbox(1)')).toBe('')
+    expect(decodeOrderLink('file:///etc/passwd')).toBe('')
+    // 白名单内的照常放行。
+    expect(decodeOrderLink('http://buy.example.com')).toBe('http://buy.example.com')
+    expect(decodeOrderLink('https://buy.example.com')).toBe('https://buy.example.com')
+    // 站内相对路径不带协议，也要放行（换域名不用改代码）。
+    expect(decodeOrderLink('/order')).toBe('/order')
+    expect(decodeOrderLink('order.html')).toBe('order.html')
+    expect(decodeOrderLink('')).toBe('')
+    expect(isSafeOrderLink('https://buy.example.com')).toBe(true)
+    expect(isSafeOrderLink('javascript:alert(1)')).toBe(false)
+  })
+
+  it('falls back to the default icon for a non-Remix class', () => {
+    // 图标类名来自 allow-create 的 el-select，可填任意字符串；
+    // 只放行 Remix 形态，其余回落默认值。
+    expect(getPresentation({ customData: { buyBtnIcon: 'ri-gift-2-line' } }).buyBtnIcon)
+      .toBe('ri-gift-2-line')
+    expect(getPresentation({ customData: { buyBtnIcon: 'ri-shopping-bag-3-line' } }).buyBtnIcon)
+      .toBe('ri-shopping-bag-3-line')
+    expect(getPresentation({ customData: { buyBtnIcon: 'not-an-icon' } }).buyBtnIcon)
+      .toBe('ri-shopping-bag-3-line')
+    expect(getPresentation({ customData: { buyBtnIcon: 'ri-x" onmouseover="alert(1)' } }).buyBtnIcon)
+      .toBe('ri-shopping-bag-3-line')
+    expect(getPresentation({ customData: { buyBtnIcon: '' } }).buyBtnIcon)
+      .toBe('ri-shopping-bag-3-line')
+    expect(getPresentation({ customData: { buyBtnIcon: 42 } }).buyBtnIcon)
+      .toBe('ri-shopping-bag-3-line')
+    expect(safeBuyBtnIcon('ri-external-link-line')).toBe('ri-external-link-line')
+    expect(safeBuyBtnIcon('fl-ubuntu')).toBe('ri-shopping-bag-3-line')
+  })
+
+  it('does not surface a buy button for an unsafe order link', () => {
+    const view = buildPublicNoteView({
+      customData: { orderLink: 'javascript:alert(document.cookie)' },
+    })
+    expect(view.presentation.orderLink).toBe('')
+    expect(view.hasBuy).toBe(false)
+    expect(view.hasDetail).toBe(false)
   })
 
   it('advances auto-renewal past now', () => {

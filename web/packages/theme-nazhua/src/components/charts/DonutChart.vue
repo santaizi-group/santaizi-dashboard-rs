@@ -3,7 +3,8 @@ import { computed } from 'vue'
 
 const props = withDefaults(defineProps<{
   label: string
-  percent: number
+  /// 总量未知时传 null：环不画填充，value 由调用方给「—」。
+  percent: number | null
   value?: string
   caption?: string
   captionTitle?: string
@@ -15,7 +16,11 @@ const props = withDefaults(defineProps<{
   color: 'blue',
 })
 
-const safePercent = computed(() => Math.max(0, Math.min(100, Number(props.percent) || 0)))
+const safePercent = computed(() => {
+  const n = Number(props.percent)
+  if (props.percent === null || !Number.isFinite(n)) return 0
+  return Math.max(0, Math.min(100, n))
+})
 const dashOffset = computed(() => 100 - safePercent.value)
 const displayValue = computed(() => {
   if (props.value) return props.value

@@ -6,6 +6,8 @@ import {
   formatConnPair,
   mapCycleTransfers,
   percentOf,
+  percentText,
+  specTextOf,
   toServerStatusView,
 } from '@santaizi/theme-server-status'
 
@@ -167,9 +169,41 @@ describe('ServerStatus view adapter', () => {
     expect(view.uptimeLabel).toContain('1')
   })
 
+  it('builds the 1C2G10G spec string and falls back when specs are unknown', () => {
+    const view = toServerStatusView(server({
+      host: {
+        Platform: 'debian',
+        CPU: ['AMD EPYC 1 Virtual Core'],
+        MemTotal: 1_015_000_000,
+        DiskTotal: 10_406_226_432,
+      },
+    }))
+    expect(view.specText).toBe('1C1G10G')
+    expect(specTextOf(4, 2 * 1024 ** 3, 10 * 1024 ** 3)).toBe('4C2G10G')
+    expect(specTextOf(0, 2 * 1024 ** 3, 10 * 1024 ** 3)).toBeNull()
+    expect(specTextOf(1, 0, 10 * 1024 ** 3)).toBeNull()
+    expect(specTextOf(1, 1024, 0)).toBeNull()
+    // 小于 1GB 的项不能四舍五入成 0G：512MB 内存读作「0G」像没有内存。
+    expect(specTextOf(2, 512 * 1024 ** 2, 10 * 1024 ** 3)).toBe('2C1G10G')
+    expect(specTextOf(1, 1, 1)).toBe('1C1G1G')
+    expect(specTextOf(1, 1536 * 1024 ** 2, 20 * 1024 ** 3)).toBe('1C2G20G')
+  })
+
   it('keeps format helpers bounded', () => {
     expect(clampPercent(140)).toBe(100)
     expect(percentOf(1, 4)).toBe(25)
+    // 总量未知时返回 null，而不是把字节数当百分比：1 GiB 用量 + 未上报总量
+    // 曾在这里被渲染成 100% 满额红色告警。
+    expect(percentOf(1024 ** 3, 0)).toBeNull()
+    expect(percentOf(1024 ** 3, undefined)).toBeNull()
+    expect(percentOf(1024 ** 3, Number.NaN)).toBeNull()
+    // 已知总量照常算，且仍钳在 0-100。
+    expect(percentOf(1024 ** 3, 2 * 1024 ** 3)).toBe(50)
+    expect(percentOf(5 * 1024 ** 3, 2 * 1024 ** 3)).toBe(100)
+    expect(percentOf(-1, 2 * 1024 ** 3)).toBe(0)
+    expect(percentText(25)).toBe('25.0%')
+    expect(percentText(null)).toBe('—')
+    expect(percentText(undefined)).toBe('—')
     expect(formatBytes(1024)).toBe('1.0 KB')
     expect(formatBytes(0)).toBe('0 B')
     expect(formatConnPair(16, 5)).toBe('16 / 5')

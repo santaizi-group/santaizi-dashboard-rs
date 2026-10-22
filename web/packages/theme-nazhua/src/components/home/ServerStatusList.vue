@@ -21,15 +21,20 @@ function uptimeOf(server: NazhuaServerView) {
 
 function cycleTitle(server: NazhuaServerView) {
   if (!server.cycle) return undefined
-  return `${formatCompactBytes(server.trafficBytes)} (${Number(server.cycle.usagePercent.toFixed(1))}%)`
+  // 配额未知时只显示用量，不拼一个假百分比。
+  const { usagePercent } = server.cycle
+  return usagePercent === null
+    ? formatCompactBytes(server.trafficBytes)
+    : `${formatCompactBytes(server.trafficBytes)} (${usagePercent.toFixed(1)}%)`
 }
 
 function platformOf(server: NazhuaServerView) {
   return [server.platformLabel, server.platformVersion].filter(Boolean).join(' ') || '—'
 }
 
-function usageClass(percent: number, withTrack = false) {
-  const n = Math.min(100, Math.max(0, Number.isFinite(percent) ? percent : 0))
+function usageClass(percent: number | null, withTrack = false) {
+  // 未知（null）时既不上色也不画填充：不知道用了几成，谈不上告警。
+  const n = percent === null ? 0 : Math.min(100, Math.max(0, Number.isFinite(percent) ? percent : 0))
   const tone = usageTone(n)
   return [
     'nazhua-status-table__usage',
@@ -39,8 +44,8 @@ function usageClass(percent: number, withTrack = false) {
   ]
 }
 
-function usageStyle(percent: number): CSSProperties {
-  const n = Math.min(100, Math.max(0, Number.isFinite(percent) ? percent : 0))
+function usageStyle(percent: number | null): CSSProperties {
+  const n = percent === null ? 0 : Math.min(100, Math.max(0, Number.isFinite(percent) ? percent : 0))
   return { '--usage': `${n}%` } as CSSProperties
 }
 </script>

@@ -2,7 +2,7 @@ import type { CycleTransfer, ResourceRecord, SensorTemperature, ServerRecord } f
 import { isHostOnline } from '@santaizi/api'
 import { parseCpuCores } from '@santaizi/status-core'
 export { parseCpuCores }
-import { buildPublicNoteView, decodeOrderLink, formatTransfer, osLabel, resolveFlagCode, type PublicNoteView } from '@santaizi/theme-server-status'
+import { buildPublicNoteView, formatTransfer, osLabel, resolveFlagCode, type PublicNoteView } from '@santaizi/theme-server-status'
 import { formatDonutDisk, formatDonutMem, formatSpec, formatTableSpec } from '../utils/host'
 import { resolveServerLocation, type ServerLocation } from '../utils/worldMap'
 
@@ -12,7 +12,8 @@ export interface NazhuaCycleTransferView {
   usedBytes: number
   quotaBytes: number
   remainingBytes: number
-  usagePercent: number
+  /// 配额未知时为 null。
+  usagePercent: number | null
   warningPercent: number
   status: string
   windowStart: string
@@ -51,9 +52,10 @@ export interface NazhuaServerView {
   spec: string
   tableSpec: string
   cpuPercent: number
-  memoryPercent: number
-  diskPercent: number
-  swapPercent: number
+  /// 总量未上报时为 null（见 percentOf），模板据此显示「—」。
+  memoryPercent: number | null
+  diskPercent: number | null
+  swapPercent: number | null
   memoryUsed: number
   memoryTotal: number
   diskUsed: number
@@ -113,8 +115,16 @@ export function clampPercent(value: number) {
   return Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0))
 }
 
-export function percentOf(used: number, total?: number) {
-  return clampPercent(total && total > 0 ? (used / total) * 100 : used)
+/**
+ * 用量百分比：`used / total * 100`，结果钳在 0-100。
+ *
+ * 总量未知时返回 **null**。旧实现在这种情况下 `clampPercent(used)`——把字节数
+ * 当百分比，于是「已用 1 GiB、总量未上报」会被渲染成 100% 满额告警。
+ * 语义与 `@santaizi/theme-server-status` 的 `percentOf` 一致。
+ */
+export function percentOf(used: number, total?: number): number | null {
+  const ratio = total !== undefined && Number.isFinite(total) && total > 0 ? (used / total) * 100 : null
+  return ratio === null ? null : clampPercent(ratio)
 }
 
 export function formatCompactBytes(value: number, _decimals = 0) {
@@ -137,8 +147,12 @@ export function usageText(used: number, total: number, kind: 'mem' | 'disk' = 'm
   return formatted.value
 }
 
-export function usageCaption(used: number, total: number, percent: number, kind: 'mem' | 'disk' = 'mem') {
-  return `${usageText(used, total, kind)} (${Number(percent.toFixed(1))}%)`
+/// 环形图下方的说明文字。总量未知时不拼百分比——拼了就是假数字。
+///
+/// `Number(...toFixed(1))` 是为了保持既有观感：50% 不显示成 50.0%。
+export function usageCaption(used: number, total: number, percent: number | null, kind: 'mem' | 'disk' = 'mem') {
+  const base = usageText(used, total, kind)
+  return percent === null ? base : `${base} (${Number(percent.toFixed(1))}%)`
 }
 
 function planTrafficBytes(transferIn: number, transferOut: number, trafficType: string) {
@@ -255,7 +269,8 @@ export function toNazhuaServerView(
   const memDonut = formatDonutMem(memoryUsed, memoryTotal)
   const diskDonut = formatDonutDisk(diskUsed, diskTotal)
   const swapDonut = formatDonutMem(swapUsed, swapTotal)
-  const cpuPercent = percentOf(finite(state?.CPU))
+  // CPU 上报的本身就是百分比，不是 used/total 的比值，直接钳位。
+  const cpuPercent = clampPercent(finite(state?.CPU))
   const memoryPercent = percentOf(memoryUsed, memoryTotal || undefined)
   const diskPercent = percentOf(diskUsed, diskTotal || undefined)
   const swapPercent = percentOf(swapUsed, swapTotal || undefined)
@@ -325,7 +340,7 @@ export function toNazhuaServerView(
     temperatures: temperatures(state?.Temperatures),
     cycle,
     billing: billingLabel(publicNote),
-    orderLink: decodeOrderLink(publicNote.presentation.orderLink),
+    orderLink: publicNote.presentation.orderLink,
   }
 }
 

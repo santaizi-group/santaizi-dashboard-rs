@@ -16,6 +16,7 @@ import CopyableText from '@/components/CopyableText.vue'
 import { batchDeleteServers, batchUpdateServerGroup, deleteOfflineHistory, deleteServer, exportServers, getServerInstallPreview, getServerTrafficHistory, listConnectionPaths, listOfflineHistory, listProbePaths, listServerAvailability, listServers, previewServerImport, resetServerAvailability, resetServerSecret, updateServerDisplayIndex, type ResourceRecord, type ServerRecord } from '@/api/adminApi'
 import { formatAdminValue, formatBytes } from '@/composables/format'
 import { notifyAPIError } from '@/composables/notify'
+import { copyText } from '@/composables/clipboard'
 import { PAGE_SIZES, readStoredPageSize, writeStoredPageSize } from '@/composables/pageSize'
 import { isRowSelected, toggleRowSelection } from '@/composables/selection'
 import { shortId } from '@/composables/shortId'
@@ -112,18 +113,29 @@ async function onImportFile(event: Event) {
   }
 }
 
+/// 请求代际：每次 `load()` 自增。
+///
+/// 没有它时，慢的旧响应会在新的之后落地（连点搜索、保存后刷新、
+/// 翻页），表格于是显示第 1 页的数据而分页器写着第 2 页。
+/// 回调一律先比对代际，过期的一律当作没发生。
+let loadGeneration = 0
+
 async function load() {
   writeStoredPageSize(route.path, query.page_size)
+  loadGeneration += 1
+  const current = loadGeneration
   loading.value = true
   try {
     const result = await listServers(query)
+    if (current !== loadGeneration) return
     items.value = result.data
     total.value = result.meta.total || result.data.length
     sortDraft.value = Object.fromEntries(result.data.map(server => [server.id, String(server.display_index)]))
   } catch (error) {
+    if (current !== loadGeneration) return
     notifyAPIError(error, t as never, te)
   } finally {
-    loading.value = false
+    if (current === loadGeneration) loading.value = false
   }
 }
 function open(item?: ServerRecord) { editing.value = item; editor.value = true }
@@ -213,8 +225,8 @@ async function copyDefaultInstall(server: ServerRecord) {
   copyingInstall.value = server.id
   try {
     const preview = await getServerInstallPreview(server.id, defaultInstallPreviewBody())
-    await navigator.clipboard.writeText(preview.command)
-    ElMessage.success(t('copied'))
+    // 预取失败走 notifyAPIError；复制失败的兜底在 copyText 内部。
+    await copyText(preview.command, t)
   } catch (error) {
     notifyAPIError(error, t as never, te)
   } finally {

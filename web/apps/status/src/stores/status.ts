@@ -14,6 +14,13 @@ let socket: WebSocket | undefined
 let retry = 0
 let timer: number | undefined
 let stopped = true
+/// 连接代际：每次 `connect()` 自增。
+///
+/// 没有代际时，重复调用 `connect()` 会让**旧** socket 的 `onclose`/`onerror`
+/// 继续跑：旧 error 关掉的是新 socket（互踢），旧 close 又排一条新的重连，
+/// 于是重连链越滚越多；`stop()` 之后旧代际的定时器还会把连接拉起来。
+/// 回调一律先比对代际，过期的一律当作没发生。
+let generation = 0
 
 function apply(message: unknown) {
   const value = message as Record<string, unknown>
@@ -57,31 +64,48 @@ async function load() {
 
 function connect() {
   stopped = false
+  generation += 1
+  const current = generation
+  // 只关自己这条：旧 socket 的 onerror 里不能去 close 新 socket。
   socket?.close()
-  socket = new WebSocket(websocketURL('/ws/v2/public/runtime'))
-  socket.onopen = () => {
+  const next = new WebSocket(websocketURL('/ws/v2/public/runtime'))
+  socket = next
+  next.onopen = () => {
+    if (current !== generation) return
     connected.value = true
     retry = 0
   }
-  socket.onmessage = (e) => {
+  next.onmessage = (e) => {
+    if (current !== generation) return
     try {
       apply(JSON.parse(String(e.data)))
     } catch { /* ignore malformed frames */ }
   }
-  socket.onclose = () => {
+  next.onclose = () => {
+    if (current !== generation) return
     connected.value = false
     if (stopped) return
     window.clearTimeout(timer)
-    timer = window.setTimeout(connect, Math.min(30000, 1000 * 2 ** retry++))
+    timer = window.setTimeout(() => {
+      if (current !== generation || stopped) return
+      connect()
+    }, Math.min(30000, 1000 * 2 ** retry++))
   }
-  socket.onerror = () => socket?.close()
+  next.onerror = () => {
+    if (current !== generation) return
+    next.close()
+  }
 }
 
 function stop() {
   stopped = true
+  generation += 1
   window.clearTimeout(timer)
   socket?.close()
   socket = undefined
+  // 代际已作废，onclose 不会再跑；这里必须自己把连接态清掉，
+  // 否则界面会一直显示「已连接」。
+  connected.value = false
 }
 
 const groups = computed(() => {

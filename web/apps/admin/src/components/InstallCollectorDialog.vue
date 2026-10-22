@@ -6,6 +6,8 @@ import { AppDialog } from '@santaizi/ui'
 import { getCollectorInstallPreview, getCollectorToken, type CollectorRecord } from '@/api/adminApi'
 import { useEditorSnapshot } from '@/composables/editorSnapshot'
 import { notifyAPIError } from '@/composables/notify'
+import { copyText } from '@/composables/clipboard'
+
 
 const props = defineProps<{ modelValue: boolean; collector?: CollectorRecord; token?: string }>()
 const emit = defineEmits<{ 'update:modelValue': [boolean] }>()
@@ -63,14 +65,12 @@ async function open() {
 }
 
 async function copyToken() {
-  await navigator.clipboard.writeText(token.value)
-  ElMessage.success(t('copied'))
+  await copyText(token.value, t)
 }
 
 async function copyCommand() {
   if (!command.value) await refreshPreview()
-  await navigator.clipboard.writeText(command.value)
-  ElMessage.success(t('copied'))
+  await copyText(command.value, t)
 }
 
 watch(() => props.modelValue, value => { if (value) void open() })

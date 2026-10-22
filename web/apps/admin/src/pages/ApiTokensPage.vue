@@ -6,6 +6,7 @@ import { deleteApiToken, getApiToken, listApiTokens, patchApiToken, type APIToke
 import { AppDialog, AppEmpty } from '@santaizi/ui'
 import IssueApiTokenDialog from '@/components/editors/IssueApiTokenDialog.vue'
 import { notifyAPIError } from '@/composables/notify'
+import { copyText } from '@/composables/clipboard'
 import { formatDateTime } from '@/composables/format'
 
 const { t, te, locale } = useI18n()
@@ -45,8 +46,9 @@ async function reveal(row: APIToken) {
 async function copyRow(row: APIToken) {
   try {
     const plain = (await getApiToken(row.id)).token || ''
-    await navigator.clipboard.writeText(plain)
-    ElMessage.success(t('copied'))
+    // 取令牌失败走 notifyAPIError；复制失败（明文 HTTP / 权限被拒）在
+    // copyText 内部消化成提示，不再冒出去变成未处理 rejection。
+    await copyText(plain, t)
   } catch (e) {
     notifyAPIError(e, t as never, te)
   }
@@ -78,8 +80,7 @@ async function remove(row: APIToken) {
 }
 
 async function copy() {
-  await navigator.clipboard.writeText(token.value)
-  ElMessage.success(t('copied'))
+  await copyText(token.value, t)
 }
 
 function permissionLabel(value: string | undefined) {

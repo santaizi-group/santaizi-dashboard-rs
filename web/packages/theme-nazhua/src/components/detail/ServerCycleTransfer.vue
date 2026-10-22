@@ -37,10 +37,26 @@ function statusKey(status?: string) {
   return 'ok'
 }
 
-function usage(row: CycleTransfer) {
+/// 用量百分比。配额未知且后端也没给 usage_percent 时返回 null——
+/// 此时把字节数当百分比会让 1 GiB 显示成 100% 满额。
+function usage(row: CycleTransfer): number | null {
   const used = Number(row.used_bytes || 0)
   const quota = Number(row.quota_bytes || 0)
-  return quota > 0 ? percentOf(used, quota) : Number(row.usage_percent || 0)
+  if (quota > 0) return percentOf(used, quota)
+  const reported = Number(row.usage_percent)
+  return Number.isFinite(reported) && reported > 0 ? reported : null
+}
+
+/// 填充条宽度。未知配额时不画填充，而不是画一条满格。
+function usageWidth(row: CycleTransfer): string {
+  const percent = usage(row)
+  return percent === null ? '0%' : `${Math.min(100, percent)}%`
+}
+
+/// 百分比文本。未知显示「—」。
+function usageLabel(row: CycleTransfer): string {
+  const percent = usage(row)
+  return percent === null ? '—' : `${percent.toFixed(1)}%`
 }
 
 function remaining(row: CycleTransfer) {
@@ -78,7 +94,7 @@ watch(() => props.server.id, load)
             {{ t(`nazhua.cycleStatus.${statusKey(row.status)}`) }}
           </span>
           <div class="nazhua-cycle-transfer__bar">
-            <div class="nazhua-cycle-transfer__fill" :class="`is-${statusKey(row.status)}`" :style="{ width: `${Math.min(100, usage(row))}%` }" />
+            <div class="nazhua-cycle-transfer__fill" :class="`is-${statusKey(row.status)}`" :style="{ width: usageWidth(row) }" />
             <i
               v-if="row.warning_percent && row.warning_percent > 0 && row.warning_percent < 100"
               class="nazhua-cycle-transfer__warn"
@@ -89,7 +105,7 @@ watch(() => props.server.id, load)
             {{ formatCycleBytes(Number(row.used_bytes || 0)) }}
             /
             {{ formatCycleBytes(Number(row.quota_bytes || 0)) }}
-            ({{ usage(row).toFixed(1) }}%)
+            ({{ usageLabel(row) }})
             ·
             {{ t('nazhua.remainingBytes') }}
             {{ formatCycleBytes(remaining(row)) }}
