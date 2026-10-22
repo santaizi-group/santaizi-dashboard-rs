@@ -53,6 +53,21 @@ const RENEW_BACKOFF_MAX: Duration = Duration::from_secs(10);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 /// 单批复制记录数上限（Go `replicationBatchSize`）。
 const REPLICATION_BATCH_SIZE: i64 = 512;
+
+#[cfg(test)]
+mod replication_batch_alignment {
+    /// 从端复制批次大小必须与主端 `telemetry.replication_batch_size` 默认值一致，
+    /// 否则主端的上限会挡住自家从端的正常流量。
+    #[test]
+    fn matches_the_primary_default() {
+        let conf = crate::config::Config::default();
+        assert_eq!(
+            super::REPLICATION_BATCH_SIZE,
+            conf.telemetry.replication_batch_size as i64,
+            "从端复制批次大小与主端默认值漂移了"
+        );
+    }
+}
 /// 出库为空时的空闲等待（Go `replicationIdleWait`）；摄入经 `wake` 通知提前唤醒。
 const REPLICATION_IDLE_WAIT: Duration = Duration::from_secs(2);
 /// 复制重连退避：1s → 2s → 5s → 10s（Go `replicationRetryMin/Max` + `nextReplicationRetry`）。

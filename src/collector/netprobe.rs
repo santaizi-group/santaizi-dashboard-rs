@@ -218,6 +218,18 @@ async fn resolve_host(host: &str, ipv4: bool) -> Option<IpAddr> {
         .map(|addr| addr.ip())
 }
 
+/// 探测标识：进程内自增，保证**同一时刻并发的多次探测**标识不同。
+///
+/// 用 `process::id()` 时，同进程对所有目标共用一个 id，而 seq 又只是 0..4 的
+/// 小整数——并发打不同主机时，A 的回包会被当成 B 的收下，延迟/丢包率互相污染。
+static PROBE_SEQUENCE: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+/// 取一个本次探测专属的标识：pid 打底再叠加自增序号，避免跨进程撞车。
+fn next_probe_id() -> u16 {
+    let seq = PROBE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    (std::process::id() as u16).wrapping_add(seq)
+}
+
 fn icmp_v4(ip: Ipv4Addr) -> IcmpResult {
     let socket = match Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)) {
         Ok(socket) => socket,
@@ -226,9 +238,9 @@ fn icmp_v4(ip: Ipv4Addr) -> IcmpResult {
     if let Err(err) = socket.set_read_timeout(Some(ICMP_TIMEOUT)) {
         return icmp_failure(err.to_string());
     }
-    let id = std::process::id() as u16;
+    let id = next_probe_id();
     let dest = SockAddr::from(SocketAddr::from((ip, 0)));
-    ping_loop(&socket, &dest, id, true)
+    ping_loop(&socket, &dest, IpAddr::V4(ip), id, true)
 }
 
 fn icmp_v6(ip: Ipv6Addr) -> IcmpResult {
@@ -239,12 +251,12 @@ fn icmp_v6(ip: Ipv6Addr) -> IcmpResult {
     if let Err(err) = socket.set_read_timeout(Some(ICMP_TIMEOUT)) {
         return icmp_failure(err.to_string());
     }
-    let id = std::process::id() as u16;
+    let id = next_probe_id();
     let dest = SockAddr::from(SocketAddr::from((ip, 0)));
-    ping_loop(&socket, &dest, id, false)
+    ping_loop(&socket, &dest, IpAddr::V6(ip), id, false)
 }
 
-fn ping_loop(socket: &Socket, dest: &SockAddr, id: u16, ipv4: bool) -> IcmpResult {
+fn ping_loop(socket: &Socket, dest: &SockAddr, target: IpAddr, id: u16, ipv4: bool) -> IcmpResult {
     let mut received = 0u32;
     let mut rtt_sum = 0.0;
     for seq in 0..ICMP_COUNT {
@@ -258,7 +270,18 @@ fn ping_loop(socket: &Socket, dest: &SockAddr, id: u16, ipv4: bool) -> IcmpResul
         let deadline = Instant::now() + ICMP_TIMEOUT;
         while Instant::now() < deadline {
             match socket.recv_from(&mut buf) {
-                Ok((len, _)) if echo_matches(init_prefix(&buf, len), id, seq as u16, ipv4) => {
+                // 源地址必须等于目标：只比 type/id/seq 时，别的主机（或同一
+                // 主机上另一次并发探测）的回包会被误收，串扰就是这么来的。
+                Ok((len, from))
+                    if reply_is_ours(
+                        init_prefix(&buf, len),
+                        &from,
+                        id,
+                        seq as u16,
+                        ipv4,
+                        target,
+                    ) =>
+                {
                     received += 1;
                     rtt_sum += started.elapsed().as_secs_f64() * 1000.0;
                     break;
@@ -314,6 +337,27 @@ fn init_prefix(buf: &[std::mem::MaybeUninit<u8>], len: usize) -> &[u8] {
     unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), len) }
 }
 
+/// 回包源地址；非 IP 套接字地址（本模块只会拿到 IP）返回 None。
+fn reply_from(from: &SockAddr) -> Option<IpAddr> {
+    from.as_socket().map(|addr| addr.ip())
+}
+
+/// 这一次 recv 的回包算不算命中：类型/标识/序号对得上，**且源地址就是目标**。
+///
+/// 抽成纯函数是为了能直接测：并发探测串扰的根因就在这个判定上，
+/// 只比前三项时别的主机回包也会被收下。
+fn reply_is_ours(
+    buf: &[u8],
+    from: &SockAddr,
+    id: u16,
+    seq: u16,
+    ipv4: bool,
+    target: IpAddr,
+) -> bool {
+    echo_matches(buf, id, seq, ipv4) && reply_from(from) == Some(target)
+}
+
+/// 回包是否就是「这一次探测」的回包：类型 + 标识 + 序号三者俱全。
 fn echo_matches(buf: &[u8], id: u16, seq: u16, ipv4: bool) -> bool {
     let icmp = if ipv4 {
         let ihl = usize::from(buf.first().copied().unwrap_or(0) & 0x0f) * 4;
@@ -389,5 +433,94 @@ mod tests {
             error: String::new(),
         }];
         assert!(display_error(Some(&icmp), &tcp).is_empty());
+    }
+
+    /// 探测标识必须每次不同：同进程并发打不同主机时共用一个 id，
+    /// 而 seq 只是 0..4 的小整数，A 的回包会被当成 B 的收下。
+    #[test]
+    fn probe_ids_are_unique_within_a_process() {
+        let ids: Vec<u16> = (0..64).map(|_| next_probe_id()).collect();
+        let unique: std::collections::HashSet<u16> = ids.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "探测标识不得重复，否则并发探测会互相串扰"
+        );
+    }
+
+    /// 回包源地址必须参与判重：只比 type/id/seq 时，来自别处的回包也算命中。
+    #[test]
+    fn a_reply_from_the_wrong_host_is_not_accepted() {
+        let target = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+        assert_eq!(
+            reply_from(&SockAddr::from(SocketAddr::from((
+                Ipv4Addr::new(203, 0, 113, 9),
+                0
+            )))),
+            Some(target),
+            "来自目标地址的回包要能被认出来"
+        );
+        assert_ne!(
+            reply_from(&SockAddr::from(SocketAddr::from((
+                Ipv4Addr::new(203, 0, 113, 10),
+                0
+            )))),
+            Some(target),
+            "别的主机回包不得等于目标"
+        );
+        // IPv4 / IPv6 形态不一致时也不能算相等（v4-mapped 另说）。
+        let v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        assert_ne!(
+            reply_from(&SockAddr::from(SocketAddr::from((v6, 0)))),
+            Some(target)
+        );
+    }
+
+    /// 端到端覆盖「串扰」现场：一次探测打 A，回包却来自 B。
+    ///
+    /// 构造一份 type/id/seq 完全对得上的 ICMP 回包，只把源地址换成别的主机——
+    /// 旧实此刻意不收这条判定，于是 B 的回包被当成 A 的命中。
+    #[test]
+    fn a_well_formed_reply_from_the_wrong_host_is_rejected() {
+        let target = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+        let other = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));
+        let (id, seq) = (0x1234u16, 0x0002u16);
+        // IPv4 原始套接字回包带 IP 头：这里按 IHL=5 拼一个最小头。
+        let mut buf = vec![
+            0x45u8, 0, 0, 0, 0, 0, 0, 0, 64, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let mut icmp = echo_request(id, seq, false);
+        // echo_request 产出的是 request（type 8）；回包要把 type 改成 0。
+        icmp[0] = 0;
+        buf.extend_from_slice(&icmp);
+
+        let from_target = SockAddr::from(SocketAddr::from((target, 0)));
+        let from_other = SockAddr::from(SocketAddr::from((other, 0)));
+        assert!(
+            reply_is_ours(&buf, &from_target, id, seq, true, target),
+            "来自目标、且 type/id/seq 对得上的回包必须算命中"
+        );
+        assert!(
+            !reply_is_ours(&buf, &from_other, id, seq, true, target),
+            "源地址不是目标时，type/id/seq 再对也不算命中"
+        );
+        // 换一个 id 也不行：证明 id 真的参与判重（并发探测各带各的 id）。
+        assert!(!reply_is_ours(
+            &buf,
+            &from_target,
+            id ^ 1,
+            seq,
+            true,
+            target
+        ));
+        // 换一个 seq 同样不行。
+        assert!(!reply_is_ours(
+            &buf,
+            &from_target,
+            id,
+            seq + 1,
+            true,
+            target
+        ));
     }
 }

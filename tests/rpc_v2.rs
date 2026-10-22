@@ -32,6 +32,7 @@ use santaizi_dashboard::telemetry::store::Store;
 
 const CLIENT_SECRET: &str = "test-client-secret";
 const SERVER_ID: i64 = 7;
+const COLLECTOR_UUID: &str = "collector-edge";
 
 fn node() -> Vec<u8> {
     vec![0x31; 16]
@@ -78,6 +79,8 @@ struct PrimaryFixture {
     state: Arc<AppState>,
     port: u16,
     server_cert_pem: Vec<u8>,
+    /// 注册令牌明文：`Register` / `RenewCollector` 的唯一凭据。
+    registration_token: String,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -128,12 +131,19 @@ async fn setup_primary(tag: &str, tls_enabled: bool, require_agent_mtls: bool) -
         .expect("app state");
 
     let ciphertext = secret::encrypt_secret(CLIENT_SECRET).expect("encrypt client secret");
+    let (registration_token, token_hash) =
+        credential::new_registration_token().expect("registration token");
     let seed_db = db.clone();
     tokio::task::spawn_blocking(move || {
         seed_db.write(|tx| {
             tx.execute(
                 "INSERT INTO servers (id, name, tag, secret_ciphertext, display_index, hide_for_guest) VALUES (?, 'node-7', 'tag1', ?, 1, 0)",
                 rusqlite::params![SERVER_ID, &ciphertext],
+            )?;
+            // 从端行：Register/RenewCollector 经注册令牌换取证书。
+            tx.execute(
+                "INSERT INTO collectors (collector_uuid, name, address, token_hash, token_ciphertext, kind, tcp_ports, revoked, deleted) VALUES (?, 'Edge', 'edge:5556', ?, X'00', 'observer', '', 0, 0)",
+                rusqlite::params![COLLECTOR_UUID, &token_hash.to_vec()],
             )?;
             Ok(())
         })
@@ -156,6 +166,7 @@ async fn setup_primary(tag: &str, tls_enabled: bool, require_agent_mtls: bool) -
         state,
         port,
         server_cert_pem,
+        registration_token,
         server,
     }
 }
@@ -611,6 +622,47 @@ async fn ingest_batch_acks_and_flips_runtime_online() {
 }
 
 #[tokio::test]
+async fn ingest_batch_rejects_foreign_node_events() {
+    let fixture = setup_primary("ingest-batch-node", true, false).await;
+    let credential = sign_credential(&fixture, &node());
+    let (tx, mut stream) = open_ingest(&fixture, None, ingest_hello(credential))
+        .await
+        .unwrap();
+
+    // 凭证只证明「这条连接属于 node A」；批次里塞 node B 的事件必须被拒，
+    // 否则任一探针凭据都能伪造任意节点的数据。
+    let mut foreign = host_event(1);
+    foreign.node_uuid = other_node();
+    tx.send(proto::TelemetryRequest {
+        body: Some(proto::telemetry_request::Body::Batch(
+            proto::TelemetryBatch {
+                records: vec![proto::TelemetryRecord {
+                    record: Some(proto::telemetry_record::Record::Event(foreign)),
+                }],
+            },
+        )),
+    })
+    .await
+    .unwrap();
+    let err = stream.message().await.unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+    drop(tx);
+
+    // 越权批次不得落库。
+    let events: i64 = fixture
+        .db
+        .read(|conn| {
+            Ok(
+                conn.query_row("SELECT COUNT(*) FROM telemetry_events", [], |r| {
+                    r.get::<_, i64>(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(events, 0, "被拒批次不得留下任何事件证据");
+}
+
+#[tokio::test]
 async fn ingest_rejects_bad_hello_and_empty_batch() {
     let fixture = setup_primary("ingest-reject", true, false).await;
     let credential = sign_credential(&fixture, &node());
@@ -660,4 +712,63 @@ async fn ingest_tampered_credential_is_unauthenticated() {
         .unwrap();
     let err = stream.message().await.unwrap_err();
     assert_eq!(err.code(), Code::Unauthenticated);
+}
+
+/// B7：`Register` 是长期注册令牌的唯一消费点，必须跟 `Enroll` 同一准入门槛。
+/// 明文连接上直接拒绝；令牌连错 5 次触发进程级节流（换 IP 也无法绕过）。
+#[tokio::test]
+async fn register_requires_tls_and_throttles_failures() {
+    // 明文主端（TLS 关闭）：Register 必须在令牌比对之前就拒。
+    let plain = setup_primary("register-plain", false, false).await;
+    let channel = dial(&plain, None).await.expect("plaintext dial");
+    let mut client =
+        proto::santaizi_collector_service_client::SantaiziCollectorServiceClient::new(channel);
+    let err = client
+        .register(proto::RegisterCollectorRequest {
+            protocol_version: "2".to_string(),
+            registration_token: plain.registration_token.clone(),
+            csr_der: Vec::new(),
+        })
+        .await
+        .expect_err("明文连接必须拒绝注册");
+    assert_eq!(err.code(), Code::Unauthenticated, "{err}");
+    assert!(err.message().contains("requires TLS"), "{err}");
+
+    // TLS 主端：正确令牌放行（证明上面拒的不是令牌本身）。
+    let secure = setup_primary("register-tls", true, true).await;
+    let channel = dial(&secure, None).await.expect("tls dial");
+    let mut client =
+        proto::santaizi_collector_service_client::SantaiziCollectorServiceClient::new(channel);
+    let ok = client
+        .register(proto::RegisterCollectorRequest {
+            protocol_version: "2".to_string(),
+            registration_token: secure.registration_token.clone(),
+            csr_der: Vec::new(),
+        })
+        .await
+        .expect("TLS + 正确令牌应放行");
+    assert_eq!(ok.into_inner().collector_uuid, COLLECTOR_UUID);
+
+    // 连错 5 次 → 第 6 次即使令牌正确也 resource_exhausted。
+    for _ in 0..5 {
+        let err = client
+            .register(proto::RegisterCollectorRequest {
+                protocol_version: "2".to_string(),
+                registration_token: "wrong-token".to_string(),
+                csr_der: Vec::new(),
+            })
+            .await
+            .expect_err("错误令牌应被拒");
+        assert_eq!(err.code(), Code::Unauthenticated, "{err}");
+    }
+    let err = client
+        .register(proto::RegisterCollectorRequest {
+            protocol_version: "2".to_string(),
+            registration_token: secure.registration_token.clone(),
+            csr_der: Vec::new(),
+        })
+        .await
+        .expect_err("节流期应拒");
+    assert_eq!(err.code(), Code::ResourceExhausted, "{err}");
+    assert!(err.message().contains("too many failed"), "{err}");
 }

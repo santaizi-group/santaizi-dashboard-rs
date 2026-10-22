@@ -170,6 +170,17 @@ impl IngestHandler {
             let received_at_nanos = crate::util::time::now_nanos();
             match request.body {
                 Some(proto::telemetry_request::Body::Batch(batch)) => {
+                    // 批次内每条事件都必须挂在已认证身份上：`hello` 的凭证只证明
+                    // 「这个连接属于 node X」，不证明「这批数据属于 node X」。
+                    // 少了这道校验，任一探针凭据都能伪造任意节点的事件
+                    // （RealtimeSnapshot 分支一直有同款校验，Batch 漏了）。
+                    for record in &batch.records {
+                        if let Some(proto::telemetry_record::Record::Event(event)) = &record.record
+                            && event.node_uuid != node_uuid
+                        {
+                            return Err(Status::permission_denied("telemetry batch node mismatch"));
+                        }
+                    }
                     let result = self.enqueue_ingest(batch, received_at_nanos).await?;
                     for event in &result.fresh_events {
                         self.apply_event_runtime(event, received_at_nanos).await?;

@@ -1,8 +1,11 @@
 //! Collector 从端 Sync 循环集成测试：真实主端 + 真实从端 Runtime。
 //!
-//! 覆盖两条路径：mTLS 下首轮注册成功但同步流因缺客户端证书被拒（Go 重连
-//! 语义：下一轮带证书即通），以及明文 + 注册令牌下首轮即完成注册与同步；
+//! 覆盖：mTLS 下首轮注册成功但同步流因缺客户端证书被拒（Go 重连语义：
+//! 下一轮带证书即通）、明文主端一律拒绝注册、重启后从授权缓存恢复 UUID。
 //! 并断言从端授权缓存 / 客户端 PKI 落盘与主端运行态上线。
+//!
+//! `Register` / `Enroll` 与 Go 一致要求加密通道：注册令牌与 `client_secret`
+//! 是长期共享秘密，不得明文上网。
 
 mod common;
 
@@ -127,38 +130,31 @@ async fn collector_registers_and_syncs_over_mtls() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// B7：`Register` 与 Go 的 `Enroll` 同一准入门槛——长期共享秘密（注册令牌）
+/// 不得明文上网。明文主端上一律拒绝，且错误可操作（指明要开 TLS）。
+///
+/// 与探针侧对称：`Enroll` 早就这么做了，`docs/configuration.md` 的迁移顺序
+/// 也是「先开 `grpc_tls.enabled`，再 Enroll / Register」。
 #[tokio::test]
-async fn collector_registers_over_plaintext_with_token() {
+async fn collector_registration_is_refused_over_plaintext() {
     let fixture = setup_primary("collector-sync-plain", false).await;
-    let (runtime, db, dir) =
+    let (runtime, _db, dir) =
         setup_collector(&fixture, "collector-sync-plain-edge", false, false).await;
 
-    // 明文 + 注册令牌：首轮即完成注册并保持同步（超时未返回即为正常运行）。
-    let first = tokio::time::timeout(Duration::from_secs(2), runtime.sync_once()).await;
-    match first {
-        Err(_) => {}
-        Ok(Ok(())) => panic!("sync stream closed unexpectedly"),
-        Ok(Err(err)) => panic!("first sync round failed: {err:#}"),
-    }
-
-    // 首轮数据已落库；再起循环验证取消路径。
-    let cached = wait_until(Duration::from_secs(5), || collector_cache_row(&db)).await;
-    assert_eq!(
-        cached,
-        Some((COLLECTOR_UUID.to_string(), 1, "observer".to_string()))
+    let err = tokio::time::timeout(Duration::from_secs(5), runtime.sync_once())
+        .await
+        .expect("sync round should not hang")
+        .expect_err("plaintext registration must be refused");
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("requires TLS"),
+        "拒绝原因应可操作，实际：{message}"
     );
-    for name in ["client.key", "client.crt", "agent-ca.crt"] {
-        assert!(
-            dir.join("pki").join(name).exists(),
-            "missing pki file {name}"
-        );
-    }
-    let status = wait_until(Duration::from_secs(5), || primary_online(&fixture.db)).await;
-    assert_eq!(status, Some("online".to_string()));
 
-    let worker = runtime.start();
+    // 未注册 ⇒ 授权缓存仍为空（没有半注册状态）。
+    assert!(collector_cache_row(&_db).is_none());
+
     runtime.cancel_token().cancel();
-    assert!(worker.await.unwrap().is_ok());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

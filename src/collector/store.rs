@@ -475,7 +475,7 @@ pub fn ingest(
                         event.event_id,
                         event.node_uuid,
                         event.session_id,
-                        event.sequence as i64,
+                        event.sequence,
                         event.event_type,
                         event.priority,
                         event.collected_at_unix_nano,
@@ -525,8 +525,8 @@ pub fn ingest(
                         gap.gap_id,
                         gap.node_uuid,
                         gap.session_id,
-                        gap.start_sequence as i64,
-                        gap.end_sequence as i64,
+                        gap.start_sequence,
+                        gap.end_sequence,
                         gap.reason,
                         encoded,
                         gap.created_at_unix_nano,
@@ -637,12 +637,7 @@ fn advance_cursor(
     )?;
     let present = stmt
         .query_map(
-            rusqlite::params![
-                node_uuid,
-                session_id,
-                ack_through as i64,
-                max_sequence as i64
-            ],
+            rusqlite::params![node_uuid, session_id, ack_through, max_sequence],
             |row| row.get::<_, i64>(0).map(|value| value.max(0) as u64),
         )?
         .collect::<Result<Vec<u64>, _>>()?;
@@ -654,12 +649,7 @@ fn advance_cursor(
     )?;
     let gaps = stmt
         .query_map(
-            rusqlite::params![
-                node_uuid,
-                session_id,
-                ack_through as i64,
-                max_sequence as i64
-            ],
+            rusqlite::params![node_uuid, session_id, ack_through, max_sequence],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?.max(0) as u64,
@@ -692,7 +682,7 @@ fn advance_cursor(
          VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP) \
          ON CONFLICT (node_uuid, session_id) DO UPDATE SET \
          ack_through = excluded.ack_through, updated_at = excluded.updated_at",
-        rusqlite::params![node_uuid, session_id, ack_through as i64],
+        rusqlite::params![node_uuid, session_id, ack_through],
     )?;
     Ok(ack_through)
 }

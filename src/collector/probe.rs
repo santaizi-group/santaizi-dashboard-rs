@@ -83,13 +83,19 @@ impl ProbeScheduler {
         self.wake.notify_one();
     }
 
+    /// 单次上报的样本数上限：与主端 `telemetry.probe_batch_size` 默认值对齐。
+    /// 探测目标多时一轮会积出远超一批的样本，若不设上限，主端那一侧就要为一个
+    /// 完全由对端决定的巨型批次分配内存并开长事务。超额的留在队列里下一批再走。
+    pub const MAX_BATCH: usize = 512;
+
     pub fn take_samples(&self) -> Option<proto::ProbeSampleBatch> {
         let mut pending = self.pending.lock().unwrap_or_else(|err| err.into_inner());
         if pending.is_empty() {
             return None;
         }
+        let take = pending.len().min(Self::MAX_BATCH);
         Some(proto::ProbeSampleBatch {
-            samples: std::mem::take(&mut *pending),
+            samples: pending.drain(..take).collect(),
         })
     }
 
@@ -568,6 +574,60 @@ fn assign_route(sample: &mut proto::ProbeSample, protocol: &str, trace: proto::P
         sample.route_tcp = Some(trace);
     } else {
         sample.route_icmp = Some(trace);
+    }
+}
+
+#[cfg(test)]
+mod batch_cap_tests {
+    use super::*;
+
+    fn sample(server_id: u64) -> proto::ProbeSample {
+        proto::ProbeSample {
+            server_id,
+            sampled_at_unix_nano: 1,
+            ..Default::default()
+        }
+    }
+
+    /// 单批上报必须设上限：探测目标多时一轮能积出任意多的样本，
+    /// 不设上限等于让主端为一个完全由对端决定的巨型批次开长事务。
+    /// 超额的留在队列里，下一批再走——不得丢。
+    #[test]
+    fn take_samples_caps_the_batch_and_keeps_the_rest() {
+        let engine = ProbeScheduler::new();
+        let total = ProbeScheduler::MAX_BATCH * 2 + 7;
+        {
+            let mut pending = engine.pending.lock().unwrap_or_else(|err| err.into_inner());
+            for id in 0..total {
+                pending.push(sample(id as u64));
+            }
+        }
+        let first = engine.take_samples().expect("first batch");
+        assert_eq!(first.samples.len(), ProbeScheduler::MAX_BATCH);
+        let second = engine.take_samples().expect("second batch");
+        assert_eq!(second.samples.len(), ProbeScheduler::MAX_BATCH);
+        let third = engine.take_samples().expect("third batch");
+        assert_eq!(third.samples.len(), 7);
+        assert!(engine.take_samples().is_none(), "取空后不得再产空批");
+    }
+
+    /// 空队列不得产出空批次（主端会把空批当 InvalidArgument）。
+    #[test]
+    fn take_samples_on_empty_queue_returns_none() {
+        let engine = ProbeScheduler::new();
+        assert!(engine.take_samples().is_none());
+    }
+
+    /// 从端上限必须与主端 `telemetry.probe_batch_size` 默认值一致：
+    /// 默认配置下自家从端永远不被自己的上限挡住，上限只拦异常批次。
+    #[test]
+    fn max_batch_matches_the_primary_default() {
+        let conf = crate::config::Config::default();
+        assert_eq!(
+            ProbeScheduler::MAX_BATCH,
+            conf.telemetry.probe_batch_size,
+            "从端探测批次上限与主端默认值漂移了"
+        );
     }
 }
 

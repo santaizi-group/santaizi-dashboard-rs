@@ -474,18 +474,9 @@ async fn probe_collector_rejects_agent_ingest() {
 #[tokio::test]
 async fn agent_ingest_wakes_replication() {
     let fixture = setup_primary("agent-wake", false).await;
-    // 明文 fixture 不过 enroll：绑定直写数据库。
-    fixture
-        .db
-        .write(|tx| {
-            tx.execute(
-                "INSERT INTO server_node_bindings (server_id, node_uuid, valid_from, valid_to, current, reason) \
-                 VALUES (?1, ?2, 0, NULL, 1, 'test')",
-                rusqlite::params![SERVER_ID, node()],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    // 明文 fixture 不过 enroll：绑定 + 指派直写数据库。
+    // 指派不能省——主端复制路径按它校验节点归属。
+    common::bind_node_with_assignment(&fixture, &node(), COLLECTOR_UUID);
     let (runtime, db, dir) = setup_collector_runtime(
         &fixture,
         "agent-wake-edge",

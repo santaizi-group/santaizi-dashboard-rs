@@ -180,6 +180,31 @@ pub async fn setup_primary_with(
     }
 }
 
+/// 绑定节点并生成对 `observer_id` 的在效指派。
+///
+/// 明文 fixture 不过 enroll（enroll 要求 TLS），但主端的归属校验读的是
+/// `observer_assignments`——只插 `server_node_bindings` 会让复制/摄入被
+/// 「节点未指派给该 collector」正当拒绝，与生产不变量不符。
+pub fn bind_node_with_assignment(fixture: &PrimaryFixture, node_uuid: &[u8], observer_id: &str) {
+    let now = santaizi_dashboard::util::time::now_nanos();
+    fixture
+        .db
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO server_node_bindings (server_id, node_uuid, valid_from, valid_to, current, reason) \
+                 VALUES (?1, ?2, 0, NULL, 1, 'test')",
+                rusqlite::params![SERVER_ID, node_uuid],
+            )?;
+            tx.execute(
+                "INSERT INTO observer_assignments (node_uuid, observer_id, valid_from, valid_to, config_version, generation, created_at) \
+                 VALUES (?1, ?2, ?3, 0, '1', 1, CURRENT_TIMESTAMP)",
+                rusqlite::params![node_uuid, observer_id, now.to_string()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
 /// 写一个带有效会话令牌的用户，返回令牌明文。
 pub fn insert_user(db: &santaizi_dashboard::db::Db, login: &str, super_admin: bool) -> String {
     let token = format!("session-token-{login}");

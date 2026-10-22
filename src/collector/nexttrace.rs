@@ -66,7 +66,30 @@ pub fn resolve_binary(configured: &str) -> Result<PathBuf, String> {
     Err(NOT_FOUND.to_string())
 }
 
-pub fn args(opts: &TraceOpts) -> Vec<String> {
+/// 目标名长度上限：与探测目标入库上限一致，避免把超长串塞进 argv。
+const MAX_TARGET_LEN: usize = 253;
+
+/// 目标名不得被 nexttrace 当成选项。
+///
+/// 目标来自探测任务（可由管理员经探测目标配置下发），若允许以 `-` 开头，
+/// `nexttrace --json ... -x` 就会把 `-x` 当 flag 解释——轻则探测失败，
+/// 重则借 nexttrace 自己的选项改变行为。这里在 spawn 前拦掉，而不是指望
+/// nexttrace 支持 `--`（各版本行为不一）。
+fn validate_target(target: &str) -> Result<&str, String> {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return Err("empty target".to_string());
+    }
+    if trimmed.len() > MAX_TARGET_LEN {
+        return Err(format!("target too long: {} bytes", trimmed.len()));
+    }
+    if trimmed.starts_with('-') {
+        return Err(format!("invalid target: {trimmed}"));
+    }
+    Ok(trimmed)
+}
+
+pub fn args(opts: &TraceOpts) -> Result<Vec<String>, String> {
     let mut args = vec![
         "--json".to_string(),
         "-M".to_string(),
@@ -89,16 +112,14 @@ pub fn args(opts: &TraceOpts) -> Vec<String> {
     } else if opts.ipv4 && !opts.ipv6 {
         args.push("--ipv4".to_string());
     }
-    args.push(opts.target.clone());
-    args
+    args.push(validate_target(&opts.target)?.to_string());
+    Ok(args)
 }
 
 pub async fn run(bin: &Path, opts: &TraceOpts) -> Result<TraceResult, String> {
-    if opts.target.trim().is_empty() {
-        return Err("empty target".to_string());
-    }
+    validate_target(&opts.target)?;
     let mut command = tokio::process::Command::new(bin);
-    command.args(args(opts)).kill_on_drop(true);
+    command.args(args(opts)?).kill_on_drop(true);
     let output = match tokio::time::timeout(EXEC_TIMEOUT, command.output()).await {
         Ok(Ok(output)) => output,
         Ok(Err(err)) => return Err(compact_error(&err.to_string())),
@@ -487,6 +508,55 @@ fn trim_ascii(raw: &[u8]) -> &[u8] {
         .map(|index| index + 1)
         .unwrap_or(start);
     &raw[start..end]
+}
+
+#[cfg(test)]
+mod target_guard_tests {
+    use super::*;
+
+    fn opts(target: &str) -> TraceOpts {
+        TraceOpts {
+            target: target.to_string(),
+            tcp: false,
+            port: 0,
+            ipv4: true,
+            ipv6: false,
+        }
+    }
+
+    /// 目标名以 `-` 开头会被 nexttrace 当成选项，必须在 spawn 前拦掉。
+    #[test]
+    fn dash_prefixed_target_is_rejected() {
+        for target in ["-x", "--help", "--json", "-"] {
+            let err = args(&opts(target)).unwrap_err();
+            assert!(
+                err.contains("invalid target"),
+                "target={target} 应被拒，实际：{err}"
+            );
+        }
+    }
+
+    /// 正常目标照旧放行，且仍是 argv 最后一项。
+    #[test]
+    fn ordinary_target_is_passed_through() {
+        let built = args(&opts(" 1.1.1.1 ")).unwrap();
+        assert_eq!(built.last().map(String::as_str), Some("1.1.1.1"));
+        assert!(built.contains(&"--json".to_string()));
+    }
+
+    #[test]
+    fn empty_and_oversized_targets_are_rejected() {
+        assert!(args(&opts("   ")).unwrap_err().contains("empty target"));
+        let long = "a".repeat(MAX_TARGET_LEN + 1);
+        assert!(args(&opts(&long)).unwrap_err().contains("too long"));
+    }
+
+    /// `run` 入口同样先校验，不至于把坏目标交给子进程。
+    #[tokio::test]
+    async fn run_rejects_dash_prefixed_target_without_spawning() {
+        let err = run(Path::new("/bin/true"), &opts("-x")).await.unwrap_err();
+        assert!(err.contains("invalid target"), "实际：{err}");
+    }
 }
 
 #[cfg(test)]

@@ -126,7 +126,9 @@ async fn apply_geoip_country_code(
 fn legacy_node_uuid(server_id: i64) -> Vec<u8> {
     let mut node = vec![0u8; 16];
     node[0] = 0x76; // 'v'：标记 v1 派生节点
-    node[8..16].copy_from_slice(&(server_id as u64).to_be_bytes());
+    // 负 id 在入口已被拦；显式转换而非 `as u64`，语义不含糊。
+    let id = u64::try_from(server_id).unwrap_or(0);
+    node[8..16].copy_from_slice(&id.to_be_bytes());
     node
 }
 
@@ -140,14 +142,24 @@ impl LegacyHandler {
         Self { state }
     }
 
-    fn lookup_country_code(&self, ip: &str) -> String {
-        let parsed = std::net::ToSocketAddrs::to_socket_addrs(&format!("{ip}:0"))
-            .ok()
-            .and_then(|mut addrs| addrs.next())
-            .map(|addr| addr.ip());
+    /// GeoIP 查询：先试字面量 IP 快路径（无需 DNS），只有域名才落到解析，
+    /// 且放到 `spawn_blocking`——`to_socket_addrs` 是同步阻塞调用，直接放在
+    /// tonic 的 async handler 里会卡住整个 worker。
+    async fn lookup_country_code(&self, ip: &str) -> String {
+        let ip = ip.trim().to_string();
+        if let Ok(addr) = ip.parse::<std::net::IpAddr>() {
+            return crate::geoip::lookup_code(addr);
+        }
+        let parsed = tokio::task::spawn_blocking(move || {
+            std::net::ToSocketAddrs::to_socket_addrs(&(ip.as_str(), 0))
+                .ok()
+                .and_then(|mut addrs| addrs.next())
+                .map(|addr| addr.ip())
+        })
+        .await;
         match parsed {
-            Some(addr) => crate::geoip::lookup_code(addr),
-            None => crate::geoip::lookup_code_from_addr(Some(ip)),
+            Ok(Some(addr)) => crate::geoip::lookup_code(addr),
+            _ => String::new(),
         }
     }
 }
@@ -174,7 +186,7 @@ impl proto::santaizi_service_server::SantaiziService for LegacyHandler {
         let server_id = server_id_from_metadata(&self.state, request.metadata())?;
         let mut host_payload = request.into_inner();
         if host_payload.country_code.trim().is_empty() && !host_payload.ip.trim().is_empty() {
-            host_payload.country_code = self.lookup_country_code(&host_payload.ip);
+            host_payload.country_code = self.lookup_country_code(&host_payload.ip).await;
         }
         let now_nanos = util_time::now_nanos();
         apply_report(&self.state, server_id, now_nanos, None, Some(host_payload)).await?;
@@ -188,7 +200,7 @@ impl proto::santaizi_service_server::SantaiziService for LegacyHandler {
     ) -> StdResult<Response<proto::GeoIp>, Status> {
         let server_id = server_id_from_metadata(&self.state, request.metadata())?;
         let mut geo = request.into_inner();
-        let country_code = self.lookup_country_code(&geo.ip);
+        let country_code = self.lookup_country_code(&geo.ip).await;
         apply_geoip_country_code(&self.state, server_id, &geo.ip, &country_code).await?;
         geo.country_code = country_code;
         Ok(Response::new(geo))

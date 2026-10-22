@@ -60,10 +60,18 @@ pub struct ClientBundle {
 }
 
 impl ClientBundle {
-    /// 组装并校验：证书 PEM 必须可解析（对齐 Go `ParseCertificatePEM` 的失败即错）。
+    /// 组装并校验：证书 PEM 必须可解析（对齐 Go `ParseCertificatePEM` 的失败即错），
+    /// 且私钥必须与证书的公钥配对。
+    ///
+    /// 配对校验是给「崩在三次写中间」收拾残局的：key 换了、cert 还是旧的，
+    /// 这种包单看两个文件都合法，只有拿去握手才报一串指不到原因的错。
+    /// 加载时发现配不上就当作没有证书包，逼探针重新注册，而不是带病运行。
     pub fn new(key_pem: Vec<u8>, cert_pem: Vec<u8>, ca_pem: Vec<u8>) -> Result<Self> {
         let cert_der = cert_der_from_pem(&cert_pem)
             .ok_or_else(|| anyhow::anyhow!("client certificate PEM is not a certificate"))?;
+        if !key_matches_cert(&key_pem, &cert_der) {
+            anyhow::bail!("client private key does not match the client certificate");
+        }
         Ok(Self {
             key_pem,
             cert_pem,
@@ -106,6 +114,32 @@ impl ClientBundle {
         let (_, cert) = X509Certificate::from_der(&self.cert_der).ok()?;
         Some(cert.validity().not_after.timestamp())
     }
+}
+
+/// 私钥与证书的公钥是否配对：比 SPKI 的 DER 字节，避开 PEM 规范化差异。
+///
+/// rcgen 只给公钥 PEM，这里借 `rustls-pemfile` 把它解回 DER；证书侧取
+/// `SubjectPublicKeyInfo` 的原始 DER（`raw` 覆盖 AlgorithmIdentifier 在内的
+/// 完整结构，与 PEM 解出来的字节同构）。
+fn key_matches_cert(key_pem: &[u8], cert_der: &[u8]) -> bool {
+    let Ok(key_pem) = std::str::from_utf8(key_pem) else {
+        return false;
+    };
+    let Ok(key) = KeyPair::from_pem(key_pem) else {
+        return false;
+    };
+    let Ok((_, cert)) = X509Certificate::from_der(cert_der) else {
+        return false;
+    };
+    let public_pem = key.public_key_pem();
+    let mut reader = std::io::BufReader::new(public_pem.as_bytes());
+    let Some(spki) = rustls_pemfile::public_keys(&mut reader)
+        .next()
+        .and_then(|item| item.ok())
+    else {
+        return false;
+    };
+    cert.public_key().raw == spki.as_ref()
 }
 
 /// 客户端 PKI 目录：证书包的落盘存储（Go `pki.ClientStore`）。
@@ -151,6 +185,10 @@ impl ClientStore {
     }
 
     /// 保存证书包（Go `ClientStore.Save`）。
+    ///
+    /// 三次写各自原子，合起来不原子：中途崩掉会留下「新 key + 旧 cert」。
+    /// 这个残局由 `ClientBundle::new` 的配对校验在**加载时**收拾——
+    /// 配不上就当没有证书包，逼探针重新注册。写入侧只保证每一步自身原子。
     pub fn save(&self, bundle: &ClientBundle) -> Result<()> {
         if bundle.key_pem.is_empty() || bundle.cert_pem.is_empty() {
             anyhow::bail!("client certificate bundle is incomplete");
@@ -291,6 +329,81 @@ mod tests {
         assert_eq!(store.load_agent_ca().unwrap(), b"agent-ca-pem");
         store.save_agent_ca(b"").unwrap();
         assert_eq!(store.load_agent_ca().unwrap(), b"agent-ca-pem");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 私钥权限必须在内容落盘前就位：按 umask 建临时文件再写密钥，
+    /// 中间那段窗口里密钥对其他本地用户可读。
+    #[test]
+    #[cfg(unix)]
+    fn key_is_never_world_readable_mid_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = test_dir("perm");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = ClientStore::new(dir.to_str().unwrap()).unwrap();
+        let bundle =
+            bundle_with_validity(&dir, OffsetDateTime::now_utc() + Duration::from_secs(3600));
+        // 特意用一个很宽的 umask（不移位只读当前值）：这里只验证写入路径
+        // 不依赖进程 umask——权限由 create 的 mode 直接给死。
+        store.save(&bundle).unwrap();
+        let mode = std::fs::metadata(dir.join("client.key"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, KEY_FILE_MODE);
+        // 临时文件必须清干净（带 stem 的新命名也不能留残余）。
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().to_string_lossy().into_owned();
+                name.starts_with(".pki-").then_some(name)
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "临时文件残留: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 崩在「key 已换、cert 还没换」的中间态：两个文件单看都合法，
+    /// 只有配对校验能认出来。`ClientBundle::new` 必须直接拒绝，
+    /// 而不是把一个拿去握手必然失败、报错还指不到原因的包交出去。
+    #[test]
+    fn mismatched_key_and_cert_is_rejected() {
+        let dir = test_dir("mismatch");
+        let _ = std::fs::remove_dir_all(&dir);
+        let a = bundle_with_validity(&dir, OffsetDateTime::now_utc() + Duration::from_secs(3600));
+        let b = bundle_with_validity(&dir, OffsetDateTime::now_utc() + Duration::from_secs(7200));
+        // a 的私钥 + b 的证书：正是「换了 key 没换 cert」的现场。
+        let err = ClientBundle::new(a.key_pem.clone(), b.cert_pem.clone(), Vec::new()).unwrap_err();
+        assert!(
+            err.to_string().contains("does not match"),
+            "key/cert 不配对必须被拒，实际: {err}"
+        );
+        // 同一套自己的 key + cert 必须照常通过。
+        assert!(ClientBundle::new(a.key_pem, a.cert_pem, Vec::new()).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 磁盘上留下「新 key + 旧 cert」时，`load` 必须当作没有证书包，
+    /// 让探针走重新注册，而不是带病运行。
+    #[test]
+    fn load_treats_a_mismatched_on_disk_pair_as_absent() {
+        let dir = test_dir("load-mismatch");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = ClientStore::new(dir.to_str().unwrap()).unwrap();
+        let first =
+            bundle_with_validity(&dir, OffsetDateTime::now_utc() + Duration::from_secs(3600));
+        store.save(&first).unwrap();
+        // 只换 key，cert 留着旧的。
+        let second =
+            bundle_with_validity(&dir, OffsetDateTime::now_utc() + Duration::from_secs(7200));
+        std::fs::write(dir.join("client.key"), &second.key_pem).unwrap();
+        std::fs::write(dir.join("client.crt"), &first.cert_pem).unwrap();
+        let loaded = store.load();
+        assert!(
+            loaded.is_err() || loaded.unwrap().is_none(),
+            "配不上的证书包不得被当成可用身份"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

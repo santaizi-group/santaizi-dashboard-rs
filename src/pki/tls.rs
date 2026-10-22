@@ -39,10 +39,17 @@ pub fn new_self_signed_server_certificate(
     params.is_ca = IsCa::ExplicitNoCa;
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-    params.subject_alt_names = names
-        .iter()
-        .map(|name| SanType::DnsName(Ia5String::try_from(name.clone()).expect("dns name")))
-        .collect();
+    // SAN 名来自配置：`Ia5String` 只接受 ASCII，非 ASCII 配置项会让
+    // `expect` 直接 panic 把整个进程带走。这里逐个校验，把问题报成可操作的错误。
+    // SAN 名来自配置：`Ia5String` 只接受 ASCII，非 ASCII 配置项会让
+    // `expect` 直接 panic 把整个进程带走。这里逐个校验，把问题报成可操作的错误。
+    let mut subject_alt_names = Vec::with_capacity(names.len());
+    for name in &names {
+        let san = Ia5String::try_from(name.clone())
+            .map_err(|_| anyhow::anyhow!("server certificate DNS name is not ASCII: {name:?}"))?;
+        subject_alt_names.push(SanType::DnsName(san));
+    }
+    params.subject_alt_names = subject_alt_names;
     params.not_before = now - NOT_BEFORE_SKEW;
     params.not_after = now + validity;
     let cert = params
@@ -95,5 +102,34 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["localhost"]);
+    }
+
+    /// 非 ASCII 的 SAN 名必须报错，不能让 `expect` 把进程带走。
+    /// 配置里出现中文域名/误粘贴的字符时，启动应当失败并说清原因。
+    #[test]
+    fn non_ascii_dns_name_is_reported_not_panicked() {
+        let err = new_self_signed_server_certificate(
+            &["三太子.example".to_string()],
+            OffsetDateTime::now_utc(),
+            Duration::from_secs(60),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("not ASCII"),
+            "非 ASCII SAN 名必须报可操作的错误，实际: {err}"
+        );
+    }
+
+    /// 空名单有默认值（localhost），不能因此报错。
+    #[test]
+    fn empty_dns_name_list_falls_back_to_localhost() {
+        let (cert_pem, _) = new_self_signed_server_certificate(
+            &[],
+            OffsetDateTime::now_utc(),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let certs = load_certificate_chain(&cert_pem).unwrap();
+        assert_eq!(certs.len(), 1);
     }
 }

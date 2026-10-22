@@ -183,6 +183,17 @@ impl ControlHandler {
         let server_id = self
             .authenticate_control(peer.as_ref(), &hello, client_secret.as_deref())
             .await?;
+        // 在线节点的 Control 流还在，别的节点不许重绑同一个 server：
+        // 对齐 Go `enroll.go:66` 的 FailedPrecondition 分支。
+        if self
+            .state
+            .monitor()
+            .session_node_conflict(server_id, &hello.node_uuid)
+        {
+            return Err(Status::failed_precondition(format!(
+                "server {server_id} has a live control session from another node"
+            )));
+        }
         let (credential, assignment) = self.establish_session(server_id, &hello).await?;
         // 先凭证后指派：探针拿到凭证才能向主端 Ingest 上报。
         send_control_response(
@@ -209,13 +220,19 @@ impl ControlHandler {
             .clone()
             .map(|caps| caps.enabled)
             .unwrap_or_default();
-        self.state
-            .monitor()
-            .register_session(server_id, capabilities, tx.clone());
+        self.state.monitor().register_session(
+            server_id,
+            hello.node_uuid.clone(),
+            capabilities,
+            tx.clone(),
+        );
+        let node_uuid = hello.node_uuid.clone();
         let outcome = self
             .control_loop(server_id, hello, stream, tx.clone())
             .await;
-        self.state.monitor().unregister_session(server_id);
+        self.state
+            .monitor()
+            .unregister_session(server_id, &node_uuid);
         outcome
     }
 

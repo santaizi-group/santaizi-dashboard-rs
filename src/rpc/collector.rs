@@ -117,15 +117,23 @@ impl CollectorHandler {
         tx: &tokio::sync::mpsc::Sender<StdResult<proto::CollectorSyncResponse, Status>>,
         collector: &CollectorRow,
     ) -> StdResult<(), Status> {
-        let assignments = if collector.is_probe() {
-            Vec::new()
+        let (assignments, revoked) = if collector.is_probe() {
+            (Vec::new(), Vec::new())
         } else {
             let observer_id = collector.collector_uuid.clone();
-            blocking_read(self.state.db(), move |conn| {
-                bindings::assignments_for_observer(conn, &observer_id)
-            })
-            .await
-            .map_err(|err| Status::internal(err.to_string()))?
+            let observer_for_revoke = observer_id.clone();
+            let (assignments, revoked) = tokio::join!(
+                blocking_read(self.state.db(), move |conn| {
+                    bindings::assignments_for_observer(conn, &observer_id)
+                }),
+                blocking_read(self.state.db(), move |conn| {
+                    bindings::revoked_node_uuids_for_observer(conn, &observer_for_revoke)
+                }),
+            );
+            (
+                assignments.map_err(|err| Status::internal(err.to_string()))?,
+                revoked.map_err(|err| Status::internal(err.to_string()))?,
+            )
         };
         let targets = if collector.is_probe() {
             let row = collector.clone();
@@ -141,7 +149,9 @@ impl CollectorHandler {
             config_version: collector.config_version,
             primary_public_key: self.state.signer().public_key(),
             key_id: self.state.signer().key_id(),
-            revoked_node_uuids: Vec::new(),
+            // 已终结的绑定节点：从端据此把吊销缓存填实，`IsNodeAuthorized`
+            // 的吊销分支才不是死代码（此前恒为空表）。
+            revoked_node_uuids: revoked,
             assignments: assignments
                 .into_iter()
                 .map(|row| proto::NodeAssignment {
@@ -222,6 +232,14 @@ impl CollectorHandler {
         batch: proto::ProbeSampleBatch,
         tx: &tokio::sync::mpsc::Sender<StdResult<proto::CollectorSyncResponse, Status>>,
     ) -> StdResult<(), Status> {
+        // 探测样本批次大小同样由对端决定，不设上限时一次超大批次就能把
+        // 主端探测写入拖成一个超长事务。与 Ingest / Replicate 同一处置。
+        let limit = self.state.conf().telemetry.probe_batch_size;
+        if limit > 0 && batch.samples.len() > limit {
+            return Err(Status::resource_exhausted(format!(
+                "probe batch exceeds limit {limit}"
+            )));
+        }
         let collector = collector.clone();
         let now_nanos = crate::util::time::now_nanos();
         let notices = blocking_write(self.state.db(), move |conn| {
@@ -292,6 +310,30 @@ impl CollectorHandler {
                     "replication collector identity mismatch",
                 ));
             }
+            // 批次头绑定身份只证明「这条流是谁开的」；事件里的 node_uuid 仍可任填。
+            // 逐个比对在效指派，否则一条 collector 凭据就能伪报任意节点。
+            let observer_id = collector.collector_uuid.clone();
+            let assigned = blocking_read(self.state.db(), move |conn| {
+                bindings::assigned_node_uuids(conn, &observer_id)
+            })
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?;
+            for event in &batch.events {
+                if !assigned.contains(&event.node_uuid) {
+                    return Err(Status::permission_denied(
+                        "replication node is not assigned to this collector",
+                    ));
+                }
+            }
+            // 批次上限：复制流的批次大小完全由对端决定，不设上限时一个超大批次
+            // 既能撑爆主端内存，又把写事务拖到超过 busy_timeout。与 Ingest 的
+            // `ingest_batch_size` 同一处置（超限即 ResourceExhausted）。
+            let limit = self.state.conf().telemetry.replication_batch_size;
+            if limit > 0 && batch.events.len() > limit {
+                return Err(Status::resource_exhausted(format!(
+                    "replication batch exceeds limit {limit}"
+                )));
+            }
             let received_at_nanos = crate::util::time::now_nanos();
             let committed = {
                 let store = Arc::clone(&store);
@@ -303,21 +345,26 @@ impl CollectorHandler {
                 // store 的错误都是数据/事务层问题，Go 同样归 InvalidArgument。
                 .map_err(|err| Status::invalid_argument(err.to_string()))?
             };
-            for event in &batch.events {
-                if event.node_uuid.len() != 16 {
-                    continue;
-                }
-                let skew = (received_at_nanos - event.collected_at_unix_nano).abs();
-                if skew > store::CLOCK_SKEW_LIMIT_NANOS {
-                    continue;
-                }
-                let event = event.clone();
-                blocking_write(self.state.db(), move |tx| {
-                    runtime::apply_event_runtime(tx, &event, received_at_nanos, offline).map(|_| ())
+            // 运行态刷新合进一个事务：逐事件一开事务会把批次耗时放大到事件数倍，
+            // 在 busy_timeout 内排不上写锁。
+            let events: Vec<proto::TelemetryEvent> = batch
+                .events
+                .iter()
+                .filter(|event| {
+                    event.node_uuid.len() == 16
+                        && (received_at_nanos - event.collected_at_unix_nano).abs()
+                            <= store::CLOCK_SKEW_LIMIT_NANOS
                 })
-                .await
-                .map_err(|err| Status::internal(err.to_string()))?;
-            }
+                .cloned()
+                .collect();
+            blocking_write(self.state.db(), move |tx| {
+                for event in &events {
+                    runtime::apply_event_runtime(tx, event, received_at_nanos, offline)?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?;
             // 复制 RTT 时延样本：与 Go `UpsertCollectorRuntime` 尾部一致，
             // 仅 runtime 帧携带 RTT 时落桶。
             if let Some(runtime) = &batch.runtime {
@@ -403,6 +450,16 @@ fn to_u64(value: i64) -> u64 {
     value.clamp(0, i64::MAX) as u64
 }
 
+/// 注册失败节流键（进程级单桶）。
+const REGISTRATION_THROTTLE_KEY: &str = "collector-registration";
+
+/// 注册节流器：进程内唯一，随 handler 复用。
+fn registration_throttle() -> &'static crate::api::rate_limit::FailureThrottle {
+    static THROTTLE: std::sync::OnceLock<crate::api::rate_limit::FailureThrottle> =
+        std::sync::OnceLock::new();
+    THROTTLE.get_or_init(crate::api::rate_limit::FailureThrottle::default)
+}
+
 #[tonic::async_trait]
 impl proto::santaizi_collector_service_server::SantaiziCollectorService for CollectorHandler {
     type SyncStream = ReceiverStream<StdResult<proto::CollectorSyncResponse, Status>>;
@@ -412,9 +469,32 @@ impl proto::santaizi_collector_service_server::SantaiziCollectorService for Coll
         request: Request<proto::RegisterCollectorRequest>,
     ) -> StdResult<Response<proto::RegisterCollectorResponse>, Status> {
         let req = request.get_ref();
-        let collector = self
-            .find_collector_by_token(&req.registration_token)
-            .await?;
+        // 注册令牌是长期凭据，明文走非 TLS 连接等于把它直接暴露给同网段。
+        // 与 `Enroll` 同一准入门槛（见 `rpc/enroll.rs`）。
+        if !auth::connection_is_tls(request.extensions()) {
+            return Err(Status::unauthenticated(
+                "collector registration requires TLS",
+            ));
+        }
+        // 注册令牌是长期共享秘密：与查看密码同型，必须限流才不会被离线爆破。
+        // 进程级单桶——秘密只有一个，按 IP 计数对换 IP 爆破形同虚设。
+        let throttle = registration_throttle();
+        if let Err(retry) = throttle.check(REGISTRATION_THROTTLE_KEY) {
+            return Err(Status::resource_exhausted(format!(
+                "too many failed registration attempts; retry in {}s",
+                retry.seconds()
+            )));
+        }
+        let collector = match self.find_collector_by_token(&req.registration_token).await {
+            Ok(collector) => {
+                throttle.record_success(REGISTRATION_THROTTLE_KEY);
+                collector
+            }
+            Err(status) => {
+                throttle.record_failure(REGISTRATION_THROTTLE_KEY);
+                return Err(status);
+            }
+        };
         let mut response = proto::RegisterCollectorResponse {
             collector_uuid: collector.collector_uuid.clone(),
             primary_public_key: self.state.signer().public_key(),

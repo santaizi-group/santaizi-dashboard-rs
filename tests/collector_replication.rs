@@ -34,6 +34,11 @@ fn replication_session() -> Vec<u8> {
     vec![0x23; 16]
 }
 
+/// 未指派给夹具从端的节点：归属校验必须把它挡在门外。
+fn foreign_node() -> Vec<u8> {
+    vec![0x44; 16]
+}
+
 /// 出库里的合法 HOST 事件（event_id 由 node/session/sequence 派生）。
 fn outbox_event(sequence: u64) -> proto::TelemetryEvent {
     let event_id = Store::event_id(&node(), &replication_session(), sequence).expect("event id");
@@ -135,19 +140,72 @@ fn primary_observation_count(db: &db::Db, event_id: &[u8]) -> i64 {
     .unwrap()
 }
 
-/// 直接把节点绑到夹具服务器（明文 fixture 不过 enroll：enroll 要求 TLS）。
+/// 直接把节点绑到夹具从端（明文 fixture 不过 enroll：enroll 要求 TLS）。
+/// 同时补在效指派：主端复制路径按 `observer_assignments` 校验节点归属。
 fn bind_node(fixture: &PrimaryFixture) {
-    fixture
-        .db
-        .write(|tx| {
-            tx.execute(
-                "INSERT INTO server_node_bindings (server_id, node_uuid, valid_from, valid_to, current, reason) \
-                 VALUES (?1, ?2, 0, NULL, 1, 'enroll')",
-                rusqlite::params![SERVER_ID, node()],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    common::bind_node_with_assignment(fixture, &node(), COLLECTOR_UUID);
+}
+
+/// 复制批次上限：对端可以决定批次多大，主端必须能拦住。
+///
+/// 从端 `REPLICATION_BATCH_SIZE` = 512，与主端默认上限一致；这里把主端上限
+/// 压到 1，于是一个合法小批次也会被拒——用来验证上限真的生效，而不是装饰。
+#[tokio::test]
+async fn replication_batch_over_the_limit_is_rejected() {
+    let fixture = setup_primary_with("collector-repl-limit", false, |conf| {
+        conf.telemetry.replication_batch_size = 1;
+    })
+    .await;
+    bind_node(&fixture);
+    let (runtime, db, dir) = setup_collector_runtime(
+        &fixture,
+        "collector-repl-limit-edge",
+        false,
+        false,
+        None,
+        Some(observer_authorization(&fixture, &node())),
+        "",
+    )
+    .await;
+    let worker = runtime.start();
+    seed_outbox(&db);
+    // 再补一条：单条事件的批次刚好等于上限 1，两条才越界。
+    db.write(|tx| {
+        tx.execute(
+            "INSERT INTO collector_outboxes (record_type, payload, created_at) \
+             VALUES ('event', ?1, CURRENT_TIMESTAMP)",
+            [outbox_event(2).encode_to_vec()],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let event_id = Store::event_id(&node(), &replication_session(), 1).expect("event id");
+    let outcome = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match runtime.replication_once().await {
+                Err(err) if err.to_string().contains("exceeds limit") => return true,
+                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+                Ok(()) => return false,
+            }
+        }
+    })
+    .await;
+    assert_eq!(outcome, Ok(true), "超限批次必须被主端拒绝");
+    assert_eq!(
+        primary_event_count(&fixture.db, &event_id),
+        0,
+        "被拒的批次不得落库"
+    );
+    assert!(
+        outbox_pending(&db) > 0,
+        "被拒的批次不得确认，出库记录必须留着"
+    );
+    assert_eq!(replication_cursor(&db), Some(0), "被拒的批次不得推进游标");
+
+    runtime.cancel_token().cancel();
+    let _ = worker.await;
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// mTLS：带客户端证书的复制流；出库记录落主端，ack 后从端游标推进、出库清空。
@@ -204,7 +262,11 @@ async fn replication_flushes_outbox_over_mtls() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 明文：拿不出证书身份时复制流带 `collector_token`，主端按令牌识别。
+/// 拿不出证书身份时复制流带 `collector_token`，主端按令牌识别。
+///
+/// 传输是明文：复制流本身不要求 TLS（要求的是 `Register`/`Enroll` 这类
+/// 交换长期秘密的入口）。授权缓存预置，因此这一轮不触发注册——被测的
+/// 正是「无证书 ⇒ 令牌认证」这条分支。
 #[tokio::test]
 async fn replication_uses_token_over_plaintext() {
     let fixture = setup_primary("collector-repl-plain", false).await;
@@ -215,7 +277,7 @@ async fn replication_uses_token_over_plaintext() {
         false,
         false,
         None,
-        None,
+        Some(observer_authorization(&fixture, &node())),
         "",
     )
     .await;
@@ -245,13 +307,13 @@ async fn replication_uses_token_over_plaintext() {
 /// 未注册时 replication 循环报错但不 panic，注册成功后自行恢复。
 #[tokio::test]
 async fn replication_requires_registration_then_recovers() {
-    let fixture = setup_primary("collector-repl-late", false).await;
+    let fixture = setup_primary("collector-repl-late", true).await;
     bind_node(&fixture);
     let (runtime, db, dir) = setup_collector_runtime(
         &fixture,
         "collector-repl-late-edge",
-        false,
-        false,
+        true,
+        true,
         None,
         None,
         "",
@@ -412,5 +474,100 @@ async fn probe_collector_keeps_outbox() {
 
     runtime.cancel_token().cancel();
     assert!(worker.await.unwrap().is_ok());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// B8：批次头绑定身份只证明「这条流是谁开的」，事件里的 `node_uuid` 仍可任填。
+/// 主端必须按在效指派逐节点校验，否则一条 collector 凭据就能伪报任意节点。
+#[tokio::test]
+async fn replication_rejects_events_for_unassigned_nodes() {
+    let fixture = setup_primary("collector-repl-own", false).await;
+    // 只给 `node()` 建指派；`foreign_node()` 不在该从端名下。
+    bind_node(&fixture);
+    let (runtime, db, dir) = setup_collector_runtime(
+        &fixture,
+        "collector-repl-own-edge",
+        false,
+        false,
+        None,
+        Some(observer_authorization(&fixture, &node())),
+        "",
+    )
+    .await;
+    let worker = runtime.start();
+
+    // 出库换成「foreign 节点」的事件（event_id 仍按 node 派生，只改 node_uuid）。
+    db.write(|tx| {
+        tx.execute("DELETE FROM collector_outboxes", [])?;
+        let mut event = outbox_event(1);
+        event.node_uuid = foreign_node();
+        tx.execute(
+            "INSERT INTO collector_outboxes (record_type, payload, created_at) \
+             VALUES ('event', ?1, CURRENT_TIMESTAMP)",
+            [event.encode_to_vec()],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    // 直接驱动一次复制：注册后的首次调用应因归属不符而失败，而不是静默入库。
+    let foreign_event_id =
+        Store::event_id(&foreign_node(), &replication_session(), 1).expect("event id");
+    let outcome = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match runtime.replication_once().await {
+                Err(err) if err.to_string().contains("not assigned") => return true,
+                // 注册尚未完成时是另一类错误，重试到超时。
+                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+                Ok(()) => return false,
+            }
+        }
+    })
+    .await;
+    assert_eq!(outcome, Ok(true), "未指派给该从端的节点事件必须被主端拒绝");
+    assert_eq!(
+        primary_event_count(&fixture.db, &foreign_event_id),
+        0,
+        "被拒的事件不得落库"
+    );
+    assert_eq!(
+        outbox_pending(&db),
+        1,
+        "被拒的批次不得确认，出库记录必须留着"
+    );
+
+    runtime.cancel_token().cancel();
+    let _ = worker.await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 反向对照：指派名下的节点正常落地（证明上面拒的是归属，不是整条流）。
+#[tokio::test]
+async fn replication_accepts_events_for_assigned_nodes() {
+    let fixture = setup_primary("collector-repl-own-ok", false).await;
+    bind_node(&fixture);
+    let (runtime, db, dir) = setup_collector_runtime(
+        &fixture,
+        "collector-repl-own-ok-edge",
+        false,
+        false,
+        None,
+        Some(observer_authorization(&fixture, &node())),
+        "",
+    )
+    .await;
+    seed_outbox(&db);
+    let worker = runtime.start();
+
+    let event_id = Store::event_id(&node(), &replication_session(), 1).expect("event id");
+    let count = wait_until(Duration::from_secs(10), || {
+        let count = primary_event_count(&fixture.db, &event_id);
+        (count > 0).then_some(count)
+    })
+    .await;
+    assert_eq!(count, Some(1), "指派名下的节点事件应正常复制");
+
+    runtime.cancel_token().cancel();
+    let _ = worker.await;
     let _ = std::fs::remove_dir_all(&dir);
 }
