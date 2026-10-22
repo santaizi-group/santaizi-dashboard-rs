@@ -89,6 +89,25 @@ pub fn sqlite_to_unix_nanos(text: &str) -> Option<i64> {
     Some(secs * 1_000_000_000 + nanos)
 }
 
+/// 把任意本仓写出的时间文本归一成 `YYYY-MM-DD HH:MM:SS`（UTC，无偏移后缀）。
+///
+/// 用于比较两侧：`unix_nanos_to_sqlite` 产 `…+00:00`，`CURRENT_TIMESTAMP` 产
+/// 无后缀串。同秒内无后缀串恒「小于」带后缀串（字典序），直接混比会漏掉
+/// 窗口边界那一秒的行。
+pub fn sqlite_to_datetime_text(text: &str) -> String {
+    match sqlite_to_unix_nanos(text) {
+        Some(nanos) => {
+            let secs = nanos.div_euclid(1_000_000_000);
+            let civil = civil_from_secs(secs);
+            format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                civil.0, civil.1, civil.2, civil.3, civil.4, civil.5
+            )
+        }
+        None => text.trim().to_string(),
+    }
+}
+
 fn split_nanos(nanos: i64) -> (i64, i32) {
     let secs = nanos.div_euclid(1_000_000_000);
     let nsec = nanos.rem_euclid(1_000_000_000);
@@ -179,6 +198,33 @@ mod tests {
         let text = unix_nanos_to_sqlite(nanos);
         assert_eq!(text, "2026-10-15 13:40:00+00:00");
         assert_eq!(sqlite_to_unix_nanos(&text), Some(nanos));
+    }
+
+    #[test]
+    fn datetime_text_normalizes_both_formats() {
+        // 两侧同秒：无后缀串字典序恒「小于」带后缀串，混比会漏边界行。
+        let nanos = 1_792_071_600_i64 * 1_000_000_000;
+        assert_eq!(
+            sqlite_to_datetime_text(&unix_nanos_to_sqlite(nanos)),
+            "2026-10-15 13:40:00"
+        );
+        assert_eq!(
+            sqlite_to_datetime_text("2026-10-15 13:40:00"),
+            "2026-10-15 13:40:00"
+        );
+        assert_eq!(
+            sqlite_to_datetime_text("2026-10-15 13:40:00.500+00:00"),
+            "2026-10-15 13:40:00"
+        );
+        assert_eq!(
+            sqlite_to_datetime_text("2026-10-15 13:40:00.500"),
+            "2026-10-15 13:40:00"
+        );
+        // 非零偏移按给定偏移换算到 UTC。
+        assert_eq!(
+            sqlite_to_datetime_text("2026-10-15 21:40:00+08:00"),
+            "2026-10-15 13:40:00"
+        );
     }
 
     #[test]

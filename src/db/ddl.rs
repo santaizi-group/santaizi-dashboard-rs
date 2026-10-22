@@ -161,6 +161,11 @@ CREATE TABLE IF NOT EXISTS monitor_histories (
 CREATE INDEX IF NOT EXISTS idx_monitor_histories_created_at ON monitor_histories (created_at);
 CREATE INDEX IF NOT EXISTS idx_monitor_histories_deleted_at ON monitor_histories (deleted_at);
 CREATE INDEX IF NOT EXISTS idx_server_id_created_at_monitor_id_avg_delay ON monitor_histories (created_at, monitor_id, server_id, avg_delay);
+-- 监控历史按 monitor_id / server_id 过滤 + created_at 排序：既有三个索引前导列
+-- 都不是这两个字段，列表查询只能全表扫。T-0273 补；存量库经 migrate 的幂等
+-- DDL 重跑获得，故不 bump schema version。
+CREATE INDEX IF NOT EXISTS idx_monitor_histories_monitor_created ON monitor_histories (monitor_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_monitor_histories_server_created ON monitor_histories (server_id, created_at);
 
 CREATE TABLE IF NOT EXISTS notifications (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -333,6 +338,18 @@ CREATE TABLE IF NOT EXISTS telemetry_ingest_cursors (
     updated_at    datetime,
     PRIMARY KEY (receiver_id, node_uuid, session_id)
 );
+
+-- HEARTBEAT / STATE / STATE_ROLLUP 不落 telemetry_events（见 persist_event_type），
+-- 但它们的 sequence 同样占位。游标推进只查 telemetry_events 时会把这些序列
+-- 当成空洞，宽限一到就误报「探测丢失」。这里给不落表的事件类型留一份序号回执，
+-- 只保存 ack_through 之上的行（推进成功后即清理），表体积天然有界。
+CREATE TABLE IF NOT EXISTS telemetry_sequence_receipts (
+    receiver_id TEXT NOT NULL,
+    node_uuid   BLOB NOT NULL,
+    session_id  BLOB NOT NULL,
+    sequence    INTEGER NOT NULL,
+    PRIMARY KEY (receiver_id, node_uuid, session_id, sequence)
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS agent_telemetry_runtimes (
     node_uuid        BLOB PRIMARY KEY,

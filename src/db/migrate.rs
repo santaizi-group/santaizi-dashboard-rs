@@ -38,11 +38,19 @@ fn current_version(conn: &rusqlite::Connection, table: &str) -> anyhow::Result<O
     Ok(version.map(|v| v as u64))
 }
 
+/// 幂等 DDL 重跑：`ddl.rs` 只含 `CREATE ... IF NOT EXISTS`，用于给存量库补上
+/// 后续版本新增的索引/表。schema version 不 bump（bump 会让存量库直接 bail），
+/// 所以这条路径是存量库获得新索引的唯一入口。
+fn ensure_idempotent_ddl(conn: &mut rusqlite::Connection, ddl: &str) -> anyhow::Result<()> {
+    conn.execute_batch(ddl)?;
+    Ok(())
+}
+
 /// 打开主库并保证 schema 为终态。
 pub fn open_primary(path: &str) -> anyhow::Result<Db> {
     let db = Db::open(path)?;
     {
-        let conn = db.get()?;
+        let mut conn = db.get()?;
         let tables = user_table_count(&conn)?;
         let recorded = current_version(&conn, "schema_migrations")?;
         if tables > 0 && recorded.is_none() {
@@ -56,20 +64,25 @@ pub fn open_primary(path: &str) -> anyhow::Result<Db> {
                     "unsupported schema version {version}; expected {PRIMARY_SCHEMA_VERSION} (fresh install only)"
                 );
             }
+            ensure_idempotent_ddl(&mut conn, PRIMARY_DDL)?;
             return Ok(db);
         }
         // 全新库：先写 auto_vacuum（文件头），再建表。
         if tables == 0 {
             conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
         }
-        conn.execute_batch(PRIMARY_DDL)?;
-        conn.execute(
-            "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
-            rusqlite::params![
-                PRIMARY_SCHEMA_VERSION as i64,
-                time::unix_nanos_to_sqlite(time::now_nanos())
-            ],
-        )?;
+        // 建表与版本号记录必须同生同死：非原子的旧行为会在 DDL 执行后崩溃时留下
+        // 「有表但无版本号」的库，下次启动只能 bail。
+        let applied_at = time::unix_nanos_to_sqlite(time::now_nanos());
+        {
+            let tx = conn.transaction()?;
+            tx.execute_batch(PRIMARY_DDL)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                rusqlite::params![PRIMARY_SCHEMA_VERSION as i64, applied_at],
+            )?;
+            tx.commit()?;
+        }
     }
     Ok(db)
 }
@@ -78,7 +91,7 @@ pub fn open_primary(path: &str) -> anyhow::Result<Db> {
 pub fn open_collector(path: &str) -> anyhow::Result<Db> {
     let db = Db::open(path)?;
     {
-        let conn = db.get()?;
+        let mut conn = db.get()?;
         let tables = user_table_count(&conn)?;
         let recorded = current_version(&conn, "collector_schema_migrations")?;
         if tables > 0 && recorded.is_none() {
@@ -92,16 +105,19 @@ pub fn open_collector(path: &str) -> anyhow::Result<Db> {
                     "unsupported collector schema version {version}; expected {COLLECTOR_SCHEMA_VERSION} (fresh install only)"
                 );
             }
+            ensure_idempotent_ddl(&mut conn, COLLECTOR_DDL)?;
             return Ok(db);
         }
-        conn.execute_batch(COLLECTOR_DDL)?;
-        conn.execute(
-            "INSERT INTO collector_schema_migrations (version, applied_at) VALUES (?1, ?2)",
-            rusqlite::params![
-                COLLECTOR_SCHEMA_VERSION as i64,
-                time::unix_nanos_to_sqlite(time::now_nanos())
-            ],
-        )?;
+        let applied_at = time::unix_nanos_to_sqlite(time::now_nanos());
+        {
+            let tx = conn.transaction()?;
+            tx.execute_batch(COLLECTOR_DDL)?;
+            tx.execute(
+                "INSERT INTO collector_schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                rusqlite::params![COLLECTOR_SCHEMA_VERSION as i64, applied_at],
+            )?;
+            tx.commit()?;
+        }
         // Go v1 会预置复制游标单行。
         conn.execute(
             "INSERT OR IGNORE INTO collector_replication_cursors (id, committed_spool_through_id, next_batch_sequence) VALUES (1, 0, 1)",
@@ -152,6 +168,42 @@ mod tests {
         // 幂等：再跑一次 DDL 不炸。
         db.exec_batch(PRIMARY_DDL).unwrap();
         let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    /// 存量库（版本号已是终态）必须在重开时补上后续版本新增的索引——
+    /// 否则只改 DDL 对已部署库完全无效（版本门会提前 return）。
+    #[test]
+    fn existing_primary_gains_new_indexes_on_reopen() {
+        let path = temp_path("reopen");
+        let db = open_primary(&path).unwrap();
+        db.exec_batch("DROP INDEX idx_monitor_histories_monitor_created")
+            .unwrap();
+        assert!(index_exists(&db, "idx_monitor_histories_monitor_created").is_none());
+        drop(db);
+        let reopened = open_primary(&path).unwrap();
+        assert_eq!(
+            index_exists(&reopened, "idx_monitor_histories_monitor_created").as_deref(),
+            Some("monitor_histories"),
+            "存量库重开应补回新索引"
+        );
+        assert_eq!(
+            index_exists(&reopened, "idx_monitor_histories_server_created").as_deref(),
+            Some("monitor_histories"),
+        );
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    fn index_exists(db: &Db, name: &str) -> Option<String> {
+        db.read(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?1",
+                    [name],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        })
+        .unwrap()
     }
 
     #[test]

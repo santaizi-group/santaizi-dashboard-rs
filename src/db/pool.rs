@@ -79,6 +79,30 @@ impl Db {
         Ok(out)
     }
 
+    /// 与 [`Db::write`] 同语义，但错误带分类：调用方能区分「不存在 / 参数非法 /
+    /// 冲突 / 忙」，而不是被 `anyhow` 拍成一串 `internal`。
+    pub fn write_repo<T, F>(&self, f: F) -> Result<T, crate::db::RepoError>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> Result<T, crate::db::RepoError>,
+    {
+        let mut conn = self.get().map_err(crate::db::RepoError::Other)?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(crate::db::RepoError::from_rusqlite)?;
+        let out = f(&tx)?;
+        tx.commit().map_err(crate::db::RepoError::from_rusqlite)?;
+        Ok(out)
+    }
+
+    /// 与 [`Db::read`] 同语义，错误带分类。
+    pub fn read_repo<T, F>(&self, f: F) -> Result<T, crate::db::RepoError>
+    where
+        F: FnOnce(&rusqlite::Connection) -> Result<T, crate::db::RepoError>,
+    {
+        let conn = self.get().map_err(crate::db::RepoError::Other)?;
+        f(&conn)
+    }
+
     /// 便捷：直接执行一段 SQL（建表/维护用）。
     pub fn exec_batch(&self, sql: &str) -> anyhow::Result<()> {
         let conn = self.get()?;

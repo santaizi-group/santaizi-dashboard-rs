@@ -4,7 +4,9 @@
 //! 从端库 v7。PRAGMA 与事务策略逐条对齐 `service/sqliteutil`。
 
 pub mod ddl;
+pub mod error;
 pub mod migrate;
 pub mod pool;
 
+pub use error::RepoError;
 pub use pool::{Db, is_busy};
