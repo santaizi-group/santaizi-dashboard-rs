@@ -206,33 +206,100 @@ fn json_escape(message: &str) -> String {
 
 // ---------- SSRF ----------
 
-fn ip_is_internal(ip: std::net::IpAddr) -> bool {
+/// 把 IPv6 地址归一成「实际承载的 IPv4」：IPv4-mapped（`::ffff:127.0.0.1`）与
+/// IPv4-compatible（`::127.0.0.1`）在 `Ipv6Addr` 的 `is_loopback()` 等判定上
+/// 全部返回 false——直接按字面判会把整个 localhost 放过。
+fn normalize_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
     match ip {
         std::net::IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_broadcast()
+            // IPv4-compatible 形态由解析层产出，这里只做映射归一。
+            std::net::IpAddr::V4(v4)
         }
+        std::net::IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .or_else(|| {
+                // `::a.b.c.d`（IPv4-compatible，非 mapped）：仅当高 96 位全零。
+                let segments = v6.segments();
+                if segments[0..5].iter().all(|segment| *segment == 0) && segments[5] == 0 {
+                    let octets = v6.octets();
+                    Some(std::net::Ipv4Addr::new(
+                        octets[12], octets[13], octets[14], octets[15],
+                    ))
+                } else {
+                    None
+                }
+            })
+            .map(std::net::IpAddr::V4)
+            .unwrap_or(std::net::IpAddr::V6(v6)),
+    }
+}
+
+fn v4_is_internal(v4: std::net::Ipv4Addr) -> bool {
+    let octets = v4.octets();
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_broadcast()
+        // `0.0.0.0` 在多数系统上等于本机，`is_private()` 不覆盖它。
+        || v4.is_unspecified()
+        // 100.64.0.0/10 运营商级 NAT：公网不可达，且常被云厂商拿来做元数据旁路。
+        || (octets[0] == 100 && (octets[1] & 0xc0) == 0x40)
+        // 192.0.0.0/24、198.18.0.0/15（基准测试）、240.0.0.0/4（保留）。
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        || (octets[0] == 198 && (octets[1] & 0xfe) == 0x12)
+        || octets[0] >= 240
+}
+
+fn ip_is_internal(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4_is_internal(v4),
         std::net::IpAddr::V6(v6) => {
-            v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local()
+            // 先按 IPv6 自身判定：`::1` 是 loopback，先归一成 IPv4 反而会丢掉这条。
+            v6.is_loopback()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+                || v6.is_multicast()
+                || v6.is_unspecified()
+                // 再按它承载的 IPv4 判：`::ffff:127.0.0.1` / `::127.0.0.1`
+                // 在前一组判定上全部返回 false，等于把整个 localhost 白送。
+                || matches!(
+                    normalize_ip(std::net::IpAddr::V6(v6)),
+                    std::net::IpAddr::V4(v4) if v4_is_internal(v4)
+                )
         }
     }
 }
 
 /// Go `CheckURLForSSRF`：IP 字面量直接判；域名解析后任一地址内部即拒。
+///
+/// 只校验首跳 URL 是不够的：HTTP 客户端默认跟随 30x，一个公网地址可以
+/// 302 到 `http://169.254.169.254/`。真正的收口在 [`ssrf_redirect_policy`]——
+/// 每一跳都过一遍同一套判定。
 pub fn check_ssrf(raw_url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(raw_url).map_err(|err| err.to_string())?;
-    let Some(host) = parsed.host_str() else {
-        return Err("URL 缺少主机".into());
+    // 必须用 `host()` 而不是 `host_str()`：后者对 IPv6 主机带回括号
+    // （`[::1]`），`parse::<IpAddr>()` 必然失败，于是整类 IPv6 字面量
+    // 静默掉进 DNS 分支、`to_socket_addrs("[::1]", port)` 也失败，
+    // 最终 `if let Ok(addrs)` 直接跳过——整个 IPv6 内网都不设防。
+    let host = match parsed.host() {
+        Some(url::Host::Ipv4(v4)) => {
+            if v4_is_internal(v4) {
+                return Err("内部地址被禁止".into());
+            }
+            return Ok(());
+        }
+        Some(url::Host::Ipv6(v6)) => {
+            if ip_is_internal(std::net::IpAddr::V6(v6)) {
+                return Err("内部地址被禁止".into());
+            }
+            return Ok(());
+        }
+        Some(url::Host::Domain(domain)) => domain.to_string(),
+        None => return Err("URL 缺少主机".into()),
     };
-    if host
-        .parse::<std::net::IpAddr>()
-        .map(ip_is_internal)
-        .unwrap_or(false)
-    {
-        return Err("内部地址被禁止".into());
-    }
     // 域名：解析（调用方处于 spawn_blocking 上下文）。
     let port = parsed.port_or_known_default().unwrap_or(80);
-    if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(host, port)) {
+    if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port)) {
         for addr in addrs {
             if ip_is_internal(addr.ip()) {
                 return Err("内部地址被禁止".into());
@@ -240,6 +307,20 @@ pub fn check_ssrf(raw_url: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// reqwest 重定向策略：跟随前对**目标**再跑一次 SSRF 判定。
+///
+/// 首跳通过校验的公开 URL 完全可能 302 到内网/云元数据地址，默认
+/// `Policy::default()`（最多 10 跳）会把请求原样带过去。这里改成自定义策略：
+/// 目标内部 → 直接拒绝该跳（返回错误，不跟随）。
+pub fn ssrf_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| match check_ssrf(attempt.url().as_str()) {
+        Ok(()) => attempt.follow(),
+        Err(reason) => attempt.error(std::io::Error::other(format!(
+            "redirect target rejected: {reason}"
+        ))),
+    })
 }
 
 // ---------- 渠道投递 ----------
@@ -309,6 +390,8 @@ fn deliver_channel_with_policy(
 
     let client = reqwest::blocking::Client::builder()
         .timeout(HTTP_TIMEOUT)
+        // 每一跳重定向都重新过 SSRF 判定（否则首跳公网地址可 302 到内网）。
+        .redirect(ssrf_redirect_policy())
         // verify_ssl=0（默认）→ 跳过证书校验（Go HttpClientSkipTlsVerify）。
         .danger_accept_invalid_certs(channel.verify_ssl.map(|value| value == 0).unwrap_or(true))
         .build()
@@ -459,7 +542,7 @@ impl Notifier {
     }
 
     pub fn reload_language(&self) {
-        *self.dict.lock().expect("l10n lock") =
+        *self.dict.lock().unwrap_or_else(|err| err.into_inner()) =
             load_language_dict(&self.conf.read().expect("config lock").language);
     }
 
@@ -484,7 +567,7 @@ impl Notifier {
         if let Some(label) = &mute_label {
             let mute_key = format!("{label}\x00{tag}");
             let should_send = {
-                let mut state = self.state.lock().expect("notify lock");
+                let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
                 match state.mutes.get(&mute_key) {
                     Some(entry) => {
                         if Instant::now() >= entry.until {
@@ -530,7 +613,7 @@ impl Notifier {
     /// 聚合窗口入桶；同 (tag, kind) 首条启动计时。
     fn enqueue_aggregate(&self, tag: String, kind: String, names: Vec<String>, first: String) {
         let key = format!("{tag}\x00{kind}");
-        let mut state = self.state.lock().expect("notify lock");
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         let (_, bucket_names, _, expires) = state.buckets.entry(key.clone()).or_insert_with(|| {
             (
                 kind.clone(),
@@ -557,7 +640,7 @@ impl Notifier {
             tokio::select! {
                 _ = ticker.tick() => {
                     let expired: Vec<(String, String, Vec<String>, String)> = {
-                        let mut state = self.state.lock().expect("notify lock");
+                        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
                         let now = Instant::now();
                         let keys: Vec<String> = state
                             .buckets
@@ -775,7 +858,11 @@ impl Notifier {
 
     /// 聚合窗口管理面（测试观测用）。
     pub fn pending_buckets(&self) -> usize {
-        self.state.lock().expect("notify lock").buckets.len()
+        self.state
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .buckets
+            .len()
     }
 }
 
@@ -787,4 +874,156 @@ pub fn channel_preview(channel: &repo::NotificationRow, message: &str) -> Value 
         "name": channel.name,
         "url": expand_placeholders(&channel.url, message, None, util_time::now_nanos(), true),
     })
+}
+
+#[cfg(test)]
+mod ssrf_tests {
+    use super::{check_ssrf, ip_is_internal, normalize_ip};
+
+    fn internal(ip: &str) -> bool {
+        ip.parse::<std::net::IpAddr>()
+            .map(ip_is_internal)
+            .expect("parse ip")
+    }
+
+    #[test]
+    fn literal_internal_addresses_are_rejected() {
+        for host in [
+            "127.0.0.1",
+            "127.1.2.3",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254", // 云元数据
+            "0.0.0.0",         // 多数系统上等于本机
+            "100.64.0.1",      // CGNAT
+            "192.0.0.1",
+            "198.18.0.1",
+            "240.0.0.1",
+            "255.255.255.255",
+            "::1",
+            "::",
+            "fe80::1",
+            "fc00::1",
+            "ff02::1",
+            // IPv4-mapped / IPv4-compatible：字面判定会整个放过。
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+            "::ffff:10.0.0.1",
+            "::127.0.0.1",
+        ] {
+            assert!(internal(host), "{host} 应判为内部地址");
+        }
+    }
+
+    #[test]
+    fn public_addresses_are_allowed() {
+        for host in ["1.1.1.1", "8.8.8.8", "93.184.216.34", "2606:4700::1111"] {
+            assert!(!internal(host), "{host} 是公网地址，不应被拒");
+        }
+    }
+
+    #[test]
+    fn normalize_unwraps_mapped_and_compatible_v6() {
+        assert_eq!(
+            normalize_ip("::ffff:127.0.0.1".parse().unwrap()),
+            "127.0.0.1".parse::<std::net::IpAddr>().unwrap()
+        );
+        assert_eq!(
+            normalize_ip("::10.0.0.1".parse().unwrap()),
+            "10.0.0.1".parse::<std::net::IpAddr>().unwrap()
+        );
+        // 非映射地址保持原样。
+        assert_eq!(
+            normalize_ip("2606:4700::1111".parse().unwrap()),
+            "2606:4700::1111".parse::<std::net::IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn check_ssrf_rejects_internal_urls() {
+        for url in [
+            "http://127.0.0.1/hook",
+            "http://0.0.0.0/hook",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::ffff:127.0.0.1]/hook",
+            "http://[::1]/hook",
+            "http://localhost/hook",
+        ] {
+            assert!(check_ssrf(url).is_err(), "{url} 应被拒");
+        }
+    }
+
+    /// 首跳公网地址 → 302 到内网：重定向策略必须把这一跳拦下来。
+    /// （仅校验首跳 URL 的实现会在这里被绕过。）
+    #[test]
+    fn redirect_policy_blocks_internal_hop() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = [0u8; 4096];
+                let Ok(n) = stream.read(&mut buf) else {
+                    continue;
+                };
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                let body = if path == "/go" {
+                    // 公开路径 302 到云元数据地址。
+                    b"moved".to_vec()
+                } else {
+                    b"secret".to_vec()
+                };
+                let header = if path == "/go" {
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                };
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&body);
+            }
+        });
+
+        let client = reqwest::blocking::Client::builder()
+            .redirect(super::ssrf_redirect_policy())
+            .build()
+            .unwrap();
+        let error = client
+            .get(format!("http://{addr}/go"))
+            .send()
+            .expect_err("302 到内网必须失败");
+        // reqwest 把自定义策略错误包成 `error following redirect for url (…)`，
+        // 真实原因在 source 链里。
+        let mut chain = Vec::new();
+        let mut current: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+        while let Some(err) = current {
+            chain.push(err.to_string());
+            current = err.source();
+        }
+        let joined = chain.join(" -> ");
+        assert!(
+            joined.contains("redirect target rejected"),
+            "错误链应指明重定向目标被拒，实际：{joined}"
+        );
+    }
+
+    #[test]
+    fn check_ssrf_allows_public_urls() {
+        assert!(check_ssrf("https://example.com/hook").is_ok());
+        assert!(check_ssrf("https://1.1.1.1/hook").is_ok());
+    }
 }
