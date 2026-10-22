@@ -4,8 +4,7 @@ import { useI18n } from 'vue-i18n'
 import {
   OsLogo,
   billingText,
-  formatTransfer,
-  percentText,
+  formatTransferFixed,
   trafficUsageParts,
   useTweenedNumber,
   type ServerStatusView,
@@ -47,22 +46,30 @@ const metrics = computed(() => [
 ])
 const trafficParts = computed(() => trafficUsageParts(props.server.trafficUsage.kind, props.server.trafficUsage.valueLabel, translate))
 const trafficLevel = computed(() => props.server.trafficUsage.statusLevel)
-// 网速标签原本是 formatTransfer(x) + '/s' 再去掉后缀，补间后直接按同一格式化器渲染。
-const speedInText = computed(() => formatTransfer(speedIn.value ?? 0))
-const speedOutText = computed(() => formatTransfer(speedOut.value ?? 0))
+// 固定小数位格式化：补间经过整数时字符数不变，数字不会在动画中途「塌一下」。
+const speedInText = computed(() => formatTransferFixed(speedIn.value ?? 0))
+const speedOutText = computed(() => formatTransferFixed(speedOut.value ?? 0))
 // 标签为空（无限流量 / 配额未知）不显示数值；补间值缺失时回落标签文本。
 const trafficText = computed(() => {
   if (!props.server.trafficUsage.valueLabel) return ''
-  return trafficBytes.value === null ? trafficParts.value.value : formatTransfer(trafficBytes.value)
+  return trafficBytes.value === null ? trafficParts.value.value : formatTransferFixed(trafficBytes.value)
 })
 const tileLabel = computed(() => `${props.server.name} · ${t('serverDetail')} · ${props.server.online ? t('online') : t('offline')}`)
+
+// 满格显示整数：100.0% 比指标槽位宽 1ch，会在满格时把「内存/磁盘」顶开，
+// 而满格本来也不需要小数。四舍五入到 100.0 即按 100% 处理，避免收尾时再跳一次。
+function percentLabel(percent: number | null) {
+  if (percent === null) return '—'
+  return Math.round(percent * 10) / 10 >= 100 ? '100%' : `${percent.toFixed(1)}%`
+}
 
 function tone(percent: number | null) {
   // 未知（null）不上色：不知道用了几成，谈不上告警。
   if (percent === null) return ''
-  if (percent >= 100) return 'critical'
-  if (percent >= ALERT_PERCENT) return 'danger'
-  if (percent >= HOT_PERCENT) return 'hot'
+  const rounded = Math.round(percent * 10) / 10
+  if (rounded >= 100) return 'critical'
+  if (rounded >= ALERT_PERCENT) return 'danger'
+  if (rounded >= HOT_PERCENT) return 'hot'
   return ''
 }
 </script>
@@ -96,7 +103,7 @@ function tone(percent: number | null) {
       <span class="sg-metrics">
         <span v-for="item in metrics" :key="item.id" class="sg-metric">
           <span class="sg-metric__label">{{ item.label }}</span>
-          <span class="sg-metric__value" :class="tone(item.percent)">{{ percentText(item.percent) }}</span>
+          <span class="sg-metric__value" :class="tone(item.percent)">{{ percentLabel(item.percent) }}</span>
         </span>
       </span>
       <i class="sg-tile__divider" aria-hidden="true"></i>

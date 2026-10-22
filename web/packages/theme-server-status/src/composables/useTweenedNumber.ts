@@ -1,8 +1,8 @@
 import { onScopeDispose, ref, watch, type Ref } from 'vue'
 import { createTween, tweenDoneAt, tweenValueAt, type TweenState } from '../domain/numberTween'
 
-/** 运动铺满 2s 帧间隔的大部分：留约 0.4s 静止，下一帧到达时已稳稳落位。 */
-const DEFAULT_DURATION = 1600
+/** 铺满 2s 帧间隔的 90%：留约 200ms 精确落位，视觉上一直是「在数」而不是「跳」。 */
+const DEFAULT_DURATION = 1800
 
 interface ActiveTween {
   state: TweenState

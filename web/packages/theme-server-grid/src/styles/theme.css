@@ -69,6 +69,7 @@
   text-align: left;
   font-family: Inter, 'Noto Sans SC', system-ui, sans-serif;
   font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
   color: var(--sg-text);
   background: var(--sg-surface);
   border: 1px solid var(--sg-border);
@@ -149,11 +150,13 @@ html.dark .sg-tile__main {
 /* 发行版标识只给 Debian 上品牌红，其余跟随次要文字色 */
 .sg-tile__main .ss-os-logo.fl-debian { color: #e0195a; }
 
-/* 第 3 行：资源指标（空隙分隔，标签不省略） */
+/* 第 3 行：资源指标（空隙分隔，标签不省略）。
+   数值槽位：补间时 % 从 4 字符变 5 字符（9.9% → 10.1%）不再把「内存/磁盘」顶开；
+   100.0% 比槽位宽约 1ch，占用右内衬，仍在卡内。 */
 .sg-metrics {
   display: flex;
   align-items: baseline;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
   margin-top: 11px;
   font-size: 12px;
@@ -163,7 +166,7 @@ html.dark .sg-tile__main {
   display: flex;
   align-items: baseline;
   flex: 0 0 auto;
-  gap: 4px;
+  gap: 3px;
 }
 .sg-metric__label {
   flex: 0 0 auto;
@@ -171,9 +174,12 @@ html.dark .sg-tile__main {
   color: var(--sg-label);
 }
 .sg-metric__value {
+  display: inline-block;
   flex: 0 0 auto;
+  min-width: 5ch;
   font-size: 13px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
   color: var(--sg-text);
 }
@@ -232,6 +238,13 @@ html.dark .sg-tile__main {
 .sg-tile__num {
   font-weight: 600;
   color: var(--sg-text);
+}
+/* 网速槽位：10.8K 以内的字符数变化不再推动 ↓ 箭头；
+   999.9K 这类瞬时值最多吃 1ch 空隙，流量右锚不动。 */
+.sg-tile__speed .sg-tile__num {
+  display: inline-block;
+  min-width: 4.8ch;
+  font-variant-numeric: tabular-nums;
 }
 .sg-tile__traffic {
   display: flex;

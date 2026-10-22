@@ -45,6 +45,16 @@ export function formatTransfer(bytes: number) {
   return `${stripTrailingZeros(stats.k.toFixed(1))}K`
 }
 
+/** 补间数值专用：档位与 `formatTransfer` 相同，但固定小数位、不裁尾零。
+ *  动画经过整数时 `9.0K` 若写成 `9K`，字符数会在中途塌缩再长回来，看着像数字闪一下。 */
+export function formatTransferFixed(bytes: number) {
+  const stats = calcBinary(bytes)
+  if (stats.t > 1) return `${stats.t.toFixed(2)}T`
+  if (stats.g > 1) return `${stats.g.toFixed(2)}G`
+  if (stats.m > 1) return `${stats.m.toFixed(1)}M`
+  return `${stats.k.toFixed(1)}K`
+}
+
 export type BytesAxisUnit = 'T' | 'G' | 'M' | 'K'
 
 /** 按满量程一次定档，避免同一根轴混用 T/G。 */

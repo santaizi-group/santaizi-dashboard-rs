@@ -42,11 +42,11 @@ describe('useTweenedNumber', () => {
 
     flushFrame(startedAt + 350)
     expect(shown?.value).toBeGreaterThan(100)
-    expect(shown?.value).toBeLessThan(115) // 1600ms ease-in-out：前 22% 时间只走约 4% 路程
+    expect(shown?.value).toBeLessThan(110) // 1800ms ease-in-out：前 19% 时间只走约 3% 路程
 
-    flushFrame(startedAt + 800)
-    expect(shown?.value).toBeGreaterThan(140)
-    expect(shown?.value).toBeLessThan(160) // 中点附近：一半路程
+    flushFrame(startedAt + 900)
+    expect(shown?.value).toBeGreaterThan(145)
+    expect(shown?.value).toBeLessThan(155) // 中点：一半路程
 
     flushFrame(startedAt + 5000)
     expect(shown?.value).toBe(200)

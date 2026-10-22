@@ -4,6 +4,7 @@ import {
   formatCycleBytes,
   formatProductVersion,
   formatTransfer,
+  formatTransferFixed,
   bytesAxisFormatter,
   getCycleTransferStatusLevel,
   osLabel,
@@ -23,6 +24,28 @@ describe('formatTransfer', () => {
     expect(formatTransfer(1024 ** 2 + 1)).toBe('1M')
     expect(formatTransfer(2 * 1024 ** 3)).toBe('2G')
     expect(formatTransfer(1.5 * 1024 ** 4)).toBe('1.5T')
+  })
+})
+
+describe('formatTransferFixed', () => {
+  // 补间数值专用：固定小数位，字符数在动画中不塌缩
+  it('keeps one decimal for K/M and two for G/T', () => {
+    expect(formatTransferFixed(0)).toBe('0.0K')
+    expect(formatTransferFixed(512)).toBe('0.5K')
+    expect(formatTransferFixed(1024)).toBe('1.0K')
+    expect(formatTransferFixed(9 * 1024)).toBe('9.0K')
+    expect(formatTransferFixed(1024 ** 2 + 1)).toBe('1.0M')
+    expect(formatTransferFixed(2 * 1024 ** 3)).toBe('2.00G')
+    expect(formatTransferFixed(500 * 1024 ** 3)).toBe('500.00G')
+    expect(formatTransferFixed(1.95 * 1024 ** 4)).toBe('1.95T')
+  })
+
+  it('switches units at the same thresholds as formatTransfer', () => {
+    const samples = [0, 512, 1024, 1024 ** 2, 1024 ** 2 + 1, 2 * 1024 ** 3, 1.5 * 1024 ** 4]
+    for (const bytes of samples) {
+      const unit = (text: string) => text.slice(-1)
+      expect(unit(formatTransferFixed(bytes))).toBe(unit(formatTransfer(bytes)))
+    }
   })
 })
 
