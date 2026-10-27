@@ -9,9 +9,13 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::ffi::ErrorCode;
 
-/// 池大小与 Go 版一致：最多 8 个连接，至少保留 4 个空闲。
+/// 池大小与 Go 版一致：最多 8 个连接，主端至少保留 4 个空闲。
 const MAX_OPEN_CONNS: u32 = 8;
 const MIN_IDLE_CONNS: u32 = 4;
+/// 从端（含探测型）只保留 1 个空闲连接：min_idle 的预热连接是按需常驻的，
+/// 1.9G 内存的小机器上每个 SQLite 连接的 cache/页缓存都是真金白银。
+/// 主端仍保留 4 个（摄入 + 复制 + 查询并发）。
+const MIN_IDLE_COLLECTOR: u32 = 1;
 const BUSY_TIMEOUT_MS: u32 = 5000;
 
 pub type PooledConnection = r2d2::PooledConnection<SqliteConnectionManager>;
@@ -24,6 +28,15 @@ pub struct Db {
 impl Db {
     /// 打开（或创建）数据库文件并应用每连接 PRAGMA。
     pub fn open(path: &str) -> anyhow::Result<Self> {
+        Self::open_with_min_idle(path, MIN_IDLE_CONNS)
+    }
+
+    /// 从端用：空闲连接只保 1 个（见 `MIN_IDLE_COLLECTOR`）。
+    pub(crate) fn open_collector(path: &str) -> anyhow::Result<Self> {
+        Self::open_with_min_idle(path, MIN_IDLE_COLLECTOR)
+    }
+
+    fn open_with_min_idle(path: &str, min_idle: u32) -> anyhow::Result<Self> {
         if let Some(parent) = Path::new(path).parent()
             && !parent.as_os_str().is_empty()
         {
@@ -44,7 +57,7 @@ impl Db {
         });
         let pool = Pool::builder()
             .max_size(MAX_OPEN_CONNS)
-            .min_idle(Some(MIN_IDLE_CONNS))
+            .min_idle(Some(min_idle))
             .connection_timeout(Duration::from_secs(10))
             .build(manager)
             .with_context(|| format!("open sqlite pool {path}"))?;
@@ -199,6 +212,18 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// 从端只保 1 个空闲连接、主端仍 4：小内存机器上每个 SQLite 连接的页缓存
+    /// 都是常驻内存。上限不动——按需创建，空闲连接自己会退。
+    #[test]
+    fn collector_pool_keeps_fewer_idle_connections() {
+        let primary = Db::open(&temp_db("idle-primary")).unwrap();
+        let collector = Db::open_collector(&temp_db("idle-collector")).unwrap();
+        assert_eq!(primary.pool().min_idle(), Some(MIN_IDLE_CONNS));
+        assert_eq!(collector.pool().min_idle(), Some(MIN_IDLE_COLLECTOR));
+        assert_eq!(primary.pool().max_size(), MAX_OPEN_CONNS);
+        assert_eq!(collector.pool().max_size(), MAX_OPEN_CONNS);
     }
 
     #[test]

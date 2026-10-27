@@ -5,12 +5,25 @@
 //! 该错误写进样本，不把空跳数当成成功。
 
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::Value;
+use tokio::io::AsyncReadExt;
+use tokio_util::sync::CancellationToken;
 
 pub const NOT_FOUND: &str = "未找到 nexttrace";
 const EXEC_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// stdout 上限：nexttrace `--json` 正常输出在几十 KB 量级；单跳 30 跳、每跳
+/// 带 geo 字段也远低于此。超限说明目标不可信（或被中间设备灌了垃圾），
+/// 直接判失败，不去解析被截断的 JSON。
+pub const STDOUT_LIMIT: usize = 4 * 1024 * 1024;
+
+/// stderr 上限：只用于拼错误信息，超限部分在读的过程中丢弃。
+pub const STDERR_LIMIT: usize = 64 * 1024;
+
+const CANCELLED: &str = "探测已取消";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hop {
@@ -117,31 +130,139 @@ pub fn args(opts: &TraceOpts) -> Result<Vec<String>, String> {
 }
 
 pub async fn run(bin: &Path, opts: &TraceOpts) -> Result<TraceResult, String> {
+    run_inner(bin, opts, &CancellationToken::new(), EXEC_TIMEOUT).await
+}
+
+/// 可取消的 `run`：取消令牌与 45s 超时谁先到都算结束，子进程都会被杀掉并回收，
+/// 不会留下无人 wait 的僵尸进程；读管道任务同时 abort，不等孙进程放管道。
+pub async fn run_cancellable(
+    bin: &Path,
+    opts: &TraceOpts,
+    cancel: &CancellationToken,
+) -> Result<TraceResult, String> {
+    run_inner(bin, opts, cancel, EXEC_TIMEOUT).await
+}
+
+async fn run_inner(
+    bin: &Path,
+    opts: &TraceOpts,
+    cancel: &CancellationToken,
+    timeout: Duration,
+) -> Result<TraceResult, String> {
     validate_target(&opts.target)?;
     let mut command = tokio::process::Command::new(bin);
-    command.args(args(opts)?).kill_on_drop(true);
-    let output = match tokio::time::timeout(EXEC_TIMEOUT, command.output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(err)) => return Err(compact_error(&err.to_string())),
-        Err(_) => return Err("nexttrace timed out".to_string()),
+    command
+        .args(args(opts)?)
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) => return Err(compact_error(&err.to_string())),
     };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut msg = stderr.trim().to_string();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    // 两路输出必须并发读：只读一路会让另一路管道写满，把子进程堵死在 write 上，
+    // 45s 超时就成了唯一的出口。
+    let stdout_task = tokio::spawn(read_capped(stdout, STDOUT_LIMIT));
+    let stderr_task = tokio::spawn(read_capped(stderr, STDERR_LIMIT));
+    let mut status = None;
+    let mut failure = None;
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => failure = Some(CANCELLED.to_string()),
+        waited = tokio::time::timeout(timeout, child.wait()) => match waited {
+            Ok(Ok(exit)) => status = Some(exit),
+            Ok(Err(err)) => failure = Some(compact_error(&err.to_string())),
+            Err(_) => failure = Some("nexttrace timed out".to_string()),
+        },
+    }
+    if let Some(failure) = failure {
+        // 超时/取消：显式杀掉并 wait 回收，不依赖 drop 的时机。结果已经作废，
+        // 读管道任务直接 abort——孙进程可能仍持有 stdout，等 EOF 会把 45s
+        // 超时拖成无限期，单执行器下等于卡住所有追踪。
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        stdout_task.abort();
+        stderr_task.abort();
+        return Err(failure);
+    }
+    let Some(status) = status else {
+        return Err("nexttrace 未返回退出状态".to_string());
+    };
+    let Some((stdout, stdout_overflow)) = join_reader(stdout_task).await else {
+        return Err("nexttrace 输出读取超时".to_string());
+    };
+    let (stderr, _stderr_overflow) = join_reader(stderr_task).await.unwrap_or_default();
+    if stdout_overflow {
+        return Err(format!("nexttrace 输出超过 {STDOUT_LIMIT} 字节上限"));
+    }
+    if !status.success() {
+        let mut msg = String::from_utf8_lossy(&stderr).trim().to_string();
         if msg.is_empty() {
-            msg = stdout.trim().to_string();
+            msg = String::from_utf8_lossy(&stdout).trim().to_string();
         }
         if msg.is_empty() {
-            msg = format!("nexttrace exit {}", output.status);
+            msg = format!("nexttrace exit {status}");
         }
         return Err(compact_error(&msg));
     }
-    let mut parsed = parse_json(&output.stdout)?;
+    let mut parsed = parse_json(&stdout)?;
     if parsed.destination.is_empty() {
         parsed.destination = opts.target.clone();
     }
     Ok(parsed)
+}
+
+/// 读到上限后继续排空（丢弃超额内容），不让子进程堵在写满的管道上。
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
+    reader: Option<R>,
+    limit: usize,
+) -> (Vec<u8>, bool) {
+    let Some(mut reader) = reader else {
+        return (Vec::new(), false);
+    };
+    let mut buf = Vec::with_capacity(limit.min(64 * 1024));
+    let mut chunk = [0u8; 16 * 1024];
+    let mut overflow = false;
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(read) => {
+                if buf.len() >= limit {
+                    overflow = true;
+                } else {
+                    // 一次 read 就可能跨过上限：截下来的部分算溢出，
+                    // 不能只按「已满」判断，否则超限一个字节也发现不了。
+                    let room = limit - buf.len();
+                    let keep = read.min(room);
+                    buf.extend_from_slice(&chunk[..keep]);
+                    if read > keep {
+                        overflow = true;
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    (buf, overflow)
+}
+
+/// 子进程已退出，正常路径等 EOF；万一有孙进程攥着管道，5s 后 abort，
+/// 不能让一次追踪把整个执行器挂住。
+const READER_JOIN_LIMIT: Duration = Duration::from_secs(5);
+
+async fn join_reader(task: tokio::task::JoinHandle<(Vec<u8>, bool)>) -> Option<(Vec<u8>, bool)> {
+    let abort = task.abort_handle();
+    match tokio::time::timeout(READER_JOIN_LIMIT, task).await {
+        Ok(Ok(value)) => Some(value),
+        Ok(Err(_)) => None,
+        Err(_) => {
+            abort.abort();
+            None
+        }
+    }
 }
 
 pub fn parse_json(raw: &[u8]) -> Result<TraceResult, String> {
@@ -585,5 +706,157 @@ mod tests {
         assert_eq!(parsed.hops[0].country, "CN");
         assert!((parsed.hops[0].rtt_ms - 12.5).abs() < 0.01);
         assert_eq!(parsed.hops[0].loss, 0.0);
+    }
+}
+
+/// 子进程输出路径：上限、超时、取消。OOM 复盘里 nexttrace 的输出收集是
+/// 父进程内存的第二来源（`Command::output` 无界收集两路输出）。
+#[cfg(test)]
+mod exec_tests {
+    use super::*;
+
+    const JSON: &str =
+        r#"{"Hops":[[{"Success":true,"Address":"203.0.113.1","TTL":1,"RTT":12.5}]]}"#;
+
+    fn opts(target: &str) -> TraceOpts {
+        TraceOpts {
+            target: target.to_string(),
+            tcp: false,
+            port: 0,
+            ipv4: true,
+            ipv6: false,
+        }
+    }
+
+    fn fake_nexttrace(dir: &Path, body: &str) -> PathBuf {
+        let path = dir.join("nexttrace");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fake nexttrace");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake nexttrace");
+        }
+        path
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("santaizi-nt-exec-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    /// 正常输出：能解析出跳点。
+    #[tokio::test]
+    async fn normal_output_is_parsed() {
+        let dir = scratch("normal");
+        let bin = fake_nexttrace(&dir, &format!("printf '%s' '{JSON}'"));
+        let parsed = run(&bin, &opts("203.0.113.1")).await.expect("run");
+        assert_eq!(parsed.hops.len(), 1);
+        assert_eq!(parsed.hops[0].address, "203.0.113.1");
+    }
+
+    /// stdout 恰好等于上限：合法 JSON 加空白填充，必须放行（上限是含边界的）。
+    #[tokio::test]
+    async fn stdout_exactly_at_limit_is_accepted() {
+        let dir = scratch("at-limit");
+        let pad = STDOUT_LIMIT - JSON.len();
+        let bin = fake_nexttrace(
+            &dir,
+            &format!("printf '%s' '{JSON}'\nyes '' | head -c {pad}"),
+        );
+        let parsed = run(&bin, &opts("203.0.113.1")).await.expect("run");
+        assert_eq!(parsed.hops.len(), 1);
+    }
+
+    /// 超出一个字节：判失败，不解析被截断的 JSON。
+    #[tokio::test]
+    async fn stdout_over_limit_is_rejected() {
+        let dir = scratch("over-limit");
+        let pad = STDOUT_LIMIT - JSON.len() + 1;
+        let bin = fake_nexttrace(
+            &dir,
+            &format!("printf '%s' '{JSON}'\nyes '' | head -c {pad}"),
+        );
+        let err = run(&bin, &opts("203.0.113.1")).await.unwrap_err();
+        assert!(err.contains("超过"), "实际：{err}");
+    }
+
+    /// stderr 洪水不得影响成功路径：错误流有独立上限，且成功时只用于诊断。
+    #[tokio::test]
+    async fn stderr_flood_does_not_break_success() {
+        let dir = scratch("stderr-flood");
+        let bin = fake_nexttrace(
+            &dir,
+            &format!("head -c 1048576 /dev/zero >&2\nprintf '%s' '{JSON}'"),
+        );
+        let parsed = run(&bin, &opts("203.0.113.1")).await.expect("run");
+        assert_eq!(parsed.hops.len(), 1);
+    }
+
+    /// 非零退出：错误来自 stderr，且被截到有限长度。
+    #[tokio::test]
+    async fn nonzero_exit_reports_stderr() {
+        let dir = scratch("nonzero");
+        let bin = fake_nexttrace(
+            &dir,
+            "{ printf 'boom '; yes xxxxxxxx | head -c 4096; } >&2\nexit 1",
+        );
+        let err = run(&bin, &opts("203.0.113.1")).await.unwrap_err();
+        assert!(err.starts_with("boom"), "实际：{err}");
+        assert!(err.len() < 1000, "错误必须被截断：{}", err.len());
+    }
+
+    /// 超时：杀掉并回收，报明确错误；之后同一条路径仍能正常跑。
+    /// 子进程 `sleep` 被 shell 留在后台、仍攥着 stdout 时也必须立刻返回。
+    #[tokio::test]
+    async fn timeout_reaps_the_child_and_keeps_the_path_usable() {
+        let dir = scratch("timeout");
+        let hang = fake_nexttrace(&dir, "sleep 5");
+        let started = std::time::Instant::now();
+        let err = run_inner(
+            &hang,
+            &opts("203.0.113.1"),
+            &CancellationToken::new(),
+            Duration::from_millis(200),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("timed out"), "实际：{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "200ms 超时不得等孙进程放管道，实际 {:?}",
+            started.elapsed()
+        );
+        let good = fake_nexttrace(&dir, &format!("printf '%s' '{JSON}'"));
+        let parsed = run(&good, &opts("203.0.113.1")).await.expect("run");
+        assert_eq!(parsed.hops.len(), 1);
+    }
+
+    /// 取消：立刻返回，不让子进程活过从端生命周期。
+    #[tokio::test]
+    async fn cancel_returns_promptly() {
+        let dir = scratch("cancel");
+        let hang = fake_nexttrace(&dir, "sleep 5");
+        let cancel = CancellationToken::new();
+        let bin = hang.clone();
+        let target = opts("203.0.113.1");
+        let token = cancel.clone();
+        let handle = tokio::spawn(async move { run_cancellable(&bin, &target, &token).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let started = std::time::Instant::now();
+        cancel.cancel();
+        let err = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("取消后必须很快返回")
+            .unwrap()
+            .unwrap_err();
+        assert!(err.contains(CANCELLED), "实际：{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "取消不得等孙进程放管道，实际 {:?}",
+            started.elapsed()
+        );
     }
 }

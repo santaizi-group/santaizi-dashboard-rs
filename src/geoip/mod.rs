@@ -28,8 +28,10 @@ pub enum GeoDb {
 impl GeoDb {
     fn from_bytes(bytes: Vec<u8>) -> Option<Self> {
         // mmdb 有 metadata 校验，先试；v2ray 解码需非空国家码/前缀才认，避免误判任意字节。
-        if let Some(db) = mmdb::Mmdb::from_bytes(bytes.clone()) {
-            return Some(Self::Mmdb(db));
+        // 先借后取：mmdb 认了才把 `Vec` 交给 Reader，不认时原样交给 v2ray，
+        // 全程只有一份堆副本（真库几 MB，小内存机器上这段峰值很要紧）。
+        if mmdb::Mmdb::accepts(&bytes) {
+            return Some(Self::Mmdb(mmdb::Mmdb::from_bytes(bytes)?));
         }
         v2ray::Index::decode(&bytes).map(|index| Self::V2ray(Box::new(index)))
     }
@@ -212,19 +214,41 @@ pub(crate) fn reset_for_test() {
     }
 }
 
+/// GeoDB 是进程级全局。多个用例并行 `install_for_test` / `reset_for_test`
+/// 会互相把对方的库清掉或换掉（`bundle_prefers_ipv4` 偶发失败即此）。
+/// 凡触碰全局库的用例（含其他模块）都持这把锁跑完整个函数体。
+#[cfg(test)]
+static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+/// 测试辅助：装一个只有国家段的 v2ray 库。
+#[cfg(test)]
+pub(crate) fn install_country_for_test(country: &str, octets: [u8; 4], prefix: u32) {
+    use prost::Message as _;
+    let list = v2ray::GeoIpList {
+        entry: vec![v2ray::GeoIp {
+            country_code: country.to_string(),
+            cidr: vec![v2ray::Cidr {
+                ip: octets.to_vec(),
+                prefix,
+            }],
+        }],
+    };
+    install(GeoDb::V2ray(Box::new(
+        v2ray::Index::decode(&list.encode_to_vec()).expect("encode v2ray test db"),
+    )));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// GeoDB 是进程级全局。多个用例并行 `install_for_test` / `reset_for_test`
-    /// 会互相把对方的库清掉或换掉（`bundle_prefers_ipv4` 偶发失败即此）。
-    /// 凡触碰全局库的用例都持这把锁跑完整个函数体。
-    static GEOIP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn geoip_guard() -> std::sync::MutexGuard<'static, ()> {
-        GEOIP_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
+        super::test_guard()
     }
 
     #[test]

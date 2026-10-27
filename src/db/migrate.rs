@@ -89,7 +89,7 @@ pub fn open_primary(path: &str) -> anyhow::Result<Db> {
 
 /// 打开从端库并保证 schema 为终态。
 pub fn open_collector(path: &str) -> anyhow::Result<Db> {
-    let db = Db::open(path)?;
+    let db = Db::open_collector(path)?;
     {
         let mut conn = db.get()?;
         let tables = user_table_count(&conn)?;

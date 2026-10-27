@@ -135,6 +135,14 @@ sudo rm -rf /opt/santaizi/collector-rs
 
 主端 CA 轮换或重装后，盘上的从端证书会被主端在 TLS 层拒绝（`UnknownCA`）。从端检测到后自动丢弃旧证书、用注册令牌重新注册，无需手工删数据目录；日志里「主端拒绝了从端证书」即这条自愈路径。持续出现且不恢复，检查主端是否已吊销该从端。
 
+### 探测型从端的内存边界
+
+探测型从端（`kind=probe`）的执行并发与等待队列上限与目标数无关：ICMP/TCP 连通性固定 2 个 worker；MTR、周期路由与主端下发的按需路由共用 1 个 nexttrace 执行器，同时最多 1 个 nexttrace 子进程。每类等待队列 32 项（连通性为 2 个 worker × 16），满时周期任务保留到下一轮重试（不产伪样本），按需任务立即回失败、主端据此标记失败。目标状态本身仍按目标数线性增长，但每项很小。
+
+45s 超时或从端取消时，nexttrace 子进程会被杀掉、输出读取任务同时中止，不会等孙进程释放管道。因此没有 swap 的 2G 级主机也能安全启动。代价是大规模 MTR/路由的尾延迟变长——串行追踪是以延迟换安全，不要为此调大队列。也不要用 Docker 硬内存限额去掩盖：掩盖之后进程被 cgroup OOM 杀掉，表现同样是面板显示从端离线、容器每几秒重启。
+
+排障时若看到「nexttrace 输出超过 4194304 字节上限」，说明该次追踪的 stdout 超出 4 MiB 硬上限被主动判失败（stderr 上限 64 KiB），不是进程崩溃。
+
 ## 最小配置
 
 二进制形态的示例见 [`script/config.example.yaml`](../script/config.example.yaml)。至少填写 `oauth2.type`、`oauth2.admin`、`oauth2.clientid`、`oauth2.clientsecret`。自建 Gitea 与 Cloudflare Access 还要填 `oauth2.endpoint`。

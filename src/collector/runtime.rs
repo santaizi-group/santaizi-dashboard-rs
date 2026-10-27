@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tonic::{Request, Status};
 
-use crate::collector::probe::ProbeScheduler;
+use crate::collector::probe::{self, ProbeScheduler};
 use crate::collector::store;
 use crate::config::CollectorModeConfig;
 use crate::db::Db;
@@ -268,14 +268,10 @@ impl Runtime {
             let runtime = std::sync::Arc::clone(self);
             Arc::new(move || runtime.is_probe()) as Arc<dyn Fn() -> bool + Send + Sync>
         };
+        let exec = probe::RealExec::shared(self.config.nexttrace_path.clone(), self.cancel.clone());
         self.probe
             .clone()
-            .run(
-                self.cancel.clone(),
-                self.db.clone(),
-                self.config.nexttrace_path.clone(),
-                is_probe,
-            )
+            .run(self.cancel.clone(), self.db.clone(), exec, is_probe)
             .await;
     }
 
@@ -383,15 +379,12 @@ impl Runtime {
         );
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
+            // biased + 运行态帧排在探测样本与下行帧之前：小内存从端的 CPU 被
+            // 探测占满时，15s 的心跳仍要优先挤进 Sync 通道，否则主端按
+            // `collector_timeout` 判离线。
             tokio::select! {
+                biased;
                 _ = self.cancel.cancelled() => return Ok(()),
-                message = stream.message() => match message? {
-                    Some(response) => {
-                        self.note_sync_rtt();
-                        self.handle_response(response).await?;
-                    }
-                    None => anyhow::bail!("collector sync stream closed by primary"),
-                },
                 _ = ticker.tick() => {
                     let sent = Instant::now();
                     let runtime = self.runtime_snapshot().await?;
@@ -400,10 +393,17 @@ impl Runtime {
                     })
                     .await?;
                     self.mark_sync_sent_at(sent);
-                    self.flush_probe_samples(&tx).await?;
+                    self.flush_probe_samples(&tx);
                 }
+                message = stream.message() => match message? {
+                    Some(response) => {
+                        self.note_sync_rtt();
+                        self.handle_response(response).await?;
+                    }
+                    None => anyhow::bail!("collector sync stream closed by primary"),
+                },
                 _ = self.probe.wake().notified() => {
-                    self.flush_probe_samples(&tx).await?;
+                    self.flush_probe_samples(&tx);
                 }
             }
         }
@@ -623,18 +623,13 @@ impl Runtime {
         Ok(runtime)
     }
 
-    async fn flush_probe_samples(
+    /// 冲刷一批探测样本。非阻塞：Sync 通道还要留给运行态帧，投不出去就整批
+    /// 退回队列，绝不能反过来把心跳堵住（主端据此判从端离线）。
+    fn flush_probe_samples(
         &self,
         tx: &mpsc::Sender<proto::CollectorSyncRequest>,
-    ) -> Result<()> {
-        let Some(batch) = self.probe.take_samples() else {
-            return Ok(());
-        };
-        tx.send(proto::CollectorSyncRequest {
-            body: Some(proto::collector_sync_request::Body::ProbeSamples(batch)),
-        })
-        .await?;
-        Ok(())
+    ) -> probe::SampleFlush {
+        self.probe.flush_samples(tx)
     }
 
     /// 处理主端下发帧：授权配置落库 + kind/Agent CA 同步；accepted 刷可见时间。

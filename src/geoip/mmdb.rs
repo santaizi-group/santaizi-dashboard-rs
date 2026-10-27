@@ -42,6 +42,12 @@ pub struct Mmdb {
 }
 
 impl Mmdb {
+    /// 只校验 metadata、不取所有权。调用方据此决定要不要把 `Vec` 交出来：
+    /// 真库有几 MB，先整体 clone 一份会让启动瞬时出现两份堆副本。
+    pub fn accepts(bytes: &[u8]) -> bool {
+        maxminddb::Reader::from_source(bytes).is_ok()
+    }
+
     pub fn from_bytes(bytes: Vec<u8>) -> Option<Self> {
         maxminddb::Reader::from_source(bytes)
             .ok()
