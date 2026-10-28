@@ -25,6 +25,7 @@ GRPC_PORT="5556"
 PRIMARY_TLS="false"
 PRIMARY_INSECURE_TLS="false"
 WORK_DIR="${SANTAIZI_COLLECTOR_RS_DIR:-/opt/santaizi/collector-rs}"
+GO_COLLECTOR_DIR="${SANTAIZI_COLLECTOR_DIR:-/opt/santaizi/collector}"
 REQUESTED_VERSION=""
 IMAGE_TAG="latest"
 PARSE_ONLY="${SANTAIZI_COLLECTOR_RS_PARSE_ONLY:-0}"
@@ -315,6 +316,54 @@ compose_image() {
     grep -E '^[[:space:]]*image:' "$1" | head -n 1 | awk '{print $2}' | tr -d "\"'"
 }
 
+image_impl_from_string() {
+    case "$1" in
+        *santaizi-dashboard-rs*) printf "rust\n"; return 0 ;;
+        *santaizi-dashboard*) printf "go\n"; return 0 ;;
+    esac
+    return 1
+}
+
+compose_impl_if_collector() {
+    dir=$1
+    compose=$(find_compose_file "$dir") || return 1
+    config="${dir}/config/dashboard.yaml"
+    if [ ! -f "$config" ]; then
+        return 1
+    fi
+    if ! is_collector_config "$config"; then
+        return 1
+    fi
+    image=$(compose_image "$compose")
+    image_impl_from_string "$image"
+}
+
+refuse_go_tree_in_work_dir() {
+    compose=$(find_compose_file "$WORK_DIR" 2>/dev/null) || return 0
+    image=$(compose_image "$compose")
+    impl=$(image_impl_from_string "$image" 2>/dev/null || true)
+    if [ "$impl" = "go" ]; then
+        err "目标目录已是 Go 版从端（${WORK_DIR}），本脚本只安装 Rust 版。"
+        err "请使用 Go 面板安装/升级脚本，或 script/upgrade_collector.sh 升级 Go 从端。"
+        exit 1
+    fi
+}
+
+guard_before_install_or_upgrade() {
+    refuse_go_tree_in_work_dir
+    config="${WORK_DIR}/config/dashboard.yaml"
+    if [ -f "$config" ]; then
+        return 0
+    fi
+    if [ -z "$REGISTRATION_TOKEN" ]; then
+        if compose_impl_if_collector "$GO_COLLECTOR_DIR" >/dev/null 2>&1; then
+            err "未在 ${WORK_DIR} 发现 Rust 从端安装，但 ${GO_COLLECTOR_DIR} 已有 Go 从端。"
+            err "请使用 script/upgrade_collector.sh 升级 Go 从端；安装 Rust 版请带 --token（可与 Go 版并存）。"
+            exit 1
+        fi
+    fi
+}
+
 set_compose_image_tag() {
     file=$1
     tag=$2
@@ -498,6 +547,7 @@ main() {
             usage
             exit 1
         fi
+        guard_before_install_or_upgrade
         if ! mkdir -p "$WORK_DIR"; then
             err "创建工作目录失败: $WORK_DIR"
             exit 1
@@ -516,6 +566,8 @@ main() {
     fi
 
     check_docker
+
+    guard_before_install_or_upgrade
 
     if ! mkdir -p "$WORK_DIR"; then
         err "创建工作目录失败: $WORK_DIR"

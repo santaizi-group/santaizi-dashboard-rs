@@ -125,6 +125,8 @@ curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-r
 curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/install_collector.sh | bash
 ```
 
+仅升级、且主机上可能同时存在 Go 与 Rust 两套从端时，使用 [`script/upgrade_collector.sh`](../script/upgrade_collector.sh)：脚本会先识别本机安装（镜像与目录），只升级对应一套；两套都在时须设置 `SANTAIZI_COLLECTOR_IMPL=go|rust` 或使用 `--impl`。
+
 日志与卸载：
 
 ```bash
