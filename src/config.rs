@@ -751,9 +751,11 @@ fn rename_file(from: &std::path::Path, to: &std::path::Path) -> anyhow::Result<(
 }
 
 #[cfg(test)]
+type RenameHook = Box<dyn FnMut(&std::path::Path) -> anyhow::Result<()>>;
+
+#[cfg(test)]
 thread_local! {
-    static RENAME_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&std::path::Path) -> anyhow::Result<()>>>> =
-        const { std::cell::RefCell::new(None) };
+    static RENAME_HOOK: std::cell::RefCell<Option<RenameHook>> = const { std::cell::RefCell::new(None) };
 }
 
 fn write_in_place(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
