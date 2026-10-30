@@ -523,6 +523,12 @@ other = "事件"
 [Resolved]
 other = "恢复"
 
+[RuleIncident]
+other = "规则触发"
+
+[RuleResolved]
+other = "规则恢复"
+
 [StatusDown]
 other = "故障"
 
@@ -1061,7 +1067,7 @@ other = "探针缓存与发送状态"
 other = "故障判定修正"
 
 [TelemetryDataLoss]
-other = "探测数据丢失"
+other = "数据丢失"
 
 [TelemetryAlerts]
 other = "探测告警"
@@ -1175,7 +1181,7 @@ other = "缓存文件损坏"
 other = "主机离线"
 
 [TelemetryAlertConnectivityDegraded]
-other = "连接质量下降"
+other = "连通性降级"
 
 [TelemetryAlertCollectorOffline]
 other = "从端离线"
@@ -1184,7 +1190,7 @@ other = "从端离线"
 other = "从端上线"
 
 [TelemetryAlertDataLoss]
-other = "探测数据丢失"
+other = "数据丢失"
 
 [TelemetrySeverityCritical]
 other = "严重"

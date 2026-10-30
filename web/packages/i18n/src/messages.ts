@@ -45,7 +45,7 @@ const zhCN = {
   allObservers: '全部观测点', allLinkStatus: '全部链路', allGroups: '全部分组',
   sortDisplayIndexDesc: '权重从高到低', sortDisplayIndexAsc: '权重从低到高', sortNameAsc: '名称 A-Z', sortNameDesc: '名称 Z-A',
   ackThrough: '已确认序号', lastError: '最近错误', observerEvidence: '观测证据',
-  compacted: '已压缩替代', hard_limit_data_loss: '容量上限数据丢失', corruption: '存储损坏', host_offline: '主机离线', connectivity_degraded: '连通性降级', collector_offline: '从端离线', collector_online: '从端上线', telemetry_data_loss: '探测数据丢失', downsampled: '已降采样', rollup: '已聚合', critical: '严重', warning: '警告', info: '信息',
+  compacted: '已压缩替代', hard_limit_data_loss: '容量上限数据丢失', corruption: '存储损坏', host_offline: '主机离线', connectivity_degraded: '连通性降级', collector_offline: '从端离线', collector_online: '从端上线', telemetry_data_loss: '数据丢失', downsampled: '已降采样', rollup: '已聚合', critical: '严重', warning: '警告', info: '信息',
   clockUntrusted: '时钟不可信', clockTrusted: '时钟可信', ongoing: '进行中', availability_evidence: '可用性证据', late_evidence_correction: '晚到证据修正',
   seenBy: '看见', missedObservers: '没看到', noActiveIncidents: '当前无连通异常', factID: '事实 ID', component: '组件', dedupKey: '去重键', clock: '时钟', sinks: '投递链路', incidentID: '异常 ID',
   initialClassification: '初始分类', currentClassification: '当前分类', revision: '修订版本', occurredAt: '发生时间', severity: '级别', message: '消息',

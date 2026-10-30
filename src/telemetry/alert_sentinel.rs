@@ -12,7 +12,8 @@ use crate::proto;
 
 /// `server_runtimes.protocol` 的 V2 取值。
 const V2_PROTOCOL: &str = "v2";
-/// `availability_buckets.host_state` 的离线取值（可用性共识的唯一信源）。
+/// `availability_buckets.host_state` 的取值（可用性共识的唯一信源）。
+const HOST_STATE_ONLINE: &str = "online";
 const HOST_STATE_OFFLINE: &str = "offline";
 const CHECK_FAIL: u8 = 1;
 const CHECK_PASS: u8 = 2;
@@ -64,12 +65,17 @@ struct ServerSample {
     current_node_uuid: Option<Vec<u8>>,
     /// 最新**已封窗**可用性桶的 host_state。None = 还没有共识证据。
     consensus_host_state: Option<String>,
+    /// 与主机列表同一套在线判定（`presentation::online_flag`）。
+    /// 规则不能只看 `host_state == offline`：停报后最新封窗桶经常是 unknown，
+    /// 列表已经显示离线，规则却一直算在线。
+    listed_online: bool,
 }
 
 pub fn scan(
     conn: &Connection,
     memory: &mut SentinelMemory,
     now_unix: i64,
+    offline_threshold_seconds: u64,
 ) -> anyhow::Result<Vec<RuleNotice>> {
     let rules = load_rules(conn)?;
     let live: HashMap<i64, String> = rules
@@ -90,7 +96,7 @@ pub fn scan(
             memory.fingerprint.insert(rule.id, rule.fingerprint.clone());
         }
     }
-    let servers = load_servers(conn)?;
+    let servers = load_servers(conn, offline_threshold_seconds.max(10))?;
     let mut notices = Vec::new();
     for rule in rules {
         if !rule.enabled {
@@ -120,11 +126,12 @@ pub fn scan(
                     notices.push(RuleNotice {
                         tag: rule.tag.clone(),
                         message: format!(
-                            "[{}] {}({}) {}",
-                            "Incident", server.name, server.last_ip, rule.name
+                            "[RuleIncident] {}({}) {}",
+                            server.name, server.last_ip, rule.name
                         ),
-                        mute_label: format!("bf::sei-{}-{}", server.id, rule.id),
-                        clear_label: format!("bf::seir-{}-{}", server.id, rule.id),
+                        // 对齐 Go `ServerIncident(alertId, serverId)` → `bf::sei-{rule}-{server}`。
+                        mute_label: format!("bf::sei-{}-{}", rule.id, server.id),
+                        clear_label: format!("bf::seir-{}-{}", rule.id, server.id),
                         server_id: server.id,
                     });
                 }
@@ -133,11 +140,11 @@ pub fn scan(
                     notices.push(RuleNotice {
                         tag: rule.tag.clone(),
                         message: format!(
-                            "[{}] {}({}) {}",
-                            "Resolved", server.name, server.last_ip, rule.name
+                            "[RuleResolved] {}({}) {}",
+                            server.name, server.last_ip, rule.name
                         ),
-                        mute_label: format!("bf::seir-{}-{}", server.id, rule.id),
-                        clear_label: format!("bf::sei-{}-{}", server.id, rule.id),
+                        mute_label: format!("bf::seir-{}-{}", rule.id, server.id),
+                        clear_label: format!("bf::sei-{}-{}", rule.id, server.id),
                         server_id: server.id,
                     });
                 }
@@ -148,13 +155,14 @@ pub fn scan(
     Ok(notices)
 }
 
-/// 把哨兵里的占位词换成当前语言的「事件 / 恢复」。
+/// 把哨兵里的占位词换成当前语言的「规则触发 / 规则恢复」。
+/// 前缀不在聚合白名单里，规则通知直接投递，不会被 15 秒窗口吃掉。
 pub fn localize_notice(notice: &RuleNotice, incident: &str, resolved: &str) -> RuleNotice {
     let mut notice = notice.clone();
     notice.message = notice
         .message
-        .replacen("[Incident]", &format!("[{incident}]"), 1)
-        .replacen("[Resolved]", &format!("[{resolved}]"), 1);
+        .replacen("[RuleIncident]", &format!("[{incident}]"), 1)
+        .replacen("[RuleResolved]", &format!("[{resolved}]"), 1);
     notice
 }
 
@@ -212,7 +220,7 @@ fn load_rules(conn: &Connection) -> anyhow::Result<Vec<StoredRule>> {
 }
 
 /// `load_servers` 用：纳秒时间戳（可用性子查询的 `window_end <= ?1` 用纳秒）。
-fn now_nanos_millis() -> i64 {
+fn now_nanos() -> i64 {
     crate::util::time::now_nanos()
 }
 
@@ -230,9 +238,39 @@ impl ServerSample {
         // 已绑定但还没有已封窗的桶 → 不判离线（Go：ok=true, offline=false）。
         Some(self.consensus_host_state.as_deref() == Some(HOST_STATE_OFFLINE))
     }
+
+    /// 列表已显示离线，或 V2 共识明确 offline。没有状态载荷的新建主机不算。
+    fn offline_now(&self, now_unix: i64) -> bool {
+        if self.state.is_none() {
+            return false;
+        }
+        if !self.listed_online {
+            return true;
+        }
+        self.consensus_offline() == Some(true)
+            || (self.consensus_offline().is_none()
+                && (self.last_seen_unix == 0 || now_unix.saturating_sub(self.last_seen_unix) > 6))
+    }
 }
 
-fn load_servers(conn: &Connection) -> anyhow::Result<Vec<ServerSample>> {
+/// 与 `presentation::online_flag` 同一句：V2 只认已封窗桶，其余看最后上报。
+fn listed_online(server: &ServerSample, threshold_seconds: u64) -> bool {
+    let v2 = server.protocol.as_deref() == Some(V2_PROTOCOL)
+        && server
+            .current_node_uuid
+            .as_ref()
+            .is_some_and(|node| node.len() == 16);
+    if v2 {
+        return server.consensus_host_state.as_deref() == Some(HOST_STATE_ONLINE);
+    }
+    if server.last_seen_unix <= 0 {
+        return false;
+    }
+    (crate::util::time::now_nanos() / 1_000_000_000).saturating_sub(server.last_seen_unix)
+        < threshold_seconds as i64
+}
+
+fn load_servers(conn: &Connection, threshold_seconds: u64) -> anyhow::Result<Vec<ServerSample>> {
     let mut stmt = conn.prepare(
         "SELECT s.id, COALESCE(s.name, ''), COALESCE(r.last_ip, ''), COALESCE(r.last_seen_at, 0), \
          r.state_payload, r.host_payload, r.protocol, r.current_node_uuid, \
@@ -243,7 +281,7 @@ fn load_servers(conn: &Connection) -> anyhow::Result<Vec<ServerSample>> {
          LEFT JOIN server_runtimes r ON r.server_id = s.id \
          WHERE s.deleted_at IS NULL",
     )?;
-    let rows = stmt.query_map(rusqlite::params![now_nanos_millis()], |row| {
+    let rows = stmt.query_map(rusqlite::params![now_nanos()], |row| {
         let state_blob: Option<Vec<u8>> = row.get(4)?;
         let host_blob: Option<Vec<u8>> = row.get(5)?;
         Ok(ServerSample {
@@ -256,11 +294,15 @@ fn load_servers(conn: &Connection) -> anyhow::Result<Vec<ServerSample>> {
             protocol: row.get(6)?,
             current_node_uuid: row.get(7)?,
             consensus_host_state: row.get(8)?,
+            listed_online: false,
         })
     })?;
+    let threshold = threshold_seconds;
     let mut servers = Vec::new();
     for row in rows {
-        servers.push(row?);
+        let mut server = row?;
+        server.listed_online = listed_online(&server, threshold);
+        servers.push(server);
     }
     Ok(servers)
 }
@@ -301,19 +343,7 @@ impl Rule {
             "net_in_speed" => state.net_in_speed as f64,
             "net_out_speed" => state.net_out_speed as f64,
             "net_all_speed" => (state.net_in_speed + state.net_out_speed) as f64,
-            "offline" => {
-                // Go `ServerConsensusOffline` 三态：V2 绑定 + 有桶 → 只信共识；
-                // 无 V2 绑定/无证据 → 退回 `now - last_seen > 6` 秒。
-                // 少了共识分支的移植回归：V1 时间窗会把共识判为在线的主机误报离线。
-                if let Some(offline) = server.consensus_offline() {
-                    return offline.then_some(());
-                }
-                if server.last_seen_unix == 0 || now_unix.saturating_sub(server.last_seen_unix) > 6
-                {
-                    return Some(());
-                }
-                return None;
-            }
+            "offline" => return server.offline_now(now_unix).then_some(()),
             "load1" => state.load1,
             "load5" => state.load5,
             "load15" => state.load15,
@@ -347,11 +377,19 @@ fn percentage(used: u64, total: u64) -> f64 {
     }
 }
 
+/// 哨兵每 3 秒采一次。界面把 `duration` 标成秒，评估却按采样次数用，
+/// 填 60 要等约 180 秒。按秒换算，至少保留 1 次采样。
+const SAMPLE_SECONDS: u64 = 3;
+
+fn samples_for(duration_seconds: u64) -> usize {
+    (duration_seconds / SAMPLE_SECONDS).max(1) as usize
+}
+
 fn check(rules: &[Rule], points: &[Vec<Option<()>>]) -> (usize, bool) {
     let mut max_keep = 0usize;
     let mut failed_rules = 0usize;
     for (index, rule) in rules.iter().enumerate() {
-        let need = (rule.duration as usize).max(1);
+        let need = samples_for(rule.duration);
         max_keep = max_keep.max(need);
         if points.len() < need {
             continue;
@@ -373,6 +411,7 @@ fn check(rules: &[Rule], points: &[Vec<Option<()>>]) -> (usize, bool) {
 
 pub async fn run(
     db: crate::db::Db,
+    conf: crate::config::ConfigHandle,
     notifier: std::sync::Arc<crate::notify::Notifier>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
@@ -385,11 +424,12 @@ pub async fn run(
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {
-                let scanned = db.read(|conn| scan(conn, &mut memory, crate::util::time::now_nanos() / 1_000_000_000));
+                let threshold = conf.read().expect("config lock").offline_threshold_seconds;
+                let scanned = db.read(|conn| scan(conn, &mut memory, crate::util::time::now_nanos() / 1_000_000_000, threshold));
                 match scanned {
                     Ok(notices) => {
                         for notice in notices {
-                            let notice = localize_notice(&notice, &notifier.t("Incident"), &notifier.t("Resolved"));
+                            let notice = localize_notice(&notice, &notifier.t("RuleIncident"), &notifier.t("RuleResolved"));
                             notifier.unmute(&notice.tag, &notice.clear_label);
                             notifier
                                 .send(&notice.tag, &notice.message, Some(notice.mute_label), Some(notice.server_id))
@@ -445,11 +485,11 @@ mod tests {
         .unwrap();
         let mut memory = SentinelMemory::default();
         let now = crate::util::time::now_nanos() / 1_000_000_000;
-        let first = db.read(|conn| scan(conn, &mut memory, now)).unwrap();
+        let first = db.read(|conn| scan(conn, &mut memory, now, 30)).unwrap();
         assert_eq!(first.len(), 1);
-        assert!(first[0].message.contains("[Incident]"));
+        assert!(first[0].message.contains("[RuleIncident]"));
         assert!(first[0].message.contains("edge"));
-        let second = db.read(|conn| scan(conn, &mut memory, now)).unwrap();
+        let second = db.read(|conn| scan(conn, &mut memory, now, 30)).unwrap();
         assert!(second.is_empty());
         db.write(|tx| {
             let calm = proto::State {
@@ -463,13 +503,13 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let resolved = db.read(|conn| scan(conn, &mut memory, now)).unwrap();
+        let resolved = db.read(|conn| scan(conn, &mut memory, now, 30)).unwrap();
         assert_eq!(resolved.len(), 1);
-        assert!(resolved[0].message.contains("[Resolved]"));
+        assert!(resolved[0].message.contains("[RuleResolved]"));
     }
 
     /// 插一个 V2 绑定的服务器 + 一条已封窗共识桶。
-    /// `host_state` 传 `Some("offline")` / `Some("healthy")` / `None`（无桶）。
+    /// `host_state` 传 `Some("online")` / `Some("offline")` / `Some("unknown")` / `None`（无桶）。
     fn seed_v2(db: &crate::db::Db, host_state: Option<&str>, last_seen_ago_secs: i64) {
         let now = crate::util::time::now_nanos();
         db.write(|tx| {
@@ -512,14 +552,16 @@ mod tests {
     fn offline_notice_count(db: &crate::db::Db) -> usize {
         let mut memory = SentinelMemory::default();
         let now = crate::util::time::now_nanos() / 1_000_000_000;
-        db.read(|conn| scan(conn, &mut memory, now)).unwrap().len()
+        db.read(|conn| scan(conn, &mut memory, now, 30))
+            .unwrap()
+            .len()
     }
 
     #[test]
     fn offline_rule_prefers_v2_consensus_over_last_seen() {
         // 共识判在线，但 last_seen 已是 60 秒前（V1 时间窗会误报）。
         let db = temp_db();
-        seed_v2(&db, Some("healthy"), 60);
+        seed_v2(&db, Some("online"), 60);
         assert_eq!(
             offline_notice_count(&db),
             0,
@@ -568,10 +610,41 @@ mod tests {
     }
 
     #[test]
-    fn offline_rule_not_fired_for_bound_but_bucketless_v2() {
-        // 已绑定 V2 但还没有任何已封窗桶：Go 语义是 ok=true, offline=false。
+    fn offline_rule_follows_the_list_when_the_latest_bucket_is_unknown() {
+        // 停报后最新封窗桶是 unknown，不是 offline。列表据此显示离线，
+        // 规则只认 host_state=offline 时会一直沉默。
         let db = temp_db();
-        seed_v2(&db, None, 600);
-        assert_eq!(offline_notice_count(&db), 0, "绑定但无证据时不得判离线");
+        seed_v2(&db, Some("unknown"), 600);
+        assert_eq!(
+            offline_notice_count(&db),
+            1,
+            "列表已显示离线时，规则必须跟着触发"
+        );
+    }
+
+    #[test]
+    fn duration_is_seconds_not_sample_count() {
+        // 界面写「60 秒」。按采样次数要等 60 轮（约 180 秒）；按秒只要 20 轮。
+        let db = temp_db();
+        seed_v2(&db, Some("offline"), 0);
+        db.write(|tx| {
+            tx.execute(
+                "UPDATE alert_rules SET rules_raw = '[{\"type\":\"offline\",\"duration\":60}]' WHERE id = 10",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let mut memory = SentinelMemory::default();
+        let now = crate::util::time::now_nanos() / 1_000_000_000;
+        let mut fired_at = None;
+        for round in 1..=25 {
+            let notices = db.read(|conn| scan(conn, &mut memory, now, 30)).unwrap();
+            if !notices.is_empty() {
+                fired_at = Some(round);
+                break;
+            }
+        }
+        assert_eq!(fired_at, Some(20), "60 秒应按 3 秒一轮换成 20 次采样");
     }
 }

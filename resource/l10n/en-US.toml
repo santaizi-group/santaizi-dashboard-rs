@@ -523,6 +523,12 @@ other = "Incident"
 [Resolved]
 other = "Resolved"
 
+[RuleIncident]
+other = "Rule Alert"
+
+[RuleResolved]
+other = "Rule Resolved"
+
 [StatusDown]
 other = "Down"
 

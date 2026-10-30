@@ -201,7 +201,7 @@ async fn mute_and_aggregate() {
     notifier
         .send(
             "default",
-            "[离线] node-a\n节点失联",
+            "[主机离线] node-a\n节点失联",
             Some("server-offline-1".into()),
             None,
         )
@@ -209,7 +209,7 @@ async fn mute_and_aggregate() {
     notifier
         .send(
             "default",
-            "[离线] node-b\n节点失联",
+            "[主机离线] node-b\n节点失联",
             Some("server-offline-2".into()),
             None,
         )

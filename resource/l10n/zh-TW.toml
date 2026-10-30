@@ -523,6 +523,12 @@ other = "事件"
 [Resolved]
 other = "恢復"
 
+[RuleIncident]
+other = "規則觸發"
+
+[RuleResolved]
+other = "規則恢復"
+
 [StatusDown]
 other = "故障"
 

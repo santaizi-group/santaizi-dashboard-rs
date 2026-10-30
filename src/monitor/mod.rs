@@ -216,7 +216,7 @@ impl MonitorEngine {
             if breached {
                 let name = self.server_name(server_id).await;
                 let message = format!(
-                    "[ProbeLatency] {name}\n监控 #{monitor_id} 延迟 {sample_delay:.0}ms（允许 {min:.0}-{max:.0}ms）"
+                    "[延迟异常] {name}\n监控 #{monitor_id} 延迟 {sample_delay:.0}ms（允许 {min:.0}-{max:.0}ms）"
                 );
                 let notifier = Arc::clone(&self.notifier);
                 let label = format!("monitor-latency-{monitor_id}-{server_id}");

@@ -435,11 +435,11 @@ pub fn classify(desc: &str) -> Option<(String, Vec<String>)> {
         return None;
     }
     let legacy = [
-        ("HOST_OFFLINE", "离线", "node="),
+        ("HOST_OFFLINE", "主机离线", "node="),
         ("COLLECTOR_OFFLINE", "从端离线", "collector="),
         ("COLLECTOR_ONLINE", "从端上线", "collector="),
-        ("CONNECTIVITY_DEGRADED", "连通降级", "node="),
-        ("TELEMETRY_DATA_LOSS", "探测丢失", "component="),
+        ("CONNECTIVITY_DEGRADED", "连通性降级", "node="),
+        ("TELEMETRY_DATA_LOSS", "数据丢失", "component="),
     ];
     for (prefix, kind, field) in legacy {
         if trimmed.starts_with(prefix) || trimmed.contains(&format!("\n{prefix}")) {
@@ -451,12 +451,17 @@ pub fn classify(desc: &str) -> Option<(String, Vec<String>)> {
         return None;
     }
     let kind = trimmed[1..end].trim();
+    // 只有批量事件才进聚合窗口；规则通知（规则触发/规则恢复）直接投递。
     match kind {
-        "离线" | "从端离线" | "从端上线" | "恢复" | "连通降级" | "探测丢失" | "ProbeDown"
-        | "ProbeUp" | "ProbeLatency" => Some((
-            kind.to_string(),
-            parse_aggregated_names(&trimmed[end + 1..]),
-        )),
+        "主机离线" | "从端离线" | "从端上线" | "主机恢复" | "连通性降级" | "数据丢失"
+        | "探测中断" | "探测恢复" | "延迟异常"
+        // 旧版文案，已在队列里的仍需归并。
+        | "离线" | "恢复" | "连通降级" | "探测丢失" | "ProbeDown" | "ProbeUp" | "ProbeLatency" => {
+            Some((
+                kind.to_string(),
+                parse_aggregated_names(&trimmed[end + 1..]),
+            ))
+        }
         _ => None,
     }
 }
@@ -487,7 +492,9 @@ fn parse_aggregated_names(rest: &str) -> Vec<String> {
 /// Go `formatAggregatedNotification`：`[kind] N 台/条` + 每行一个名字。
 pub fn format_aggregated(kind: &str, names: &[String]) -> String {
     let unit = match kind {
-        "离线" | "从端离线" | "从端上线" | "恢复" | "连通降级" => "台",
+        "主机离线" | "从端离线" | "从端上线" | "主机恢复" | "连通性降级"
+        // 旧版文案。
+        | "离线" | "恢复" | "连通降级" => "台",
         _ => "条",
     };
     let mut out = format!("[{kind}] {} {unit}", names.len());
@@ -802,7 +809,7 @@ impl Notifier {
             .enable_plain_ip_in_notification;
         let name = self.server_name(server_id).await;
         let message = format!(
-            "[恢复] {name}\n恢复时间：{}\n离线时长：{}s\n原因：原因未知\n离线前 IP：{}\n恢复后 IP：{}",
+            "[主机恢复] {name}\n恢复时间：{}\n离线时长：{}s\n原因：原因未知\n离线前 IP：{}\n恢复后 IP：{}",
             util_time::unix_nanos_to_rfc3339(now_nanos).replace("T", " "),
             offline_seconds,
             desensitize(&last_ip, plain),
@@ -834,7 +841,7 @@ impl Notifier {
         let duration = (util_time::now_nanos() - started_at_nanos) / 1_000_000_000;
         let _ = db;
         Some(format!(
-            "[离线] {name}\n离线开始时间：{}\n最后上报：{}\n持续时间：{duration}s\n离线前 IP：{}",
+            "[主机离线] {name}\n离线开始时间：{}\n最后上报：{}\n持续时间：{duration}s\n离线前 IP：{}",
             util_time::unix_nanos_to_rfc3339(started_at_nanos).replace("T", " "),
             util_time::unix_nanos_to_rfc3339(last_seen_nanos).replace("T", " "),
             desensitize(&last_ip, plain),

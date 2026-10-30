@@ -104,6 +104,7 @@ fn spawn_background_workers(
     ));
     tokio::spawn(telemetry::alert_sentinel::run(
         state.db().clone(),
+        state.conf_handle(),
         state.notifier(),
         worker_shutdown.clone(),
     ));

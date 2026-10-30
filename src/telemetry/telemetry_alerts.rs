@@ -292,14 +292,18 @@ fn scan_data_loss(
     pending: &mut Vec<PendingNotice>,
 ) -> anyhow::Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT fact_id, component_id, occurred_at FROM telemetry_data_losses \
-         ORDER BY occurred_at DESC LIMIT 1000",
+        "SELECT d.fact_id, d.component_id, d.occurred_at, g.node_uuid \
+         FROM telemetry_data_losses d \
+         LEFT JOIN telemetry_gaps g \
+           ON g.gap_id = d.fact_id AND d.detail LIKE 'receiver inferred %' \
+         ORDER BY d.occurred_at DESC LIMIT 1000",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, Vec<u8>>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, i64>(2)?,
+            row.get::<_, Option<Vec<u8>>>(3)?,
         ))
     })?;
     let mut losses = Vec::new();
@@ -309,12 +313,27 @@ fn scan_data_loss(
     drop(stmt);
     // 接收端推断的空洞（detail 以 `receiver inferred` 开头）按节点归并：
     // 一次重启会给每台机器、每个旧会话各写一条，component_id 却都是接收端
-    // （`primary`）。直接拿 component_id 当名字，通知就变成 30 行 primary。
-    // 同一轮（15 分钟）只发一条，名字用绑定的主机名。
+    // （`primary`）。直接拿 component_id 当名字，通知就变成 N 行 primary。
+    // 只报当前仍绑定、且空洞还没被后续序号补上的节点；同一轮（15 分钟）一条。
     let mut inferred: std::collections::BTreeMap<Vec<u8>, InferredLoss> =
         std::collections::BTreeMap::new();
-    for (fact_id, component_id, occurred_at) in losses {
-        if let Some(node) = inferred_loss_node(conn, &fact_id)? {
+    for (fact_id, component_id, occurred_at, node) in losses {
+        if let Some(node) = node {
+            if !hole_still_open(conn, &node, &fact_id)? || !node_is_bound(conn, &node)? {
+                // 已补上或已解绑：记一笔去重，避免下一轮又当成新事实。
+                let _ = create_alert(
+                    conn,
+                    &format!("data-loss/{}", hex(&fact_id)),
+                    DATA_LOSS,
+                    "critical",
+                    Some(&node),
+                    &component_id,
+                    occurred_at,
+                    &format!("[{}] {}", title(DATA_LOSS), host_name(conn, &node)?),
+                    false,
+                )?;
+                continue;
+            }
             let entry = inferred.entry(node).or_insert(InferredLoss {
                 component_id,
                 occurred_at,
@@ -378,18 +397,42 @@ struct InferredLoss {
     occurred_at: i64,
 }
 
-/// 接收端自己补的压缩空洞：`fact_id` 就是 `telemetry_gaps.gap_id`，
-/// detail 以 `receiver inferred` 开头。从端上报的丢失事实不进这张缺口表。
-fn inferred_loss_node(conn: &Connection, fact_id: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
-    conn.query_row(
-        "SELECT g.node_uuid FROM telemetry_gaps g \
-         JOIN telemetry_data_losses d ON d.fact_id = g.gap_id \
-         WHERE g.gap_id = ?1 AND d.detail LIKE 'receiver inferred %'",
-        [fact_id],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(Into::into)
+/// 空洞之后又收到了更高的序号，说明探针已经把这段补上或另开了新会话。
+/// 没有游标（事实先到、会话还没推进）时保守地当成仍开着。
+fn hole_still_open(conn: &Connection, node: &[u8], fact_id: &[u8]) -> anyhow::Result<bool> {
+    let gap: Option<(Vec<u8>, i64)> = conn
+        .query_row(
+            "SELECT session_id, end_sequence FROM telemetry_gaps WHERE gap_id = ?1",
+            [fact_id],
+            |row| Ok((row.get(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    let Some((session, end)) = gap else {
+        return Ok(false);
+    };
+    let ack: Option<i64> = conn
+        .query_row(
+            "SELECT ack_through FROM telemetry_ingest_cursors \
+             WHERE node_uuid = ?1 AND session_id = ?2",
+            params![node, session],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(ack.is_none_or(|ack| ack <= end))
+}
+
+fn node_is_bound(conn: &Connection, node: &[u8]) -> anyhow::Result<bool> {
+    let bound: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM server_node_bindings b \
+             JOIN servers s ON s.id = b.server_id \
+             WHERE b.node_uuid = ?1 AND b.current != 0 AND s.deleted_at IS NULL \
+             LIMIT 1",
+            [node],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(bound.is_some())
 }
 
 fn scan_event_data_loss(
@@ -530,11 +573,11 @@ fn display_name(name: &str, fallback: &str) -> String {
 
 fn title(kind: &str) -> &'static str {
     match kind {
-        HOST_OFFLINE => "离线",
-        CONNECTIVITY_DEGRADED => "连通降级",
+        HOST_OFFLINE => "主机离线",
+        CONNECTIVITY_DEGRADED => "连通性降级",
         COLLECTOR_OFFLINE => "从端离线",
         COLLECTOR_ONLINE => "从端上线",
-        DATA_LOSS => "探测丢失",
+        DATA_LOSS => "数据丢失",
         _ => "告警",
     }
 }
@@ -784,6 +827,12 @@ mod tests {
                         format!("receiver inferred compacted hole 2-4 session {index}")
                     ],
                 )?;
+                // 游标停在空洞终点：这段还没被后续序号补上。
+                tx.execute(
+                    "INSERT INTO telemetry_ingest_cursors (receiver_id, node_uuid, session_id, ack_through) \
+                     VALUES ('primary', ?1, ?2, 4)",
+                    params![node, session],
+                )?;
             }
             // 从端自己报的丢失仍按组件名逐条发，不并进主机。
             tx.execute(
@@ -808,6 +857,22 @@ mod tests {
             .read(|conn| scan(conn, &policy, now + 60_000_000_000))
             .unwrap();
         assert!(again.is_empty(), "同一轮不得再发：{again:?}");
+
+        // 游标越过空洞终点：探针已经续上，不得再点名这台在线机器。
+        db.write(|tx| {
+            tx.execute(
+                "UPDATE telemetry_ingest_cursors SET ack_through = 9 WHERE node_uuid = ?1",
+                [&node],
+            )?;
+            tx.execute("DELETE FROM telemetry_alerts", [])?;
+            Ok(())
+        })
+        .unwrap();
+        let filled = db.read(|conn| scan(conn, &policy, now)).unwrap();
+        assert!(
+            filled.iter().all(|notice| notice.name != "东京-1"),
+            "已补上的空洞不得再通知：{filled:?}"
+        );
     }
 }
 

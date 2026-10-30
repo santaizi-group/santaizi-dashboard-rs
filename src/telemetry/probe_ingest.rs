@@ -716,7 +716,7 @@ fn evaluate_alert(
         if down_notified != 0 {
             notices.push(ProbeNotice {
                 tag: tag.clone(),
-                message: format!("[ProbeUp] {} → {server_name}", collector.name),
+                message: format!("[探测恢复] {} → {server_name}", collector.name),
                 mute_label: format!("bf::pu-{}-{server_id}", collector.collector_uuid),
                 server_id,
             });
@@ -733,7 +733,7 @@ fn evaluate_alert(
             };
             notices.push(ProbeNotice {
                 tag: tag.clone(),
-                message: format!("[ProbeDown] {} → {server_name} {err_text}", collector.name),
+                message: format!("[探测中断] {} → {server_name} {err_text}", collector.name),
                 mute_label: format!("bf::pd-{}-{server_id}", collector.collector_uuid),
                 server_id,
             });
@@ -747,7 +747,7 @@ fn evaluate_alert(
             notices.push(ProbeNotice {
                 tag,
                 message: format!(
-                    "[ProbeLatency] {} → {server_name} {rtt:.0}ms",
+                    "[延迟异常] {} → {server_name} {rtt:.0}ms",
                     collector.name,
                     rtt = rtt_ms
                 ),
@@ -1173,7 +1173,7 @@ mod tests {
             .unwrap();
         assert!(notices.0.is_empty());
         assert_eq!(notices.1.len(), 1);
-        assert!(notices.1[0].message.contains("[ProbeDown]"));
+        assert!(notices.1[0].message.contains("[探测中断]"));
         assert!(notices.1[0].message.contains("timeout"));
 
         db.write(|tx| {
@@ -1218,8 +1218,8 @@ mod tests {
                 }],
             };
             let up = ingest_probe_samples(tx, &collector, &batch, now)?;
-            assert!(up.iter().any(|notice| notice.message.contains("[ProbeUp]")));
-            assert!(up.iter().any(|notice| notice.message.contains("[ProbeLatency]")));
+            assert!(up.iter().any(|notice| notice.message.contains("[探测恢复]")));
+            assert!(up.iter().any(|notice| notice.message.contains("[延迟异常]")));
             let status: String = tx.query_row(
                 "SELECT status FROM probe_route_jobs WHERE id = ?1",
                 [i64::try_from(jobs[0].job_id).unwrap()],
