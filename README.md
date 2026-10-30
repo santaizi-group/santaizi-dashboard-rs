@@ -1,15 +1,15 @@
 # 三太子 Santaizi · 面板（Rust）
 
-三太子监控的 Rust 面板。同一二进制可作主面板（`mode: primary`）或从端（`mode: collector`），线协议为 `SantaiziService`。
+三太子监控的 Rust 面板（主力）。同一二进制可作主面板（`mode: primary`）或从端（`mode: collector`），线协议为 `SantaiziService`。
 
-仓库：[`santaizi-group/santaizi-dashboard-rs`](https://github.com/santaizi-group/santaizi-dashboard-rs)。Go 版面板：[`santanzi-dashboard`](https://github.com/santaizi-group/santanzi-dashboard)。
+仓库：[`santaizi-group/santaizi-dashboard-rs`](https://github.com/santaizi-group/santaizi-dashboard-rs)。Go 版面板 [`santaizi-dashboard`](https://github.com/santaizi-group/santaizi-dashboard) 已归档，仅安全/阻断性维护。
 
 ## 与 Go 版的边界
 
 - 不做内网穿透（NAT）、DDNS、Telegram 机器人。
-- 无 V1 `SantaiziService`，无 `/api/v1/*`、`/api/*`。探针使用 [`santaizi-agent-rs`](https://github.com/santaizi-group/santaizi-agent-rs) 的 v2 通路。
+- 无 `/api/v1/*`、无 Bot 管理面。探针主通路为 V2（[`santaizi-agent`](https://github.com/santaizi-group/santaizi-agent) / [`santaizi-agent-rs`](https://github.com/santaizi-group/santaizi-agent-rs)）；另挂 V1 unary 互通，供仍用 `client_secret` 的旧探针上报。
 - 数据库为全新 SQLite，不迁移 Go 版库。schema 与 Go 版 v20 对齐，去掉 bot / ddns / nat 表。
-- proto 权威在 Go 仓。本仓 `proto/santaizi.proto` 是拷贝，CI 用 [`script/proto-diff.sh`](./script/proto-diff.sh) 防漂移。
+- **proto 权威在本仓** [`proto/santaizi.proto`](./proto/santaizi.proto)。Go / Rust 探针须与之一致；CI 用 [`script/proto-diff.sh`](./script/proto-diff.sh) 防漂移。
 
 ## 安装
 
@@ -68,6 +68,16 @@ cargo build --release
 ```
 
 `-c` 默认 `/opt/santaizi/dashboard-rs/config/dashboard.yaml`，`--db` 默认 `/opt/santaizi/dashboard-rs/data/sqlite.db`。环境变量 `SANTAIZI_*`（下划线换成点）打底，YAML 覆盖。
+
+### 从端（collector）
+
+`mode: collector` 时本进程为从端（观测 / 探测），向主面板注册并复制遥测。安装脚本、TLS、证书自愈与探测型从端的内存边界见 [部署 · 从端](docs/deployment.md#从端)。
+
+探测路由依赖本机 `nexttrace`（`collector.nexttrace_path`）。可选在本机 YAML 或环境变量打开 IP 数据源：
+
+- `collector.nexttrace_ipinfo: true` / `SANTAIZI_COLLECTOR_NEXTTRACE_IPINFO=true` → 每次追踪追加 `-d ipinfo`（默认关闭；`nexttrace-tiny` 等不支持时会报错）。
+
+该开关不进管理后台表单，改完须重启从端进程。
 
 ## GeoIP
 
