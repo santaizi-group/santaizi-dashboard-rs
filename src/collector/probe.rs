@@ -220,13 +220,19 @@ type TraceOutcome = Result<nexttrace::TraceResult, String>;
 
 pub(crate) struct RealExec {
     path: String,
+    /// 是否给 nexttrace 追加 `-d ipinfo`；来自从端本机配置。
+    ipinfo: bool,
     cancel: CancellationToken,
 }
 
 impl RealExec {
     /// 生产执行体：真实网络探测 + nexttrace 子进程。
-    pub fn shared(path: String, cancel: CancellationToken) -> Arc<dyn ProbeExec> {
-        Arc::new(Self { path, cancel })
+    pub fn shared(path: String, ipinfo: bool, cancel: CancellationToken) -> Arc<dyn ProbeExec> {
+        Arc::new(Self {
+            path,
+            ipinfo,
+            cancel,
+        })
     }
 }
 
@@ -257,6 +263,7 @@ impl ProbeExec for RealExec {
                     port,
                     ipv4,
                     ipv6: !ipv4,
+                    ipinfo: self.ipinfo,
                 },
                 &self.cancel,
             )

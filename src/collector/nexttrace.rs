@@ -53,6 +53,9 @@ pub struct TraceOpts {
     pub port: u32,
     pub ipv4: bool,
     pub ipv6: bool,
+    /// 显式追加 `-d ipinfo`。默认不追加，沿用 nexttrace 自身的数据源；
+    /// nexttrace-tiny 等不支持该 provider 的版本会报错，由运营自行权衡。
+    pub ipinfo: bool,
 }
 
 pub fn resolve_binary(configured: &str) -> Result<PathBuf, String> {
@@ -113,6 +116,11 @@ pub fn args(opts: &TraceOpts) -> Result<Vec<String>, String> {
         "--language".to_string(),
         "cn".to_string(),
     ];
+    if opts.ipinfo {
+        // 数据源是 nexttrace 的显式选项：不写时用它自己的默认值。
+        args.push("-d".to_string());
+        args.push("ipinfo".to_string());
+    }
     if opts.tcp {
         args.push("--tcp".to_string());
         if opts.port > 0 {
@@ -642,6 +650,7 @@ mod target_guard_tests {
             port: 0,
             ipv4: true,
             ipv6: false,
+            ipinfo: false,
         }
     }
 
@@ -663,6 +672,20 @@ mod target_guard_tests {
         let built = args(&opts(" 1.1.1.1 ")).unwrap();
         assert_eq!(built.last().map(String::as_str), Some("1.1.1.1"));
         assert!(built.contains(&"--json".to_string()));
+    }
+
+    /// 数据源开关只影响 argv：默认不带 `-d`，打开后成对追加且目标仍在最后。
+    #[test]
+    fn ipinfo_is_opt_in_and_keeps_target_last() {
+        let mut base = opts("1.1.1.1");
+        let plain = args(&base).unwrap();
+        assert!(!plain.iter().any(|arg| arg == "-d" || arg == "ipinfo"));
+
+        base.ipinfo = true;
+        let built = args(&base).unwrap();
+        let dash = built.iter().position(|arg| arg == "-d").expect("-d");
+        assert_eq!(built.get(dash + 1).map(String::as_str), Some("ipinfo"));
+        assert_eq!(built.last().map(String::as_str), Some("1.1.1.1"));
     }
 
     #[test]
@@ -725,6 +748,7 @@ mod exec_tests {
             port: 0,
             ipv4: true,
             ipv6: false,
+            ipinfo: false,
         }
     }
 

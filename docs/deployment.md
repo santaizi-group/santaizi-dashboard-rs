@@ -145,6 +145,8 @@ sudo rm -rf /opt/santaizi/collector-rs
 
 排障时若看到「nexttrace 输出超过 4194304 字节上限」，说明该次追踪的 stdout 超出 4 MiB 硬上限被主动判失败（stderr 上限 64 KiB），不是进程崩溃。
 
+从端本机配置 `collector.nexttrace_ipinfo: true`（环境变量 `SANTAIZI_COLLECTOR_NEXTRACE_IPINFO`）会在每次调用 nexttrace 时追加 `-d ipinfo`；默认关闭，沿用 nexttrace 自己的默认数据源。它与 `nexttrace_path` 同层，属于从端本机配置，不写进管理后台表单；改完重启从端容器。`nexttrace-tiny` 等不支持该 provider 的版本打开后会报错，改回 `false` 即可。
+
 ## 最小配置
 
 二进制形态的示例见 [`script/config.example.yaml`](../script/config.example.yaml)。至少填写 `oauth2.type`、`oauth2.admin`、`oauth2.clientid`、`oauth2.clientsecret`。自建 Gitea 与 Cloudflare Access 还要填 `oauth2.endpoint`。

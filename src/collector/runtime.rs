@@ -268,7 +268,11 @@ impl Runtime {
             let runtime = std::sync::Arc::clone(self);
             Arc::new(move || runtime.is_probe()) as Arc<dyn Fn() -> bool + Send + Sync>
         };
-        let exec = probe::RealExec::shared(self.config.nexttrace_path.clone(), self.cancel.clone());
+        let exec = probe::RealExec::shared(
+            self.config.nexttrace_path.clone(),
+            self.config.nexttrace_ipinfo,
+            self.cancel.clone(),
+        );
         self.probe
             .clone()
             .run(self.cancel.clone(), self.db.clone(), exec, is_probe)

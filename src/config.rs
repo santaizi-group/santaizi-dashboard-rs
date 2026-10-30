@@ -138,6 +138,9 @@ pub struct CollectorModeConfig {
     pub spool_max_age_days: u64,
     pub status_authorization: String,
     pub nexttrace_path: String,
+    /// 追加 `-d ipinfo`：默认不追加，跟 nexttrace 自身的默认数据源。
+    /// 与 `nexttrace_path` 同层，属于从端本机配置，不进管理后台表单。
+    pub nexttrace_ipinfo: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1144,6 +1147,10 @@ mod tests {
                 "SANTAIZI_GRPC_TLS_REQUIRE_AGENT_MTLS".to_string(),
                 "true".to_string(),
             ),
+            (
+                "SANTAIZI_COLLECTOR_NEXTTRACE_IPINFO".to_string(),
+                "true".to_string(),
+            ),
             ("OTHER_VAR".to_string(), "ignored".to_string()),
         ];
         let tree = env_tree_from(vars.into_iter());
@@ -1161,7 +1168,35 @@ mod tests {
             tree["grpc_tls"]["require_agent_mtls"],
             serde_json::json!(true)
         );
+        assert_eq!(
+            tree["collector"]["nexttrace_ipinfo"],
+            serde_json::json!(true)
+        );
         assert!(tree.get("other").is_none());
+    }
+
+    /// nexttrace 数据源开关与 `nexttrace_path` 同层：默认关闭，YAML 可打开。
+    #[test]
+    fn collector_nexttrace_ipinfo_is_opt_in() {
+        let dir =
+            std::env::temp_dir().join(format!("santaizi-cfg-ntipinfo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dashboard.yaml");
+        std::fs::write(
+            &path,
+            "mode: collector\n\
+             collector:\n  primary_endpoint: 'main.example.com:5556'\n\
+             \x20 registration_token: 'stc_demo'\n\
+             \x20 database_path: /var/lib/santaizi-dashboard/collector.db\n\
+             \x20 nexttrace_path: /opt/nexttrace/nexttrace\n\
+             \x20 nexttrace_ipinfo: true\n",
+        )
+        .unwrap();
+        let conf = load_locked(path.to_str().unwrap()).unwrap();
+        assert!(conf.collector.nexttrace_ipinfo);
+        assert_eq!(conf.collector.nexttrace_path, "/opt/nexttrace/nexttrace");
+        assert!(!Config::default().collector.nexttrace_ipinfo);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
