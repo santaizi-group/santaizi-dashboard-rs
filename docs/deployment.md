@@ -100,7 +100,7 @@ services:
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
       - ./data:/var/lib/santaizi-dashboard
-      - ./config/dashboard.yaml:/etc/santaizi/dashboard.yaml:ro
+      - ./config/dashboard.yaml:/etc/santaizi/dashboard.yaml
     environment:
       - TZ=Asia/Shanghai
 ```

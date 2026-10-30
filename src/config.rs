@@ -678,61 +678,111 @@ impl Config {
             anyhow::bail!("config file path is empty");
         }
         let text = serde_yaml::to_string(self)?;
-        // 原子写：直接 truncate + write 会在序列化成功但写入中途失败
-        // （磁盘满 / 断电 / 进程被杀）时留下半份 YAML，下次启动解析失败即
-        // 无法恢复。改为同目录临时文件 + rename，POSIX rename 在同一文件
-        // 系统内是原子的。
-        let path = std::path::Path::new(&self.file_path);
-        let parent = path.parent().filter(|dir| !dir.as_os_str().is_empty());
-        let temp = match parent {
-            Some(dir) => dir.join(format!(
-                ".{}.tmp.{}",
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("config"),
-                std::process::id()
-            )),
-            None => std::path::PathBuf::from(format!(
-                ".{}.tmp.{}",
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("config"),
-                std::process::id()
-            )),
-        };
-        #[cfg(unix)]
-        {
-            use std::io::Write as _;
-            use std::os::unix::fs::OpenOptionsExt as _;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&temp)?;
-            // 先落盘再 rename：保证 rename 之后目标文件内容必然完整。
-            if let Err(err) = file
-                .write_all(text.as_bytes())
-                .and_then(|_| file.sync_all())
-            {
-                let _ = std::fs::remove_file(&temp);
-                return Err(err.into());
-            }
-            drop(file);
-        }
-        #[cfg(not(unix))]
-        {
-            if let Err(err) = std::fs::write(&temp, text.as_bytes()) {
-                let _ = std::fs::remove_file(&temp);
-                return Err(err.into());
-            }
-        }
-        if let Err(err) = std::fs::rename(&temp, path) {
-            let _ = std::fs::remove_file(&temp);
-            return Err(err.into());
-        }
-        Ok(())
+        save_bytes(std::path::Path::new(&self.file_path), text.as_bytes())
     }
+}
+
+/// 同目录临时文件 + rename。rename 不能覆盖单文件挂载点（Docker
+/// `- ./config/dashboard.yaml:/etc/santaizi/dashboard.yaml`）：目标是挂载点时
+/// 返回 `EBUSY`，临时文件和目标不在同一文件系统时返回 `EXDEV`。这两种都改走
+/// 原地覆盖，否则后台保存设置必失败。
+fn save_bytes(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    match write_atomic(path, bytes) {
+        Ok(()) => Ok(()),
+        Err(err) if replace_blocked(&err) => write_in_place(path, bytes),
+        Err(err) => Err(err),
+    }
+}
+
+fn replace_blocked(err: &anyhow::Error) -> bool {
+    let Some(io) = err.downcast_ref::<std::io::Error>() else {
+        return false;
+    };
+    io.kind() == std::io::ErrorKind::CrossesDevices
+        || io.kind() == std::io::ErrorKind::ResourceBusy
+        || matches!(io.raw_os_error(), Some(16) | Some(18))
+}
+
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let parent = path.parent().filter(|dir| !dir.as_os_str().is_empty());
+    let temp = match parent {
+        Some(dir) => dir.join(format!(
+            ".{}.tmp.{}",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("config"),
+            std::process::id()
+        )),
+        None => std::path::PathBuf::from(format!(
+            ".{}.tmp.{}",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("config"),
+            std::process::id()
+        )),
+    };
+    if let Err(err) = write_exclusive(&temp, bytes) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(err);
+    }
+    if let Err(err) = rename_file(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn rename_file(from: &std::path::Path, to: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(test)]
+    {
+        let mut hooked = false;
+        let mut hooked_result = Ok(());
+        RENAME_HOOK.with_borrow_mut(|hook| {
+            if let Some(hook) = hook.as_mut() {
+                hooked = true;
+                hooked_result = hook(to);
+            }
+        });
+        if hooked {
+            return hooked_result;
+        }
+    }
+    std::fs::rename(from, to).map_err(Into::into)
+}
+
+#[cfg(test)]
+thread_local! {
+    static RENAME_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&std::path::Path) -> anyhow::Result<()>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn write_in_place(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    write_exclusive(path, bytes)
+}
+
+fn write_exclusive(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(bytes).and_then(|_| file.sync_all())?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
+        file.write_all(bytes).and_then(|_| file.sync_all())?;
+    }
+    Ok(())
 }
 
 fn join(dir: &str, name: &str) -> String {
@@ -1229,6 +1279,52 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_falls_back_when_rename_over_a_mount_returns_ebusy() {
+        let dir = std::env::temp_dir().join(format!(
+            "santaizi-cfg-mount-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dashboard.yaml");
+        std::fs::write(
+            &path,
+            "mode: primary\noauth2:\n  type: mock\n  admin: u1\ndebug: true\n",
+        )
+        .unwrap();
+        let mut conf = load_locked(path.to_str().unwrap()).unwrap();
+        conf.site.brand = "三太子监控".into();
+
+        // 单文件挂载点上 rename 返回 EBUSY（16）。这里只拦这一次 rename，
+        // 临时文件仍真实创建，回退必须把它删掉并原地写回。
+        RENAME_HOOK.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(|_| {
+                Err(std::io::Error::from_raw_os_error(16).into())
+            }));
+        });
+        let saved = conf.save();
+        RENAME_HOOK.with_borrow_mut(|hook| *hook = None);
+        saved.expect("挂载点 EBUSY 应回退为原地覆盖");
+
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "回退后不得残留临时文件: {leftovers:?}"
+        );
+        let reloaded = load_locked(path.to_str().unwrap()).unwrap();
+        assert_eq!(reloaded.site.brand, "三太子监控");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

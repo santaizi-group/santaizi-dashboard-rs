@@ -307,7 +307,21 @@ fn scan_data_loss(
         losses.push(row?);
     }
     drop(stmt);
+    // 接收端推断的空洞（detail 以 `receiver inferred` 开头）按节点归并：
+    // 一次重启会给每台机器、每个旧会话各写一条，component_id 却都是接收端
+    // （`primary`）。直接拿 component_id 当名字，通知就变成 30 行 primary。
+    // 同一轮（15 分钟）只发一条，名字用绑定的主机名。
+    let mut inferred: std::collections::BTreeMap<Vec<u8>, InferredLoss> =
+        std::collections::BTreeMap::new();
     for (fact_id, component_id, occurred_at) in losses {
+        if let Some(node) = inferred_loss_node(conn, &fact_id)? {
+            let entry = inferred.entry(node).or_insert(InferredLoss {
+                component_id,
+                occurred_at,
+            });
+            entry.occurred_at = entry.occurred_at.max(occurred_at);
+            continue;
+        }
         let message = format!("[{}] {component_id}", title(DATA_LOSS));
         let dedup = format!("data-loss/{}", hex(&fact_id));
         if create_alert(
@@ -330,7 +344,52 @@ fn scan_data_loss(
             });
         }
     }
+    for (node, loss) in inferred {
+        // 15 分钟一档：同一轮重启补出的多条空洞共用一个去重键。
+        let bucket = loss.occurred_at.div_euclid(15 * 60 * 1_000_000_000);
+        let dedup = format!("data-loss-node/{}/{}", hex(&node), bucket);
+        let name = host_name(conn, &node)?;
+        let message = format!("[{}] {name}", title(DATA_LOSS));
+        if create_alert(
+            conn,
+            &dedup,
+            DATA_LOSS,
+            "critical",
+            Some(&node),
+            &loss.component_id,
+            loss.occurred_at,
+            &message,
+            policy.notify_data_loss,
+        )? && policy.notify_data_loss
+        {
+            pending.push(PendingNotice {
+                alert_type: DATA_LOSS.into(),
+                title: title(DATA_LOSS).into(),
+                name,
+                mute_key: format!("bf::tdl-node-{}", hex(&node)),
+            });
+        }
+    }
     Ok(())
+}
+
+struct InferredLoss {
+    component_id: String,
+    occurred_at: i64,
+}
+
+/// 接收端自己补的压缩空洞：`fact_id` 就是 `telemetry_gaps.gap_id`，
+/// detail 以 `receiver inferred` 开头。从端上报的丢失事实不进这张缺口表。
+fn inferred_loss_node(conn: &Connection, fact_id: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+    conn.query_row(
+        "SELECT g.node_uuid FROM telemetry_gaps g \
+         JOIN telemetry_data_losses d ON d.fact_id = g.gap_id \
+         WHERE g.gap_id = ?1 AND d.detail LIKE 'receiver inferred %'",
+        [fact_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn scan_event_data_loss(
@@ -687,6 +746,68 @@ mod tests {
             .read(|conn| scan(conn, &policy(true, false), now))
             .unwrap();
         assert!(second.is_empty());
+    }
+
+    /// 重启探针会让主端按会话补空洞，component_id 全是接收端 `primary`。
+    /// 同一节点同一轮只发一条，名字用绑定的主机名，不能刷出 N 行 primary。
+    #[test]
+    fn inferred_holes_collapse_to_one_notice_per_host() {
+        let db = temp_db();
+        let now = 1_700_000_000_000_000_000i64;
+        let node = vec![0x33u8; 16];
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO servers (id, name, secret_ciphertext) VALUES (8, '东京-1', X'00')",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO server_node_bindings (server_id, node_uuid, valid_from, valid_to, current, reason, created_at) \
+                 VALUES (8, ?1, 0, NULL, 1, 'enroll', CURRENT_TIMESTAMP)",
+                [&node],
+            )?;
+            for (index, session) in [vec![0x01u8; 16], vec![0x02u8; 16], vec![0x03u8; 16]]
+                .into_iter()
+                .enumerate()
+            {
+                let fact = vec![0xA0 + index as u8; 16];
+                tx.execute(
+                    "INSERT INTO telemetry_gaps (gap_id, node_uuid, session_id, start_sequence, end_sequence, reason, created_at_unix_nano) \
+                     VALUES (?1, ?2, ?3, 2, 4, 2, ?4)",
+                    params![fact, node, session, now],
+                )?;
+                tx.execute(
+                    "INSERT INTO telemetry_data_losses (fact_id, component_id, occurred_at, reason, first_spool_id, last_spool_id, lost_records, detail) \
+                     VALUES (?1, 'primary', ?2, 2, 2, 4, 3, ?3)",
+                    params![
+                        fact,
+                        now + index as i64,
+                        format!("receiver inferred compacted hole 2-4 session {index}")
+                    ],
+                )?;
+            }
+            // 从端自己报的丢失仍按组件名逐条发，不并进主机。
+            tx.execute(
+                "INSERT INTO telemetry_data_losses (fact_id, component_id, occurred_at, reason, lost_records, detail) \
+                 VALUES (?1, 'collector-east', ?2, 1, 2, 'spool overflow')",
+                params![vec![0xB0u8; 16], now],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let mut policy = policy(true, false);
+        policy.notify_data_loss = true;
+        let notices = db.read(|conn| scan(conn, &policy, now)).unwrap();
+        let mut names: Vec<&str> = notices.iter().map(|notice| notice.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["collector-east", "东京-1"]);
+        assert!(
+            notices.iter().all(|notice| notice.name != "primary"),
+            "不得把接收端 ID 当成丢失对象：{names:?}"
+        );
+        let again = db
+            .read(|conn| scan(conn, &policy, now + 60_000_000_000))
+            .unwrap();
+        assert!(again.is_empty(), "同一轮不得再发：{again:?}");
     }
 }
 
