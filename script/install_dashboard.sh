@@ -6,12 +6,19 @@
 #   仅 Linux amd64 / arm64。两种安装形态：二进制 + systemd（默认）或 Docker compose。
 #   安装位置 /opt/santaizi/dashboard-rs，程序、配置、数据都在该目录下一块：
 #   config/dashboard.yaml（0600）与 data/。--upgrade 沿用现有安装形态与配置，只更新程序。
+#   二进制来源：官方 Release（默认）、--bin-path / SANTAIZI_DASHBOARD_RS_BIN_PATH、
+#   --bin-url / SANTAIZI_DASHBOARD_RS_BIN_URL；Docker 镜像：--image / SANTAIZI_DASHBOARD_RS_IMAGE、
+#   --image-tar / SANTAIZI_DASHBOARD_RS_IMAGE_TAR。
 #   选定 OAuth 类型后按提供商打印控制台字段，并给出可粘贴的 /oauth2/callback。
 #   Docker 形态的 compose 以 ./data、./config/dashboard.yaml 相对挂载，
 #   容器内固定为 /var/lib/santaizi-dashboard 与 /etc/santaizi/dashboard.yaml。
 #   SANTAIZI_DASHBOARD_RS_PARSE_ONLY=1 时只写配置与 compose（路径可用环境变量覆盖），
 #   不碰 systemd/docker、不要 root，供一次性验证。
 #========================================================
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+# shellcheck source=lib/artifact.sh
+. "$SCRIPT_DIR/lib/artifact.sh"
 
 SANTAIZI_BASE_PATH="/opt/santaizi"
 SANTAIZI_DASHBOARD_PATH="${SANTAIZI_DASHBOARD_PATH:-${SANTAIZI_BASE_PATH}/dashboard-rs}"
@@ -136,9 +143,22 @@ prompt_port() {
 }
 
 deps_check() {
-    deps="curl"
-    if [ "$1" = "binary" ]; then
+    deps=""
+    if [ -n "$ARTIFACT_BIN_PATH" ]; then
+        case $ARTIFACT_BIN_PATH in
+            *.zip) deps="unzip sha256sum" ;;
+            *) deps="" ;;
+        esac
+    elif [ -n "$ARTIFACT_BIN_URL" ]; then
         deps="curl unzip sha256sum"
+    else
+        deps="curl unzip sha256sum"
+    fi
+    if [ "$1" = "binary" ] && [ -z "$deps" ]; then
+        deps="sha256sum"
+    fi
+    if [ "$1" != "binary" ]; then
+        deps="curl"
     fi
     missing=""
     for dep in $deps; do
@@ -170,34 +190,17 @@ detect_arch() {
 }
 
 get_latest_version() {
-    version=$(curl -fsSL -m 10 "https://api.github.com/repos/${SANTAIZI_DASHBOARD_RS_REPO}/releases/latest" | grep '"tag_name":' | head -n 1 | sed 's/.*"tag_name": "\(.*\)",.*/\1/')
-    if [ -z "$version" ]; then
-        err "获取 Rust 版 Dashboard 版本失败，请检查网络是否能访问 https://api.github.com/repos/${SANTAIZI_DASHBOARD_RS_REPO}/releases/latest"
-        err "需要该仓库已发布 v* Release（santaizi-dashboard-linux-amd64/arm64.zip）。"
-        exit 1
-    fi
-    echo "$version"
+    artifact_github_release_version "$SANTAIZI_DASHBOARD_RS_REPO"
 }
 
 verify_checksum() {
-    zipfile=$1
-    name=$2
-    sumsfile=$3
-    expected=$(awk -v f="$name" '$2 == f {print $1; exit}' "$sumsfile")
-    if [ -z "$expected" ]; then
-        err "checksums.txt 中没有 ${name} 的校验和。"
-        return 1
-    fi
-    actual=$(sha256sum "$zipfile" | awk '{print $1}')
-    if [ "$expected" != "$actual" ]; then
-        err "SHA256 校验失败：期望 ${expected}，实际 ${actual}"
-        return 1
-    fi
-    success "SHA256 校验通过。"
+    artifact_verify_checksum_file "$1" "$2" "$3"
 }
 
 # zip 内二进制带平台后缀（santaizi-dashboard-linux-<arch>），统一改名安装。
 install_binary() {
+    artifact_merge_bin_env SANTAIZI_DASHBOARD_RS
+    artifact_assert_bin_sources_exclusive
     deps_check binary
 
     os=$(detect_os)
@@ -207,48 +210,40 @@ install_binary() {
         exit 1
     fi
 
-    info "正在获取 Rust 版 Dashboard 最新版本..."
-    version=$(get_latest_version)
-    success "最新版本: ${version}"
-
-    base="https://github.com/${SANTAIZI_DASHBOARD_RS_REPO}/releases/download/${version}"
-    zipname="santaizi-dashboard-linux-${arch}.zip"
-    tmpzip=$(mktemp)
-    tmpsums=$(mktemp)
-
-    info "正在下载 ${base}/${zipname} ..."
-    if ! curl -fsSL -m 180 -o "$tmpzip" "${base}/${zipname}"; then
-        err "下载 Rust 版 Dashboard 失败，请检查网络连接，并确认该版本已发布 linux ${arch} 产物。"
-        rm -f "$tmpzip" "$tmpsums"
-        exit 1
-    fi
-    if ! curl -fsSL -m 60 -o "$tmpsums" "${base}/checksums.txt"; then
-        err "下载 checksums.txt 失败，无法校验产物完整性。"
-        rm -f "$tmpzip" "$tmpsums"
-        exit 1
-    fi
-    if ! verify_checksum "$tmpzip" "$zipname" "$tmpsums"; then
-        rm -f "$tmpzip" "$tmpsums"
-        exit 1
+    if [ -z "$ARTIFACT_BIN_PATH" ] && [ -z "$ARTIFACT_BIN_URL" ]; then
+        info "正在获取 Rust 版 Dashboard 最新版本..."
     fi
 
-    stage=$(mktemp -d)
-    if ! unzip -qo "$tmpzip" -d "$stage"; then
-        err "解压 Rust 版 Dashboard 失败。"
-        rm -rf "$stage" "$tmpzip" "$tmpsums"
-        exit 1
-    fi
-    rm -f "$tmpzip" "$tmpsums"
-    inner="${stage}/santaizi-dashboard-linux-${arch}"
-    if [ ! -f "$inner" ]; then
-        err "解压后未找到 ${inner}"
-        rm -rf "$stage"
+    stage=$(mktemp)
+    if ! artifact_stage_dashboard "$SANTAIZI_DASHBOARD_RS_REPO" "$os" "$arch" "$stage"; then
+        rm -f "$stage"
         exit 1
     fi
     as_root mkdir -p "$SANTAIZI_DASHBOARD_PATH"
-    as_root mv "$inner" "$SANTAIZI_DASHBOARD_BIN"
+    as_root mv "$stage" "$SANTAIZI_DASHBOARD_BIN"
     as_root chmod +x "$SANTAIZI_DASHBOARD_BIN"
-    rm -rf "$stage"
+    artifact_verify_dashboard "$SANTAIZI_DASHBOARD_BIN"
+}
+
+dashboard_image_ref() {
+    artifact_merge_image_env SANTAIZI_DASHBOARD_RS
+    if [ -n "$ARTIFACT_IMAGE_REF" ]; then
+        printf '%s\n' "$ARTIFACT_IMAGE_REF"
+        return
+    fi
+    printf '%s\n' "${GHCR_IMAGE}:latest"
+}
+
+apply_compose_image_flags() {
+    compose_file=$1
+    artifact_merge_image_env SANTAIZI_DASHBOARD_RS
+    if [ -n "$ARTIFACT_IMAGE_TAR" ]; then
+        check_docker
+        artifact_docker_load_tar "$ARTIFACT_IMAGE_TAR"
+    fi
+    if [ -n "$ARTIFACT_IMAGE_REF" ]; then
+        as_root compose_set_image_ref "$compose_file" "$ARTIFACT_IMAGE_REF"
+    fi
 }
 
 write_owned_file() {
@@ -308,11 +303,12 @@ EOF
 
 write_compose() {
     # 相对路径按 compose 文件所在目录（安装工作目录）解析，配置与数据放一块。
+    image_ref=$(dashboard_image_ref)
     tmp=$(mktemp)
     cat > "$tmp" <<EOF
 services:
   santaizi-dashboard:
-    image: ${GHCR_IMAGE}:latest
+    image: ${image_ref}
     container_name: santaizi-dashboard-rs
     restart: unless-stopped
     ports:
@@ -495,6 +491,30 @@ collect_answers() {
         esac
     done
 
+    if [ "$INSTALL_MODE" = "binary" ]; then
+        while true; do
+            val=$(prompt "程序来源 (1=官方最新 2=本地路径 3=下载 URL)" "1") || exit 1
+            case "$val" in
+                1|""|official|github)
+                    break
+                    ;;
+                2|local|path)
+                    path=$(prompt_required "本地 zip 或可执行文件路径") || exit 1
+                    ARTIFACT_BIN_PATH=$path
+                    break
+                    ;;
+                3|url)
+                    url=$(prompt_required "zip 下载 URL") || exit 1
+                    ARTIFACT_BIN_URL=$url
+                    break
+                    ;;
+                *)
+                    err "请输入 1、2 或 3。"
+                    ;;
+            esac
+        done
+    fi
+
     SANTAIZI_DASHBOARD_PATH=$(prompt "请输入 Dashboard 工作目录" "$SANTAIZI_DASHBOARD_PATH") || exit 1
     SANTAIZI_DASHBOARD_BIN="${SANTAIZI_DASHBOARD_PATH}/santaizi-dashboard"
     # 配置/数据跟着工作目录放一块。Docker 形态的 compose 用 ./config、./data 相对挂载，
@@ -598,6 +618,8 @@ upgrade_flow() {
     if [ -f "${SANTAIZI_DASHBOARD_PATH}/docker-compose.yml" ]; then
         info "检测到 Docker 安装，正在拉取最新镜像..."
         check_docker
+        compose_file="${SANTAIZI_DASHBOARD_PATH}/docker-compose.yml"
+        apply_compose_image_flags "$compose_file"
         if ! run_compose pull || ! run_compose up -d; then
             err "升级失败，请检查 Docker 与网络。"
             exit 1
@@ -612,20 +634,66 @@ upgrade_flow() {
 }
 
 usage() {
-    echo "用法: $0 [--upgrade]"
+    echo "用法: $0 [--upgrade] [--bin-path PATH] [--bin-url URL] [--bin-version TAG]"
+    echo "          [--image REF] [--image-tar PATH]"
     echo "  （无参数）交互式安装：二进制 + systemd 或 Docker，默认装到 /opt/santaizi/dashboard-rs"
     echo "  --upgrade  非交互升级：沿用现有安装形态与配置，只更新程序"
     echo "环境变量: SANTAIZI_DASHBOARD_RS_REPO / SANTAIZI_DASHBOARD_PATH / SANTAIZI_DASHBOARD_YAML"
     echo "          SANTAIZI_DASHBOARD_DATA / SANTAIZI_DASHBOARD_RS_PARSE_ONLY=1"
+    echo "          SANTAIZI_DASHBOARD_RS_BIN_PATH / _BIN_URL / _BIN_VERSION / _SKIP_CHECKSUM=1"
+    echo "          SANTAIZI_DASHBOARD_RS_IMAGE / SANTAIZI_DASHBOARD_RS_IMAGE_TAR"
     echo "          （Docker 形态配置/数据固定在工作目录下的 ./config、./data，后两个变量仅对二进制形态生效）"
 }
 
-case "${1:-}" in
-    "") ;;
-    --upgrade) UPGRADE=1 ;;
-    --help|-h) usage; exit 0 ;;
-    *) err "不支持的参数: $1"; usage; exit 1 ;;
-esac
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --upgrade)
+            UPGRADE=1
+            shift
+            ;;
+        --bin-path)
+            artifact_require_flag_value "$1" "${2:-}"
+            ARTIFACT_BIN_PATH=$2
+            shift 2
+            ;;
+        --bin-url)
+            artifact_require_flag_value "$1" "${2:-}"
+            ARTIFACT_BIN_URL=$2
+            shift 2
+            ;;
+        --bin-version)
+            artifact_require_flag_value "$1" "${2:-}"
+            ARTIFACT_BIN_VERSION=$2
+            shift 2
+            ;;
+        --image)
+            artifact_require_flag_value "$1" "${2:-}"
+            ARTIFACT_IMAGE_REF=$2
+            shift 2
+            ;;
+        --image-tar)
+            artifact_require_flag_value "$1" "${2:-}"
+            ARTIFACT_IMAGE_TAR=$2
+            shift 2
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        "")
+            shift
+            ;;
+        *)
+            err "不支持的参数: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+artifact_merge_bin_env SANTAIZI_DASHBOARD_RS
+artifact_merge_image_env SANTAIZI_DASHBOARD_RS
+artifact_assert_bin_sources_exclusive
 
 if [ "$PARSE_ONLY" = 1 ]; then
     # 只生成配置与 compose：允许管道输入，不校验 TTY、不要 root、不装服务。
@@ -678,6 +746,8 @@ case "$INSTALL_MODE" in
         check_docker
         write_config
         write_compose
+        compose_file="${SANTAIZI_DASHBOARD_PATH}/docker-compose.yml"
+        apply_compose_image_flags "$compose_file"
         info "正在拉取镜像并启动 Dashboard..."
         if ! run_compose up -d; then
             err "启动 Dashboard 失败，请检查 Docker 与网络。"

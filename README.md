@@ -25,6 +25,17 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-da
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/install_dashboard.sh)" -- --upgrade
 ```
 
+离线或私有源（在目标机手动加参数；后台一键命令仍走官方源）：
+
+```bash
+# 面板二进制 + systemd
+sh -c "$(curl -fsSL .../install_dashboard.sh)" -- --upgrade --bin-path /path/to/santaizi-dashboard-linux-amd64.zip
+# Docker 私有镜像
+sh -c "$(curl -fsSL .../install_dashboard.sh)" -- --upgrade --image registry.example.com/santaizi-dashboard-rs:v0.2.2
+```
+
+参数与环境变量一览见 [部署 · 自定义产物](docs/deployment.md#自定义产物离线--私有源)。
+
 默认目录布局（程序、配置、数据都在工作目录下一块）：
 
 - 程序：`/opt/santaizi/dashboard-rs/santaizi-dashboard`

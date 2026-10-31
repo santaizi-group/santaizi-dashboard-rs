@@ -7,7 +7,12 @@
 #   Go: SANTAIZI_AGENT_REPO      default santaizi-group/santaizi-agent
 #   Rust: SANTAIZI_AGENT_RS_REPO default santaizi-group/santaizi-agent-rs
 #   Override: SANTAIZI_AGENT_IMPL=go|rust
+#   Binary: --bin-path / --bin-url / --bin-version or SANTAIZI_AGENT(_RS)_BIN_*
 #========================================================
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+# shellcheck source=lib/artifact.sh
+. "$SCRIPT_DIR/lib/artifact.sh"
 
 SANTAIZI_BASE_PATH="/opt/santaizi"
 SANTAIZI_AGENT_PATH="${SANTAIZI_AGENT_PATH:-${SANTAIZI_BASE_PATH}/agent}"
@@ -46,13 +51,25 @@ success() {
 }
 
 usage() {
-    echo "Usage: $0 [upgrade_agent] [version] [--detect-only]"
+    echo "Usage: $0 [upgrade_agent] [version] [--detect-only] [--bin-path PATH] [--bin-url URL] [--bin-version TAG]"
     echo "Example: $0"
     echo "         $0 v1.0.1"
     echo "         SANTAIZI_AGENT_VERSION=v1.0.1 $0"
     echo "         SANTAIZI_AGENT_IMPL=rust $0"
+    echo "         $0 --bin-path /path/to/santaizi-agent-rs_linux_amd64.zip"
     echo "Detects the local Go or Rust agent and installs the latest (or specified) GitHub Release from the matching repo."
     echo "Config, identity, and WAL are left unchanged. The script does not switch implementations."
+    echo "Env: SANTAIZI_AGENT_BIN_PATH / _BIN_URL / _BIN_VERSION (Go)"
+    echo "     SANTAIZI_AGENT_RS_BIN_PATH / _BIN_URL / _BIN_VERSION (Rust)"
+    echo "     SANTAIZI_*_SKIP_CHECKSUM=1 when third-party zip URL has no checksums.txt"
+}
+
+merge_agent_bin_env() {
+    if [ "$AGENT_IMPL" = "rust" ]; then
+        artifact_merge_bin_env SANTAIZI_AGENT_RS
+    else
+        artifact_merge_bin_env SANTAIZI_AGENT
+    fi
 }
 
 sudo() {
@@ -316,35 +333,29 @@ replace_binary() {
     arch=$2
     version=$3
 
-    tmpdir=$(mktemp -d 2>/dev/null || mktemp -d -t santaizi-agent-upgrade)
-    tmpfile="${tmpdir}/${AGENT_ASSET}_${os}_${arch}.zip"
-    url="https://github.com/${AGENT_REPO}/releases/download/${version}/${AGENT_ASSET}_${os}_${arch}.zip"
+    merge_agent_bin_env
+    artifact_assert_bin_sources_exclusive
 
-    info "Downloading ${url} ..."
-    if ! curl -fsSL -m 120 -o "$tmpfile" "$url"; then
-        rm -rf "$tmpdir"
-        err "Failed to download agent. Confirm the release exists and GitHub is reachable."
-        exit 1
-    fi
-
-    if ! unzip -qo "$tmpfile" -d "$tmpdir"; then
-        rm -rf "$tmpdir"
-        err "Failed to extract agent."
-        exit 1
-    fi
-    if [ ! -f "${tmpdir}/${AGENT_ASSET}" ]; then
-        rm -rf "$tmpdir"
-        err "Archive does not contain ${AGENT_ASSET}."
-        exit 1
+    staged=$(mktemp 2>/dev/null || mktemp -t santaizi-agent-stage)
+    if [ -n "$ARTIFACT_BIN_PATH" ] || [ -n "$ARTIFACT_BIN_URL" ]; then
+        if ! artifact_stage_agent_asset "$AGENT_REPO" "$os" "$arch" "$AGENT_ASSET" "$staged"; then
+            rm -f "$staged"
+            exit 1
+        fi
+    else
+        ARTIFACT_BIN_VERSION=$version
+        if ! artifact_stage_agent_asset "$AGENT_REPO" "$os" "$arch" "$AGENT_ASSET" "$staged"; then
+            rm -f "$staged"
+            exit 1
+        fi
     fi
 
     info "Replacing ${AGENT_BIN} ..."
     sudo mkdir -p "$AGENT_PATH"
     sudo cp -p "$AGENT_BIN" "${AGENT_BIN}.bak"
-    sudo mv "${tmpdir}/${AGENT_ASSET}" "${AGENT_BIN}.new"
+    sudo mv "$staged" "${AGENT_BIN}.new"
     sudo chmod +x "${AGENT_BIN}.new"
     sudo mv "${AGENT_BIN}.new" "$AGENT_BIN"
-    rm -rf "$tmpdir"
     verify_replaced_binary
 }
 
@@ -365,6 +376,21 @@ while [ $# -gt 0 ]; do
             DETECT_ONLY=1
             shift
             ;;
+        --bin-path)
+            artifact_require_flag_value "$1" "${2:-}"
+            ARTIFACT_BIN_PATH=$2
+            shift 2
+            ;;
+        --bin-url)
+            artifact_require_flag_value "$1" "${2:-}"
+            ARTIFACT_BIN_URL=$2
+            shift 2
+            ;;
+        --bin-version)
+            artifact_require_flag_value "$1" "${2:-}"
+            ARTIFACT_BIN_VERSION=$2
+            shift 2
+            ;;
         *)
             break
             ;;
@@ -376,13 +402,20 @@ if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
     exit 0
 fi
 
-requested="${1:-${SANTAIZI_AGENT_VERSION:-}}"
+requested="${1:-${SANTAIZI_AGENT_VERSION:-${ARTIFACT_BIN_VERSION:-}}}"
 if [ $# -gt 1 ]; then
     usage
     exit 1
 fi
 
 detect_impl
+merge_agent_bin_env
+artifact_assert_bin_sources_exclusive
+
+custom_bin=0
+if [ -n "$ARTIFACT_BIN_PATH" ] || [ -n "$ARTIFACT_BIN_URL" ]; then
+    custom_bin=1
+fi
 
 if [ "$DETECT_ONLY" -eq 1 ]; then
     printf '%s\n' "$AGENT_IMPL"
@@ -406,6 +439,24 @@ if [ "$os" = "unknown" ] || [ "$arch" = "unknown" ]; then
 fi
 require_rust_platform "$os" "$arch"
 
+installed=$(current_version)
+if [ -n "$installed" ]; then
+    info "Current version: ${installed}"
+fi
+
+if [ "$custom_bin" -eq 1 ]; then
+    stop_agent
+    replace_binary "$os" "$arch" "${requested:-custom}"
+    start_agent
+    installed=$(current_version)
+    if [ -n "$installed" ]; then
+        success "Agent upgraded to ${installed}."
+    else
+        success "Agent upgraded."
+    fi
+    exit 0
+fi
+
 if [ -n "$requested" ]; then
     target=$(tag_name "$requested")
 else
@@ -413,10 +464,6 @@ else
     target=$(get_latest_version)
 fi
 
-installed=$(current_version)
-if [ -n "$installed" ]; then
-    info "Current version: ${installed}"
-fi
 success "Target version: ${target}"
 
 if [ -z "$requested" ] && [ -n "$installed" ] && [ "$(normalize_version "$installed")" = "$(normalize_version "$target")" ]; then

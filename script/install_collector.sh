@@ -10,7 +10,13 @@
 #
 #   SANTAIZI_COLLECTOR_RS_PARSE_ONLY=1 时只写配置与 compose（目录可用
 #   SANTAIZI_COLLECTOR_RS_DIR 覆盖），不装 Docker、不碰服务，供一次性验证。
+#   镜像：--image / SANTAIZI_COLLECTOR_RS_IMAGE、--image-tar / SANTAIZI_COLLECTOR_RS_IMAGE_TAR；
+#   --version 仅在未指定 --image 时改 GHCR 默认仓库上的 tag。
 #========================================================
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+# shellcheck source=lib/artifact.sh
+. "$SCRIPT_DIR/lib/artifact.sh"
 
 red='\033[0;31m'
 green='\033[0;32m'
@@ -101,10 +107,13 @@ Options:
   --primary-tls [true|false]        连接 Primary 时启用 TLS（可省略值，等同 true）
   --primary-insecure-tls [true|false]  跳过 Primary 证书校验（仅受控测试；可省略值，等同 true）
   --dir                安装目录（默认 /opt/santaizi/collector-rs）
-  --version            镜像标签（如 v0.1.4，默认 latest）
+  --version            镜像标签（如 v0.1.4，默认 latest；未指定 --image 时生效）
+  --image              完整镜像引用（如 registry.example.com/santaizi-dashboard-rs:v0.2.2）
+  --image-tar          离线 docker load 的 tar 路径（须配合 --image 或 load 输出中的 ref）
   -h, --help           显示帮助
 
 环境变量: SANTAIZI_COLLECTOR_RS_DIR（安装目录）
+          SANTAIZI_COLLECTOR_RS_IMAGE / SANTAIZI_COLLECTOR_RS_IMAGE_TAR
           SANTAIZI_COLLECTOR_RS_PARSE_ONLY=1（只写配置与 compose，不装 Docker、不碰服务）
 EOF
 }
@@ -148,6 +157,16 @@ parse_args() {
                 ;;
             --version)
                 REQUESTED_VERSION=$2
+                shift 2
+                ;;
+            --image)
+                artifact_require_flag_value "$1" "${2:-}"
+                ARTIFACT_IMAGE_REF=$2
+                shift 2
+                ;;
+            --image-tar)
+                artifact_require_flag_value "$1" "${2:-}"
+                ARTIFACT_IMAGE_TAR=$2
                 shift 2
                 ;;
             -h|--help)
@@ -365,20 +384,29 @@ guard_before_install_or_upgrade() {
 }
 
 set_compose_image_tag() {
-    file=$1
-    tag=$2
-    tmp="${file}.tmp.$$"
-    if ! sudo sed -e "s|^\\([[:space:]]*image:[[:space:]]*.*\\):[^:[:space:]]*[[:space:]]*$|\\1:${tag}|" "$file" | sudo tee "$tmp" >/dev/null; then
-        sudo rm -f "$tmp"
-        err "更新 compose 镜像标签失败。"
-        exit 1
+    compose_set_image_tag "$1" "$2" || exit 1
+}
+
+collector_image_ref() {
+    artifact_merge_image_env SANTAIZI_COLLECTOR_RS
+    if [ -n "$ARTIFACT_IMAGE_REF" ]; then
+        printf '%s\n' "$ARTIFACT_IMAGE_REF"
+        return
     fi
-    if ! sudo grep -Eq "^[[:space:]]*image:[[:space:]]*.*:${tag}[[:space:]]*$" "$tmp"; then
-        sudo rm -f "$tmp"
-        err "未能在 compose 文件中写入镜像标签: ${tag}"
-        exit 1
+    printf '%s\n' "${GHCR_IMAGE}:${IMAGE_TAG}"
+}
+
+apply_collector_image_flags() {
+    compose_file=$1
+    artifact_merge_image_env SANTAIZI_COLLECTOR_RS
+    if [ -n "$ARTIFACT_IMAGE_TAR" ]; then
+        artifact_docker_load_tar "$ARTIFACT_IMAGE_TAR"
     fi
-    sudo mv "$tmp" "$file"
+    if [ -n "$ARTIFACT_IMAGE_REF" ]; then
+        compose_set_image_ref "$compose_file" "$ARTIFACT_IMAGE_REF" || exit 1
+    elif [ -n "$REQUESTED_VERSION" ]; then
+        set_compose_image_tag "$compose_file" "$IMAGE_TAG"
+    fi
 }
 
 image_id() {
@@ -472,7 +500,7 @@ write_compose() {
     cat > "$1/docker-compose.yml" <<EOF
 services:
   ${CONTAINER_NAME}:
-    image: ${GHCR_IMAGE}:${IMAGE_TAG}
+    image: $(collector_image_ref)
     container_name: ${CONTAINER_NAME}
     restart: unless-stopped
     ports:
@@ -527,9 +555,10 @@ EOF
 
 main() {
     parse_args "$@"
+    artifact_merge_image_env SANTAIZI_COLLECTOR_RS
 
     IMAGE_TAG=$(normalize_tag "$REQUESTED_VERSION")
-    if ! validate_tag "$IMAGE_TAG"; then
+    if [ -z "$ARTIFACT_IMAGE_REF" ] && ! validate_tag "$IMAGE_TAG"; then
         err "无效的镜像标签: ${REQUESTED_VERSION}"
         exit 1
     fi
@@ -607,13 +636,16 @@ main() {
             if [ -n "$PRIMARY_ENDPOINT" ]; then
                 info "升级模式忽略 --primary-endpoint；需要改配置请同时提供 --token。"
             fi
-            if [ -n "$REQUESTED_VERSION" ]; then
-                info "正在将 compose 镜像标签设为 ${IMAGE_TAG} ..."
-                set_compose_image_tag "$compose" "$IMAGE_TAG"
+            if [ -n "$REQUESTED_VERSION" ] || [ -n "$ARTIFACT_IMAGE_REF" ] || [ -n "$ARTIFACT_IMAGE_TAR" ]; then
+                apply_collector_image_flags "$compose"
             fi
         fi
 
         info "请先升级 Primary，再升级从端，最后升级探针。"
+        if [ -n "$ARTIFACT_IMAGE_TAR" ] && [ -z "$ARTIFACT_IMAGE_REF" ]; then
+            err "离线 load 后请指定 --image 为 load 输出中的镜像引用。"
+            exit 1
+        fi
         pull_and_recreate "$compose"
         verify_collector_running
         print_running_version
@@ -633,6 +665,13 @@ main() {
     write_compose "$WORK_DIR"
     write_config "$WORK_DIR"
     compose="${WORK_DIR}/docker-compose.yml"
+    if [ -n "$ARTIFACT_IMAGE_TAR" ]; then
+        artifact_docker_load_tar "$ARTIFACT_IMAGE_TAR"
+    fi
+    if [ -n "$ARTIFACT_IMAGE_TAR" ] && [ -z "$ARTIFACT_IMAGE_REF" ]; then
+        err "离线 load 后请指定 --image 为 load 输出中的镜像引用。"
+        exit 1
+    fi
 
     info "正在拉取镜像并启动从端..."
     if ! run_compose pull; then

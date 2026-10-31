@@ -39,6 +39,39 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-da
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/install_dashboard.sh)" -- --upgrade
 ```
 
+## 自定义产物（离线 / 私有源）
+
+安装与升级脚本支持从**本地路径**或**第三方 URL** 取 zip/二进制，以及指定 **Docker 镜像**（含 `docker load` 的 tar）。后台「复制一键命令」仍指向官方 GitHub/GHCR；内网或镜像站场景请在目标机自行追加 CLI 或环境变量。
+
+| 组件 | 脚本 | 二进制 | 镜像 |
+| --- | --- | --- | --- |
+| 主面板 | `install_dashboard.sh` | `--bin-path` / `--bin-url` / `--bin-version`；`SANTAIZI_DASHBOARD_RS_BIN_*` | `--image` / `--image-tar`；`SANTAIZI_DASHBOARD_RS_IMAGE*` |
+| Rust 探针 | `install_agent_rs.sh`、`upgrade_agent.sh` | 同上（`SANTAIZI_AGENT_RS_BIN_*`；Go 探针升级用 `SANTAIZI_AGENT_BIN_*`） | — |
+| Rust 从端 | `install_collector.sh`、`upgrade_collector.sh` | — | `--image` / `--image-tar`；`SANTAIZI_COLLECTOR_RS_IMAGE*`；`--version` 仅在未指定 `--image` 时改 GHCR 默认 tag |
+
+**校验和**：官方 GitHub Release 强制 `checksums.txt`。`--bin-url` 会尝试同目录 `checksums.txt`；否则须 `SANTAIZI_*_SKIP_CHECKSUM=1`。本地 zip 可选同目录 `checksums.txt`。
+
+**示例**
+
+```bash
+# 升级面板二进制（不交互）
+sh -c "$(curl -fsSL .../install_dashboard.sh)" -- --upgrade \
+  --bin-path /srv/mirror/santaizi-dashboard-linux-amd64.zip
+
+# 升级探针（Rust，指定 Release tag）
+/usr/local/bin/upgrade_agent.sh v1.0.7
+
+# 探针来自内网 HTTP
+/usr/local/bin/upgrade_agent.sh --bin-url https://mirror.internal/agent/santaizi-agent-rs_linux_amd64.zip
+
+# 从端私有 registry
+curl -fsSL .../install_collector.sh | bash -s -- --image registry.internal/santaizi-dashboard-rs:v0.2.2
+
+# 离线镜像 tar（load 后须与 --image 一致）
+curl -fsSL .../install_collector.sh | bash -s -- \
+  --image-tar /srv/santaizi-dashboard-rs.tar --image registry.internal/santaizi-dashboard-rs:v0.2.2
+```
+
 ## 手动：二进制 + systemd
 
 从 [Release](https://github.com/santaizi-group/santaizi-dashboard-rs/releases) 下载 `santaizi-dashboard-linux-amd64.zip` 或 `santaizi-dashboard-linux-arm64.zip`，用同目录 `checksums.txt` 核对 SHA256。zip 内文件名带平台后缀，安装时改名为 `santaizi-dashboard`。
@@ -124,6 +157,8 @@ curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-r
 ```bash
 curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/install_collector.sh | bash
 ```
+
+私有镜像示例：`bash -s -- --image registry.example.com/santaizi-dashboard-rs:v0.2.2`（见上文 [自定义产物](#自定义产物离线--私有源)）。
 
 仅升级、且主机上可能同时存在 Go 与 Rust 两套从端时，使用 [`script/upgrade_collector.sh`](../script/upgrade_collector.sh)：脚本会先识别本机安装（镜像与目录），只升级对应一套；两套都在时须设置 `SANTAIZI_COLLECTOR_IMPL=go|rust` 或使用 `--impl`。
 

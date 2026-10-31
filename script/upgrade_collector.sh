@@ -5,7 +5,12 @@
 #   只拉取镜像并重建容器；保留配置、注册身份和数据目录
 #   自动识别本机 Rust / Go 从端（目录与镜像不同，可共存）
 #   覆盖：SANTAIZI_COLLECTOR_IMPL=go|rust 或 --impl go|rust
+#   镜像：--image / SANTAIZI_COLLECTOR_RS_IMAGE、--image-tar；--version 仅未指定 --image 时改 tag
 #========================================================
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+# shellcheck source=lib/artifact.sh
+. "$SCRIPT_DIR/lib/artifact.sh"
 
 GO_DIR="${SANTAIZI_COLLECTOR_DIR:-/opt/santaizi/collector}"
 RS_DIR="${SANTAIZI_COLLECTOR_RS_DIR:-/opt/santaizi/collector-rs}"
@@ -40,7 +45,9 @@ Usage: $0 [upgrade_collector] [版本] [--dir <path>] [--impl go|rust] [--detect
 
 Options:
   --dir                从端工作目录（指定后只根据该目录识别实现，不扫描默认双目录）
-  --version            镜像标签（如 v1.0.1；不传则拉取 compose 中现有标签）
+  --version            镜像标签（如 v1.0.1；未指定 --image 时改 GHCR 默认仓库 tag）
+  --image              完整镜像引用（私有 registry 等）
+  --image-tar          离线 docker load 的 tar 路径
   --impl               强制 Rust 或 Go 实现（与 --dir 联用时须与目录内安装一致）
   --detect-only        只输出 rust 或 go 后退出，不调用 Docker
   -h, --help           显示帮助
@@ -49,6 +56,7 @@ Options:
   SANTAIZI_COLLECTOR_DIR / SANTAIZI_COLLECTOR_RS_DIR   默认安装目录
   SANTAIZI_COLLECTOR_IMPL=go|rust                      强制实现（两套并存时必填其一）
   SANTAIZI_COLLECTOR_VERSION                           镜像标签
+  SANTAIZI_COLLECTOR_RS_IMAGE / SANTAIZI_COLLECTOR_RS_IMAGE_TAR
   SANTAIZI_COLLECTOR_DETECT_ONLY=1                     同 --detect-only
 
 示例:
@@ -254,20 +262,32 @@ detect_impl() {
 }
 
 set_compose_image_tag() {
-    file=$1
-    tag=$2
-    tmp="${file}.tmp.$$"
-    if ! sudo sed -e "s|^\\([[:space:]]*image:[[:space:]]*.*\\):[^:[:space:]]*[[:space:]]*$|\\1:${tag}|" "$file" | sudo tee "$tmp" >/dev/null; then
-        sudo rm -f "$tmp"
-        err "更新 compose 镜像标签失败。"
-        exit 1
+    compose_set_image_tag "$1" "$2" || exit 1
+}
+
+set_compose_image_ref() {
+    compose_set_image_ref "$1" "$2" || exit 1
+}
+
+apply_collector_upgrade_image() {
+    artifact_merge_image_env SANTAIZI_COLLECTOR_RS
+    if [ -n "$ARTIFACT_IMAGE_TAR" ]; then
+        artifact_docker_load_tar "$ARTIFACT_IMAGE_TAR"
     fi
-    if ! sudo grep -Eq "^[[:space:]]*image:[[:space:]]*.*:${tag}[[:space:]]*$" "$tmp"; then
-        sudo rm -f "$tmp"
-        err "未能在 compose 文件中写入镜像标签: ${tag}"
-        exit 1
+    if [ -n "$ARTIFACT_IMAGE_REF" ]; then
+        info "正在将 compose 镜像设为 ${ARTIFACT_IMAGE_REF} ..."
+        set_compose_image_ref "$COMPOSE_FILE" "$ARTIFACT_IMAGE_REF"
+        return
     fi
-    sudo mv "$tmp" "$file"
+    if [ -n "$REQUESTED_VERSION" ]; then
+        IMAGE_TAG=$(normalize_tag "$REQUESTED_VERSION")
+        if ! validate_tag "$IMAGE_TAG"; then
+            err "无效的镜像标签: ${REQUESTED_VERSION}"
+            exit 1
+        fi
+        info "正在将 compose 镜像标签设为 ${IMAGE_TAG} ..."
+        set_compose_image_tag "$COMPOSE_FILE" "$IMAGE_TAG"
+    fi
 }
 
 image_id() {
@@ -394,6 +414,16 @@ parse_args() {
                 REQUESTED_VERSION=$2
                 shift 2
                 ;;
+            --image)
+                artifact_require_flag_value "$1" "${2:-}"
+                ARTIFACT_IMAGE_REF=$2
+                shift 2
+                ;;
+            --image-tar)
+                artifact_require_flag_value "$1" "${2:-}"
+                ARTIFACT_IMAGE_TAR=$2
+                shift 2
+                ;;
             --impl)
                 REQUESTED_IMPL=$2
                 shift 2
@@ -477,15 +507,12 @@ main() {
         exit 1
     }
 
-    if [ -n "$REQUESTED_VERSION" ]; then
-        IMAGE_TAG=$(normalize_tag "$REQUESTED_VERSION")
-        if ! validate_tag "$IMAGE_TAG"; then
-            err "无效的镜像标签: ${REQUESTED_VERSION}"
-            exit 1
-        fi
-        info "正在将 compose 镜像标签设为 ${IMAGE_TAG} ..."
-        set_compose_image_tag "$COMPOSE_FILE" "$IMAGE_TAG"
+    if [ -n "$ARTIFACT_IMAGE_TAR" ] && [ -z "$ARTIFACT_IMAGE_REF" ]; then
+        err "离线 load 后请指定 --image 为 load 输出中的镜像引用。"
+        exit 1
     fi
+
+    apply_collector_upgrade_image
 
     info "请先升级 Primary，再升级从端，最后升级探针。"
     pull_and_recreate "$COMPOSE_FILE"

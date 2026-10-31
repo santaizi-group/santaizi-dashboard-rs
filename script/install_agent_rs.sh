@@ -5,8 +5,14 @@
 #   默认从 santaizi-group/santaizi-agent-rs 下载，可通过 SANTAIZI_AGENT_RS_REPO 覆盖
 #   仅 Linux amd64 / arm64。无 service install：脚本写入与 Go 相同的能力开关、
 #   IP 上报字段和主端拨号缓存。systemd 只带 --config。
+#   二进制来源：官方 Release（默认）、--bin-path / SANTAIZI_AGENT_RS_BIN_PATH、
+#   --bin-url / SANTAIZI_AGENT_RS_BIN_URL、--bin-version / SANTAIZI_AGENT_RS_BIN_VERSION。
 #   SANTAIZI_AGENT_RS_PARSE_ONLY=1 时只写 yaml 与拨号缓存（路径可用环境变量覆盖）。
 #========================================================
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+# shellcheck source=lib/artifact.sh
+. "$SCRIPT_DIR/lib/artifact.sh"
 
 SANTAIZI_BASE_PATH="/opt/santaizi"
 SANTAIZI_AGENT_RS_PATH="${SANTAIZI_BASE_PATH}/agent-rs"
@@ -185,6 +191,8 @@ prepare_clean_install() {
 }
 
 install_agent_rs() {
+    artifact_merge_bin_env SANTAIZI_AGENT_RS
+    artifact_assert_bin_sources_exclusive
     deps_check
 
     os=$(detect_os)
@@ -194,55 +202,25 @@ install_agent_rs() {
         exit 1
     fi
 
-    info "正在获取 Rust 探针最新版本..."
-    version=$(get_latest_version)
-    success "最新版本: ${version}"
-
-    tmpfile="/tmp/santaizi-agent-rs_${os}_${arch}.zip"
-    url="https://github.com/${SANTAIZI_AGENT_RS_REPO}/releases/download/${version}/santaizi-agent-rs_${os}_${arch}.zip"
-
-    info "正在下载 ${url} ..."
-    if ! curl -fsSL -m 60 -o "$tmpfile" "$url"; then
-        err "下载 Rust 探针失败，请检查网络连接，并确认该版本已发布 linux ${arch} 产物。"
-        exit 1
+    if [ -z "$ARTIFACT_BIN_PATH" ] && [ -z "$ARTIFACT_BIN_URL" ]; then
+        info "正在获取 Rust 探针最新版本..."
     fi
 
     info "正在安装到 ${SANTAIZI_AGENT_RS_PATH} ..."
     sudo mkdir -p "$SANTAIZI_AGENT_RS_PATH"
     sudo mkdir -p "$(dirname "$SANTAIZI_AGENT_YAML")" "$SANTAIZI_AGENT_DATA"
-    sudo unzip -qo "$tmpfile" -d "$SANTAIZI_AGENT_RS_PATH" || {
-        err "解压 Rust 探针失败。"
-        rm -f "$tmpfile"
-        exit 1
-    }
-    rm -f "$tmpfile"
-    if [ ! -f "$SANTAIZI_AGENT_RS_BIN" ]; then
-        err "解压后未找到 ${SANTAIZI_AGENT_RS_BIN}"
+    staged=$(mktemp)
+    if ! artifact_stage_agent_asset "$SANTAIZI_AGENT_RS_REPO" "$os" "$arch" "santaizi-agent-rs" "$staged"; then
+        rm -f "$staged"
         exit 1
     fi
+    sudo mv "$staged" "$SANTAIZI_AGENT_RS_BIN"
     sudo chmod +x "$SANTAIZI_AGENT_RS_BIN"
-    verify_agent_binary
+    artifact_verify_agent_rs "$SANTAIZI_AGENT_RS_BIN"
 }
 
-# 发布产物是静态 musl，本来不该有 loader 报错；这一步是兜底：下载残缺、
-# 架构不匹配、分区 noexec 都会在这里现形，而不是等 systemd 里只剩
-# status=1/FAILURE。版本输出走 --version，不需要配置和密钥。
 verify_agent_binary() {
-    output=$("$SANTAIZI_AGENT_RS_BIN" --version 2>&1)
-    if [ $? -eq 0 ]; then
-        return 0
-    fi
-    case "$output" in
-        *GLIBC_*not\ found*)
-            err "Rust 探针二进制无法启动：$(printf '%s' "$output" | head -n 1)"
-            err "发布产物为静态 musl，不依赖 glibc；若手动替换过二进制，请改用 script/build-release.sh 的产物。"
-            ;;
-        *)
-            err "Rust 探针二进制无法执行：${output:-无输出}"
-            err "请检查下载是否完整、架构是否匹配（仅 linux amd64 / arm64）。"
-            ;;
-    esac
-    exit 1
+    artifact_verify_agent_rs "$SANTAIZI_AGENT_RS_BIN"
 }
 
 write_owned_file() {
@@ -628,9 +606,10 @@ configure_agent() {
 
 usage() {
     echo "用法: $0 [install_agent] <服务器地址> <端口> <密钥> [--clean-install --confirm-clean-install] [--tls] [--server-ip IP] [能力开关]"
+    echo "      [--bin-path PATH] [--bin-url URL] [--bin-version TAG]"
     echo "示例: $0 install_agent grpc.example.com 5555 abcdef --clean-install --confirm-clean-install --tls --disable-nat --server-ip 192.0.2.10"
     echo "能力开关、IP 上报和 --server-ip 与 Go 探针安装脚本相同。仅支持 Linux amd64 / arm64。"
-    echo "仓库可用 SANTAIZI_AGENT_RS_REPO 覆盖。"
+    echo "仓库可用 SANTAIZI_AGENT_RS_REPO 覆盖；二进制可用 SANTAIZI_AGENT_RS_BIN_PATH / _BIN_URL / _BIN_VERSION / _SKIP_CHECKSUM=1。"
 }
 
 if [ "${1:-}" = "install_agent" ]; then
@@ -694,6 +673,21 @@ while [ $# -gt 0 ]; do
         --disable-nat) CAP_NAT=false; shift ;;
         --temperature) CAP_TEMPERATURE=true; shift ;;
         --gpu) CAP_GPU=true; shift ;;
+        --bin-path)
+            require_flag_value "$1" "${2:-}"
+            ARTIFACT_BIN_PATH=$2
+            shift 2
+            ;;
+        --bin-url)
+            require_flag_value "$1" "${2:-}"
+            ARTIFACT_BIN_URL=$2
+            shift 2
+            ;;
+        --bin-version)
+            require_flag_value "$1" "${2:-}"
+            ARTIFACT_BIN_VERSION=$2
+            shift 2
+            ;;
         *)
             err "不支持的参数: $1"
             exit 1
@@ -702,6 +696,9 @@ while [ $# -gt 0 ]; do
 done
 
 reject_unconfirmed_clean
+
+artifact_merge_bin_env SANTAIZI_AGENT_RS
+artifact_assert_bin_sources_exclusive
 
 if [ "${SANTAIZI_AGENT_RS_PARSE_ONLY:-0}" = 1 ]; then
     configure_agent "$install_host" "$install_port" "$install_secret"
