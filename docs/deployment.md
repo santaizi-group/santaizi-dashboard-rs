@@ -43,6 +43,8 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-da
 
 安装与升级脚本支持从**本地路径**或**第三方 URL** 取 zip/二进制，以及指定 **Docker 镜像**（含 `docker load` 的 tar）。后台「复制一键命令」仍指向官方 GitHub/GHCR；内网或镜像站场景请在目标机自行追加 CLI 或环境变量。
 
+`curl | bash` 会再拉取 `script/lib/artifact.sh`（与脚本同一 ref）。默认 `https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/lib/artifact.sh`。换 ref 设 `SANTAIZI_SCRIPT_REF`；换地址设 `SANTAIZI_ARTIFACT_SH_URL`。拉不到该文件时脚本直接退出，不会清洁安装或停服务。
+
 | 组件 | 脚本 | 二进制 | 镜像 |
 | --- | --- | --- | --- |
 | 主面板 | `install_dashboard.sh` | `--bin-path` / `--bin-url` / `--bin-version`；`SANTAIZI_DASHBOARD_RS_BIN_*` | `--image` / `--image-tar`；`SANTAIZI_DASHBOARD_RS_IMAGE*` |

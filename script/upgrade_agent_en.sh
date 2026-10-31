@@ -10,9 +10,36 @@
 #   Binary: --bin-path / --bin-url / --bin-version or SANTAIZI_AGENT(_RS)_BIN_*
 #========================================================
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-# shellcheck source=lib/artifact.sh
-. "$SCRIPT_DIR/lib/artifact.sh"
+# curl|bash sets $0 to the shell, so a sibling lib cannot be found that way.
+load_artifact_lib() {
+    _self=$0
+    case $_self in
+        /*|./*|../*|*/*)
+            _dir=$(CDPATH= cd -- "$(dirname "$_self")" && pwd) || _dir=""
+            if [ -n "$_dir" ] && [ -f "$_dir/lib/artifact.sh" ]; then
+                # shellcheck disable=SC1091
+                . "$_dir/lib/artifact.sh" || exit 1
+                return 0
+            fi
+            ;;
+    esac
+    _repo=${SANTAIZI_DASHBOARD_RS_REPO:-santaizi-group/santaizi-dashboard-rs}
+    _ref=${SANTAIZI_SCRIPT_REF:-main}
+    _url=${SANTAIZI_ARTIFACT_SH_URL:-https://raw.githubusercontent.com/${_repo}/${_ref}/script/lib/artifact.sh}
+    _tmp=$(mktemp) || exit 1
+    if ! curl -fsSL -m 30 -o "$_tmp" "$_url"; then
+        printf '%s\n' "failed to load ${_url}" >&2
+        rm -f "$_tmp"
+        exit 1
+    fi
+    # shellcheck disable=SC1090
+    . "$_tmp" || {
+        rm -f "$_tmp"
+        exit 1
+    }
+    rm -f "$_tmp"
+}
+load_artifact_lib
 
 SANTAIZI_BASE_PATH="/opt/santaizi"
 SANTAIZI_AGENT_PATH="${SANTAIZI_AGENT_PATH:-${SANTAIZI_BASE_PATH}/agent}"
@@ -350,6 +377,7 @@ replace_binary() {
         fi
     fi
 
+    stop_agent
     info "Replacing ${AGENT_BIN} ..."
     sudo mkdir -p "$AGENT_PATH"
     sudo cp -p "$AGENT_BIN" "${AGENT_BIN}.bak"
@@ -445,7 +473,6 @@ if [ -n "$installed" ]; then
 fi
 
 if [ "$custom_bin" -eq 1 ]; then
-    stop_agent
     replace_binary "$os" "$arch" "${requested:-custom}"
     start_agent
     installed=$(current_version)
@@ -471,7 +498,6 @@ if [ -z "$requested" ] && [ -n "$installed" ] && [ "$(normalize_version "$instal
     exit 0
 fi
 
-stop_agent
 replace_binary "$os" "$arch" "$target"
 start_agent
 

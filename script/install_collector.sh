@@ -14,9 +14,36 @@
 #   --version 仅在未指定 --image 时改 GHCR 默认仓库上的 tag。
 #========================================================
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-# shellcheck source=lib/artifact.sh
-. "$SCRIPT_DIR/lib/artifact.sh"
+# curl|bash 时 $0 是 shell，不能靠 dirname 找旁边的 lib。失败必须立刻退出。
+load_artifact_lib() {
+    _self=$0
+    case $_self in
+        /*|./*|../*|*/*)
+            _dir=$(CDPATH= cd -- "$(dirname "$_self")" && pwd) || _dir=""
+            if [ -n "$_dir" ] && [ -f "$_dir/lib/artifact.sh" ]; then
+                # shellcheck disable=SC1091
+                . "$_dir/lib/artifact.sh" || exit 1
+                return 0
+            fi
+            ;;
+    esac
+    _repo=${SANTAIZI_DASHBOARD_RS_REPO:-santaizi-group/santaizi-dashboard-rs}
+    _ref=${SANTAIZI_SCRIPT_REF:-main}
+    _url=${SANTAIZI_ARTIFACT_SH_URL:-https://raw.githubusercontent.com/${_repo}/${_ref}/script/lib/artifact.sh}
+    _tmp=$(mktemp) || exit 1
+    if ! curl -fsSL -m 30 -o "$_tmp" "$_url"; then
+        printf '%s\n' "无法加载 ${_url}" >&2
+        rm -f "$_tmp"
+        exit 1
+    fi
+    # shellcheck disable=SC1090
+    . "$_tmp" || {
+        rm -f "$_tmp"
+        exit 1
+    }
+    rm -f "$_tmp"
+}
+load_artifact_lib
 
 red='\033[0;31m'
 green='\033[0;32m'

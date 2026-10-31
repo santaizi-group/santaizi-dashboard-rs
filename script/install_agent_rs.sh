@@ -10,9 +10,36 @@
 #   SANTAIZI_AGENT_RS_PARSE_ONLY=1 时只写 yaml 与拨号缓存（路径可用环境变量覆盖）。
 #========================================================
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-# shellcheck source=lib/artifact.sh
-. "$SCRIPT_DIR/lib/artifact.sh"
+# curl|bash 时 $0 是 shell，不能靠 dirname 找旁边的 lib。失败必须立刻退出。
+load_artifact_lib() {
+    _self=$0
+    case $_self in
+        /*|./*|../*|*/*)
+            _dir=$(CDPATH= cd -- "$(dirname "$_self")" && pwd) || _dir=""
+            if [ -n "$_dir" ] && [ -f "$_dir/lib/artifact.sh" ]; then
+                # shellcheck disable=SC1091
+                . "$_dir/lib/artifact.sh" || exit 1
+                return 0
+            fi
+            ;;
+    esac
+    _repo=${SANTAIZI_DASHBOARD_RS_REPO:-santaizi-group/santaizi-dashboard-rs}
+    _ref=${SANTAIZI_SCRIPT_REF:-main}
+    _url=${SANTAIZI_ARTIFACT_SH_URL:-https://raw.githubusercontent.com/${_repo}/${_ref}/script/lib/artifact.sh}
+    _tmp=$(mktemp) || exit 1
+    if ! curl -fsSL -m 30 -o "$_tmp" "$_url"; then
+        printf '%s\n' "无法加载 ${_url}" >&2
+        rm -f "$_tmp"
+        exit 1
+    fi
+    # shellcheck disable=SC1090
+    . "$_tmp" || {
+        rm -f "$_tmp"
+        exit 1
+    }
+    rm -f "$_tmp"
+}
+load_artifact_lib
 
 SANTAIZI_BASE_PATH="/opt/santaizi"
 SANTAIZI_AGENT_RS_PATH="${SANTAIZI_BASE_PATH}/agent-rs"
@@ -206,15 +233,18 @@ install_agent_rs() {
         info "正在获取 Rust 探针最新版本..."
     fi
 
+    STAGED_AGENT=$(mktemp)
+    if ! artifact_stage_agent_asset "$SANTAIZI_AGENT_RS_REPO" "$os" "$arch" "santaizi-agent-rs" "$STAGED_AGENT"; then
+        rm -f "$STAGED_AGENT"
+        exit 1
+    fi
+}
+
+install_staged_agent_rs() {
     info "正在安装到 ${SANTAIZI_AGENT_RS_PATH} ..."
     sudo mkdir -p "$SANTAIZI_AGENT_RS_PATH"
     sudo mkdir -p "$(dirname "$SANTAIZI_AGENT_YAML")" "$SANTAIZI_AGENT_DATA"
-    staged=$(mktemp)
-    if ! artifact_stage_agent_asset "$SANTAIZI_AGENT_RS_REPO" "$os" "$arch" "santaizi-agent-rs" "$staged"; then
-        rm -f "$staged"
-        exit 1
-    fi
-    sudo mv "$staged" "$SANTAIZI_AGENT_RS_BIN"
+    sudo mv "$STAGED_AGENT" "$SANTAIZI_AGENT_RS_BIN"
     sudo chmod +x "$SANTAIZI_AGENT_RS_BIN"
     artifact_verify_agent_rs "$SANTAIZI_AGENT_RS_BIN"
 }
@@ -610,6 +640,7 @@ usage() {
     echo "示例: $0 install_agent grpc.example.com 5555 abcdef --clean-install --confirm-clean-install --tls --disable-nat --server-ip 192.0.2.10"
     echo "能力开关、IP 上报和 --server-ip 与 Go 探针安装脚本相同。仅支持 Linux amd64 / arm64。"
     echo "仓库可用 SANTAIZI_AGENT_RS_REPO 覆盖；二进制可用 SANTAIZI_AGENT_RS_BIN_PATH / _BIN_URL / _BIN_VERSION / _SKIP_CHECKSUM=1。"
+    echo "管道执行会拉取 script/lib/artifact.sh；可用 SANTAIZI_SCRIPT_REF 或 SANTAIZI_ARTIFACT_SH_URL 指定。"
 }
 
 if [ "${1:-}" = "install_agent" ]; then
@@ -705,6 +736,7 @@ if [ "${SANTAIZI_AGENT_RS_PARSE_ONLY:-0}" = 1 ]; then
     exit 0
 fi
 
-prepare_clean_install
 install_agent_rs
+prepare_clean_install
+install_staged_agent_rs
 configure_agent "$install_host" "$install_port" "$install_secret"
