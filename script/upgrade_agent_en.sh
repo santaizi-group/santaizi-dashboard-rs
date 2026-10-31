@@ -377,13 +377,30 @@ replace_binary() {
         fi
     fi
 
+    if [ ! -s "$staged" ] || [ ! -x "$staged" ]; then
+        err "Staged agent binary is not executable."
+        rm -f "$staged"
+        exit 1
+    fi
+
     stop_agent
     info "Replacing ${AGENT_BIN} ..."
     sudo mkdir -p "$AGENT_PATH"
     sudo cp -p "$AGENT_BIN" "${AGENT_BIN}.bak"
-    sudo mv "$staged" "${AGENT_BIN}.new"
+    if ! sudo mv "$staged" "${AGENT_BIN}.new"; then
+        err "Failed to replace the agent binary."
+        sudo rm -f "${AGENT_BIN}.bak"
+        rm -f "$staged"
+        start_agent
+        exit 1
+    fi
     sudo chmod +x "${AGENT_BIN}.new"
-    sudo mv "${AGENT_BIN}.new" "$AGENT_BIN"
+    if ! sudo mv "${AGENT_BIN}.new" "$AGENT_BIN"; then
+        err "Failed to replace the agent binary."
+        sudo mv "${AGENT_BIN}.bak" "$AGENT_BIN"
+        start_agent
+        exit 1
+    fi
     verify_replaced_binary
 }
 

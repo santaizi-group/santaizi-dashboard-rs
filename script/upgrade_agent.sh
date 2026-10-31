@@ -376,13 +376,30 @@ replace_binary() {
         fi
     fi
 
+    if [ ! -s "$staged" ] || [ ! -x "$staged" ]; then
+        err "暂存的探针二进制不可执行。"
+        rm -f "$staged"
+        exit 1
+    fi
+
     stop_agent
     info "正在替换 ${AGENT_BIN} ..."
     sudo mkdir -p "$AGENT_PATH"
     sudo cp -p "$AGENT_BIN" "${AGENT_BIN}.bak"
-    sudo mv "$staged" "${AGENT_BIN}.new"
+    if ! sudo mv "$staged" "${AGENT_BIN}.new"; then
+        err "替换探针二进制失败。"
+        sudo rm -f "${AGENT_BIN}.bak"
+        rm -f "$staged"
+        start_agent
+        exit 1
+    fi
     sudo chmod +x "${AGENT_BIN}.new"
-    sudo mv "${AGENT_BIN}.new" "$AGENT_BIN"
+    if ! sudo mv "${AGENT_BIN}.new" "$AGENT_BIN"; then
+        err "替换探针二进制失败。"
+        sudo mv "${AGENT_BIN}.bak" "$AGENT_BIN"
+        start_agent
+        exit 1
+    fi
     verify_replaced_binary
 }
 

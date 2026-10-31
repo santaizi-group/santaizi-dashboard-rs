@@ -117,191 +117,194 @@ artifact_github_release_version() {
         esac
         return 0
     fi
-    version=$(curl -fsSL -m 10 "https://api.github.com/repos/${repo}/releases/latest" | grep '"tag_name":' | head -n 1 | sed 's/.*"tag_name": "\(.*\)",.*/\1/')
-    if [ -z "$version" ]; then
+    art_version=$(curl -fsSL -m 10 "https://api.github.com/repos/${repo}/releases/latest" | grep '"tag_name":' | head -n 1 | sed 's/.*"tag_name": "\(.*\)",.*/\1/')
+    if [ -z "$art_version" ]; then
         err "获取版本失败，请检查网络是否能访问 GitHub API：${repo}"
         return 1
     fi
-    printf '%s\n' "$version"
+    printf '%s\n' "$art_version"
 }
 
 artifact_extract_zip_member() {
-    zipfile=$1
-    inner_name=$2
-    dest=$3
-    stage=$(mktemp -d)
-    if ! unzip -qo "$zipfile" -d "$stage"; then
-        err "解压失败: ${zipfile}"
-        rm -rf "$stage"
+    art_zipfile=$1
+    art_inner_name=$2
+    art_dest=$3
+    art_stage=$(mktemp -d)
+    if ! unzip -qo "$art_zipfile" -d "$art_stage"; then
+        err "解压失败: ${art_zipfile}"
+        rm -rf "$art_stage"
         return 1
     fi
-    inner="${stage}/${inner_name}"
-    if [ ! -f "$inner" ]; then
-        err "压缩包中未找到 ${inner_name}"
-        rm -rf "$stage"
+    art_inner="${art_stage}/${art_inner_name}"
+    if [ ! -f "$art_inner" ]; then
+        err "压缩包中未找到 ${art_inner_name}"
+        rm -rf "$art_stage"
         return 1
     fi
-    mv "$inner" "$dest"
-    rm -rf "$stage"
+    if [ "$art_inner" = "$art_dest" ]; then
+        err "解压目标与压缩包内文件是同一路径: ${art_dest}"
+        rm -rf "$art_stage"
+        return 1
+    fi
+    if ! mv "$art_inner" "$art_dest"; then
+        err "无法写入 ${art_dest}"
+        rm -rf "$art_stage"
+        return 1
+    fi
+    rm -rf "$art_stage"
+    chmod +x "$art_dest" || return 1
     return 0
 }
 
 artifact_stage_from_path() {
-    src=$1
-    inner_name=$2
-    zip_basename=$3
-    dest=$4
-    if [ ! -e "$src" ]; then
-        err "本地路径不存在: ${src}"
+    art_src=$1
+    art_inner_name=$2
+    art_zip_basename=$3
+    art_dest=$4
+    if [ ! -e "$art_src" ]; then
+        err "本地路径不存在: ${art_src}"
         return 1
     fi
-    case $src in
+    case $art_src in
         *.zip)
-            if ! artifact_local_checksum_file "$src" "$zip_basename"; then
+            if ! artifact_local_checksum_file "$art_src" "$art_zip_basename"; then
                 return 1
             fi
-            artifact_extract_zip_member "$src" "$inner_name" "$dest"
+            artifact_extract_zip_member "$art_src" "$art_inner_name" "$art_dest"
             ;;
         *)
-            if [ ! -f "$src" ]; then
-                err "本地路径不是文件: ${src}"
+            if [ ! -f "$art_src" ]; then
+                err "本地路径不是文件: ${art_src}"
                 return 1
             fi
-            cp "$src" "$dest"
-            chmod +x "$dest"
+            if [ "$art_src" = "$art_dest" ]; then
+                chmod +x "$art_dest" || return 1
+                return 0
+            fi
+            cp "$art_src" "$art_dest" || return 1
+            chmod +x "$art_dest" || return 1
             ;;
     esac
 }
 
 artifact_stage_from_url() {
-    url=$1
-    inner_name=$2
-    zip_basename=$3
-    dest=$4
-    tmpzip=$(mktemp)
-    tmpsums=$(mktemp)
-    if ! curl -fsSL -m 180 -o "$tmpzip" "$url"; then
-        err "下载失败: ${url}"
-        rm -f "$tmpzip" "$tmpsums"
+    art_url=$1
+    art_inner_name=$2
+    art_zip_basename=$3
+    art_dest=$4
+    art_tmpzip=$(mktemp)
+    art_tmpsums=$(mktemp)
+    if ! curl -fsSL -m 180 -o "$art_tmpzip" "$art_url"; then
+        err "下载失败: ${art_url}"
+        rm -f "$art_tmpzip" "$art_tmpsums"
         return 1
     fi
-    sums_url=$(artifact_checksum_url_from_zip_url "$url")
-    if [ -n "$sums_url" ]; then
-        if curl -fsSL -m 60 -o "$tmpsums" "$sums_url"; then
-            if ! artifact_verify_checksum_file "$tmpzip" "$zip_basename" "$tmpsums"; then
-                rm -f "$tmpzip" "$tmpsums"
+    art_sums_url=$(artifact_checksum_url_from_zip_url "$art_url")
+    if [ -n "$art_sums_url" ]; then
+        if curl -fsSL -m 60 -o "$art_tmpsums" "$art_sums_url"; then
+            if ! artifact_verify_checksum_file "$art_tmpzip" "$art_zip_basename" "$art_tmpsums"; then
+                rm -f "$art_tmpzip" "$art_tmpsums"
                 return 1
             fi
         elif [ "$ARTIFACT_SKIP_CHECKSUM" = 1 ]; then
             info "未获取 checksums.txt，已按 SANTAIZI_*_SKIP_CHECKSUM=1 跳过校验。"
         else
-            err "无法下载 checksums.txt（${sums_url}）。若信任该 URL，请设置 SANTAIZI_*_SKIP_CHECKSUM=1。"
-            rm -f "$tmpzip" "$tmpsums"
+            err "无法下载 checksums.txt（${art_sums_url}）。若信任该 URL，请设置 SANTAIZI_*_SKIP_CHECKSUM=1。"
+            rm -f "$art_tmpzip" "$art_tmpsums"
             return 1
         fi
     elif [ "$ARTIFACT_SKIP_CHECKSUM" = 1 ]; then
         info "未校验下载产物（SANTAIZI_*_SKIP_CHECKSUM=1）。"
     else
         err "第三方 URL 须能推导 checksums.txt，或设置 SANTAIZI_*_SKIP_CHECKSUM=1。"
-        rm -f "$tmpzip" "$tmpsums"
+        rm -f "$art_tmpzip" "$art_tmpsums"
         return 1
     fi
-    rm -f "$tmpsums"
-    if ! artifact_extract_zip_member "$tmpzip" "$inner_name" "$dest"; then
-        rm -f "$tmpzip"
+    rm -f "$art_tmpsums"
+    if ! artifact_extract_zip_member "$art_tmpzip" "$art_inner_name" "$art_dest"; then
+        rm -f "$art_tmpzip"
         return 1
     fi
-    rm -f "$tmpzip"
-    chmod +x "$dest"
+    rm -f "$art_tmpzip"
     return 0
 }
 
 artifact_stage_from_github() {
-    repo=$1
-    os=$2
-    arch=$3
-    zip_basename=$4
-    inner_name=$5
-    dest=$6
-    require_checksum=$7
-    version=$(artifact_github_release_version "$repo") || return 1
-    success "目标版本: ${version}"
-    base="https://github.com/${repo}/releases/download/${version}"
-    tmpzip=$(mktemp)
-    tmpsums=$(mktemp)
-    info "正在下载 ${base}/${zip_basename} ..."
-    if ! curl -fsSL -m 180 -o "$tmpzip" "${base}/${zip_basename}"; then
-        err "下载失败，请确认该版本已发布 ${zip_basename}。"
-        rm -f "$tmpzip" "$tmpsums"
+    art_repo=$1
+    art_os=$2
+    art_arch=$3
+    art_zip_basename=$4
+    art_inner_name=$5
+    art_dest=$6
+    art_require_checksum=$7
+    art_version=$(artifact_github_release_version "$art_repo") || return 1
+    success "目标版本: ${art_version}"
+    art_base="https://github.com/${art_repo}/releases/download/${art_version}"
+    art_tmpzip=$(mktemp)
+    art_tmpsums=$(mktemp)
+    info "正在下载 ${art_base}/${art_zip_basename} ..."
+    if ! curl -fsSL -m 180 -o "$art_tmpzip" "${art_base}/${art_zip_basename}"; then
+        err "下载失败，请确认该版本已发布 ${art_zip_basename}。"
+        rm -f "$art_tmpzip" "$art_tmpsums"
         return 1
     fi
-    if [ "$require_checksum" = 1 ]; then
-        if ! curl -fsSL -m 60 -o "$tmpsums" "${base}/checksums.txt"; then
+    if [ "$art_require_checksum" = 1 ]; then
+        if ! curl -fsSL -m 60 -o "$art_tmpsums" "${art_base}/checksums.txt"; then
             err "下载 checksums.txt 失败，无法校验产物完整性。"
-            rm -f "$tmpzip" "$tmpsums"
+            rm -f "$art_tmpzip" "$art_tmpsums"
             return 1
         fi
-        if ! artifact_verify_checksum_file "$tmpzip" "$zip_basename" "$tmpsums"; then
-            rm -f "$tmpzip" "$tmpsums"
+        if ! artifact_verify_checksum_file "$art_tmpzip" "$art_zip_basename" "$art_tmpsums"; then
+            rm -f "$art_tmpzip" "$art_tmpsums"
             return 1
         fi
     fi
-    rm -f "$tmpsums"
-    if ! artifact_extract_zip_member "$tmpzip" "$inner_name" "$dest"; then
-        rm -f "$tmpzip"
+    rm -f "$art_tmpsums"
+    if ! artifact_extract_zip_member "$art_tmpzip" "$art_inner_name" "$art_dest"; then
+        rm -f "$art_tmpzip"
         return 1
     fi
-    rm -f "$tmpzip"
-    chmod +x "$dest"
+    rm -f "$art_tmpzip"
     return 0
 }
 
 artifact_stage_dashboard() {
-    repo=$1
-    os=$2
-    arch=$3
-    dest=$4
-    zip_basename="santaizi-dashboard-linux-${arch}.zip"
-    inner_name="santaizi-dashboard-linux-${arch}"
+    art_repo=$1
+    art_os=$2
+    art_arch=$3
+    art_dest=$4
+    art_zip_basename="santaizi-dashboard-linux-${art_arch}.zip"
+    art_inner_name="santaizi-dashboard-linux-${art_arch}"
     artifact_assert_bin_sources_exclusive
     if [ -n "$ARTIFACT_BIN_PATH" ]; then
-        artifact_stage_from_path "$ARTIFACT_BIN_PATH" "$inner_name" "$zip_basename" "$dest"
+        artifact_stage_from_path "$ARTIFACT_BIN_PATH" "$art_inner_name" "$art_zip_basename" "$art_dest"
         return $?
     fi
     if [ -n "$ARTIFACT_BIN_URL" ]; then
-        artifact_stage_from_url "$ARTIFACT_BIN_URL" "$inner_name" "$zip_basename" "$dest"
+        artifact_stage_from_url "$ARTIFACT_BIN_URL" "$art_inner_name" "$art_zip_basename" "$art_dest"
         return $?
     fi
-    artifact_stage_from_github "$repo" "$os" "$arch" "$zip_basename" "$inner_name" "$dest" 1
+    artifact_stage_from_github "$art_repo" "$art_os" "$art_arch" "$art_zip_basename" "$art_inner_name" "$art_dest" 1
 }
 
 artifact_stage_agent_asset() {
-    repo=$1
-    os=$2
-    arch=$3
-    asset_name=$4
-    dest=$5
-    zip_basename="${asset_name}_${os}_${arch}.zip"
-    inner_name=$asset_name
+    art_repo=$1
+    art_os=$2
+    art_arch=$3
+    art_asset_name=$4
+    art_dest=$5
+    art_zip_basename="${art_asset_name}_${art_os}_${art_arch}.zip"
+    art_inner_name=$art_asset_name
     artifact_assert_bin_sources_exclusive
     if [ -n "$ARTIFACT_BIN_PATH" ]; then
-        artifact_stage_from_path "$ARTIFACT_BIN_PATH" "$inner_name" "$zip_basename" "$dest"
+        artifact_stage_from_path "$ARTIFACT_BIN_PATH" "$art_inner_name" "$art_zip_basename" "$art_dest"
         return $?
     fi
     if [ -n "$ARTIFACT_BIN_URL" ]; then
-        artifact_stage_from_url "$ARTIFACT_BIN_URL" "$inner_name" "$zip_basename" "$dest"
+        artifact_stage_from_url "$ARTIFACT_BIN_URL" "$art_inner_name" "$art_zip_basename" "$art_dest"
         return $?
     fi
-    tmpdir=$(mktemp -d 2>/dev/null || mktemp -d -t santaizi-agent-stage)
-    staged="${tmpdir}/${inner_name}"
-    if ! artifact_stage_from_github "$repo" "$os" "$arch" "$zip_basename" "$inner_name" "$staged" 0; then
-        rm -rf "$tmpdir"
-        return 1
-    fi
-    mv "$staged" "$dest"
-    rm -rf "$tmpdir"
-    chmod +x "$dest"
-    return 0
+    artifact_stage_from_github "$art_repo" "$art_os" "$art_arch" "$art_zip_basename" "$art_inner_name" "$art_dest" 0
 }
 
 artifact_verify_dashboard() {
