@@ -107,6 +107,8 @@ pub struct TelemetryConfig {
     pub primary_endpoint: String,
     pub state_interval_seconds: u64,
     pub heartbeat_interval_seconds: u64,
+    /// 保留给旧配置；主机离线判定统一走顶层 `offline_threshold_seconds`
+    /// （后台「离线阈值」编辑的就是它）。
     pub offline_threshold_seconds: u64,
     pub ingest_batch_size: usize,
     pub replication_batch_size: usize,

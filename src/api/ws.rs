@@ -53,7 +53,7 @@ async fn frame_rows(shared: &ApiShared, include_hidden: bool, token_full: bool) 
     })
     .await
     .unwrap_or_default();
-    let threshold = shared.conf().telemetry.offline_threshold_seconds;
+    let threshold = shared.conf().offline_threshold_seconds;
     rows.iter()
         .map(|row| {
             let snapshot = presentation::runtime_presentation(row);

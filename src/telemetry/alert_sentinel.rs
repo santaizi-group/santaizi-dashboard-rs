@@ -10,11 +10,6 @@ use serde::Deserialize;
 
 use crate::proto;
 
-/// `server_runtimes.protocol` 的 V2 取值。
-const V2_PROTOCOL: &str = "v2";
-/// `availability_buckets.host_state` 的取值（可用性共识的唯一信源）。
-const HOST_STATE_ONLINE: &str = "online";
-const HOST_STATE_OFFLINE: &str = "offline";
 const CHECK_FAIL: u8 = 1;
 const CHECK_PASS: u8 = 2;
 const MODE_ALWAYS: i64 = 0;
@@ -56,19 +51,12 @@ struct ServerSample {
     id: i64,
     name: String,
     last_ip: String,
+    /// 主端最近一次收到该节点上报的秒级时间戳（0 = 从未上报）。
     last_seen_unix: i64,
     state: Option<proto::State>,
     host: Option<proto::Host>,
-    /// V2 协议标记（`server_runtimes.protocol`）。
-    protocol: Option<String>,
-    /// 当前绑定节点（16 字节）。None/长度不足 = 无 V2 绑定。
-    current_node_uuid: Option<Vec<u8>>,
-    /// 最新**已封窗**可用性桶的 host_state。None = 还没有共识证据。
-    consensus_host_state: Option<String>,
-    /// 与主机列表同一套在线判定（`presentation::online_flag`）。
-    /// 规则不能只看 `host_state == offline`：停报后最新封窗桶经常是 unknown，
-    /// 列表已经显示离线，规则却一直算在线。
-    listed_online: bool,
+    /// 离线阈值（秒）：与列表 `online`、离线通知同一口径。
+    offline_threshold_seconds: u64,
 }
 
 pub fn scan(
@@ -219,92 +207,61 @@ fn load_rules(conn: &Connection) -> anyhow::Result<Vec<StoredRule>> {
     Ok(rules)
 }
 
-/// `load_servers` 用：纳秒时间戳（可用性子查询的 `window_end <= ?1` 用纳秒）。
-fn now_nanos() -> i64 {
-    crate::util::time::now_nanos()
-}
-
 impl ServerSample {
-    /// Go `ServerConsensusOffline`：返回 None 表示「无 V2 共识可用」，
-    /// 调用方应退回 V1 的 `last_seen` 时间窗。
-    fn consensus_offline(&self) -> Option<bool> {
-        if self.protocol.as_deref() != Some(V2_PROTOCOL) {
-            return None;
-        }
-        let node = self.current_node_uuid.as_ref()?;
-        if node.len() != 16 {
-            return None;
-        }
-        // 已绑定但还没有已封窗的桶 → 不判离线（Go：ok=true, offline=false）。
-        Some(self.consensus_host_state.as_deref() == Some(HOST_STATE_OFFLINE))
-    }
-
-    /// 列表已显示离线，或 V2 共识明确 offline。没有状态载荷的新建主机不算。
+    /// 与列表 `online` / 离线通知同一口径：最近一次上报超过阈值即离线。
+    /// 从未上报（`last_seen = 0`）不算离线，避免新建主机立刻报警。
     fn offline_now(&self, now_unix: i64) -> bool {
         if self.state.is_none() {
             return false;
         }
-        if !self.listed_online {
-            return true;
-        }
-        self.consensus_offline() == Some(true)
-            || (self.consensus_offline().is_none()
-                && (self.last_seen_unix == 0 || now_unix.saturating_sub(self.last_seen_unix) > 6))
+        self.last_seen_unix > 0
+            && now_unix.saturating_sub(self.last_seen_unix) >= self.offline_threshold_seconds as i64
     }
-}
-
-/// 与 `presentation::online_flag` 同一句：V2 只认已封窗桶，其余看最后上报。
-fn listed_online(server: &ServerSample, threshold_seconds: u64) -> bool {
-    let v2 = server.protocol.as_deref() == Some(V2_PROTOCOL)
-        && server
-            .current_node_uuid
-            .as_ref()
-            .is_some_and(|node| node.len() == 16);
-    if v2 {
-        return server.consensus_host_state.as_deref() == Some(HOST_STATE_ONLINE);
-    }
-    if server.last_seen_unix <= 0 {
-        return false;
-    }
-    (crate::util::time::now_nanos() / 1_000_000_000).saturating_sub(server.last_seen_unix)
-        < threshold_seconds as i64
 }
 
 fn load_servers(conn: &Connection, threshold_seconds: u64) -> anyhow::Result<Vec<ServerSample>> {
     let mut stmt = conn.prepare(
-        "SELECT s.id, COALESCE(s.name, ''), COALESCE(r.last_ip, ''), COALESCE(r.last_seen_at, 0), \
-         r.state_payload, r.host_payload, r.protocol, r.current_node_uuid, \
-         (SELECT b.host_state FROM availability_buckets b \
-          WHERE b.node_uuid = r.current_node_uuid AND b.window_end <= ?1 \
-          ORDER BY b.window_end DESC, b.bucket_start DESC LIMIT 1) \
+        "SELECT s.id, COALESCE(s.name, ''), COALESCE(r.last_ip, ''), r.last_seen_at, \
+         r.state_payload, r.host_payload \
          FROM servers s \
          LEFT JOIN server_runtimes r ON r.server_id = s.id \
          WHERE s.deleted_at IS NULL",
     )?;
-    let rows = stmt.query_map(rusqlite::params![now_nanos()], |row| {
+    let rows = stmt.query_map([], |row| {
         let state_blob: Option<Vec<u8>> = row.get(4)?;
         let host_blob: Option<Vec<u8>> = row.get(5)?;
         Ok(ServerSample {
             id: row.get(0)?,
             name: row.get(1)?,
             last_ip: row.get(2)?,
-            last_seen_unix: row.get::<_, i64>(3)? / 1_000_000_000,
+            last_seen_unix: last_seen_nanos(row, 3)? / 1_000_000_000,
             state: state_blob.and_then(|blob| proto::State::decode(blob.as_slice()).ok()),
             host: host_blob.and_then(|blob| proto::Host::decode(blob.as_slice()).ok()),
-            protocol: row.get(6)?,
-            current_node_uuid: row.get(7)?,
-            consensus_host_state: row.get(8)?,
-            listed_online: false,
+            offline_threshold_seconds: threshold_seconds,
         })
     })?;
-    let threshold = threshold_seconds;
     let mut servers = Vec::new();
     for row in rows {
-        let mut server = row?;
-        server.listed_online = listed_online(&server, threshold);
-        servers.push(server);
+        servers.push(row?);
     }
     Ok(servers)
+}
+
+/// `server_runtimes.last_seen_at` 是 `datetime` 列：生产写入 SQLite 文本日期
+/// （`unix_nanos_to_sqlite`），旧数据/夹具可能直接写整数纳秒。两种都要读得出来，
+/// 否则规则哨兵会在真实主机上每 3 秒报一次 `Invalid column type`。
+fn last_seen_nanos(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<i64> {
+    use rusqlite::types::ValueRef;
+    Ok(match row.get_ref(index)? {
+        ValueRef::Null => 0,
+        ValueRef::Integer(value) => value,
+        ValueRef::Real(value) => value as i64,
+        ValueRef::Text(bytes) => std::str::from_utf8(bytes)
+            .ok()
+            .and_then(crate::util::time::sqlite_to_unix_nanos)
+            .unwrap_or(0),
+        ValueRef::Blob(_) => 0,
+    })
 }
 
 fn parse_rules(raw: &str) -> Vec<Rule> {
@@ -473,7 +430,10 @@ mod tests {
             )?;
             tx.execute(
                 "INSERT INTO server_runtimes (server_id, last_ip, last_seen_at, state_payload) VALUES (3, '203.0.113.9', ?1, ?2)",
-                params![crate::util::time::now_nanos(), state.encode_to_vec()],
+                params![
+                    crate::util::time::unix_nanos_to_sqlite(crate::util::time::now_nanos()),
+                    state.encode_to_vec()
+                ],
             )?;
             tx.execute(
                 "INSERT INTO alert_rules (id, name, rules_raw, enable, trigger_mode, notification_tag) \
@@ -508,37 +468,29 @@ mod tests {
         assert!(resolved[0].message.contains("[RuleResolved]"));
     }
 
-    /// 插一个 V2 绑定的服务器 + 一条已封窗共识桶。
-    /// `host_state` 传 `Some("online")` / `Some("offline")` / `Some("unknown")` / `None`（无桶）。
-    fn seed_v2(db: &crate::db::Db, host_state: Option<&str>, last_seen_ago_secs: i64) {
+    /// 插一台有运行态的主机：`last_seen_ago_secs` 为 None 表示从未上报。
+    /// 灌 state_payload：`Rule::snapshot` 要求 State 非空。
+    fn seed_host(db: &crate::db::Db, last_seen_ago_secs: Option<i64>) {
         let now = crate::util::time::now_nanos();
         db.write(|tx| {
             tx.execute(
-                "INSERT INTO servers (id, name, secret_ciphertext) VALUES (9, 'v2node', X'00')",
+                "INSERT INTO servers (id, name, secret_ciphertext) VALUES (9, 'node-a', X'00')",
                 [],
             )?;
-            // Go `Rule.Snapshot` 开头就要求 State 非空，offline 分支也不例外；
-            // 不灌 state_payload 的话整条规则对任何服务器都返回 None。
             let state = proto::State {
                 cpu: 1.0,
                 ..Default::default()
             };
             tx.execute(
-                "INSERT INTO server_runtimes (server_id, protocol, current_node_uuid, last_ip, last_seen_at, state_payload) \
-                 VALUES (9, 'v2', X'09090909090909090909090909090909', '203.0.113.1', ?1, ?2)",
-                params![now - last_seen_ago_secs * 1_000_000_000, state.encode_to_vec()],
+                "INSERT INTO server_runtimes (server_id, protocol, last_ip, last_seen_at, state_payload) \
+                 VALUES (9, 'v2', '203.0.113.1', ?1, ?2)",
+                params![
+                    last_seen_ago_secs.map(|secs| crate::util::time::unix_nanos_to_sqlite(
+                        now - secs * 1_000_000_000
+                    )),
+                    state.encode_to_vec()
+                ],
             )?;
-            if let Some(state) = host_state {
-                // 一个早已封窗的桶（window_end 在过去）。
-                tx.execute(
-                    "INSERT INTO availability_buckets (node_uuid, bucket_start, window_end, resolution, \
-                     host_state, connectivity_state, expected_observers, healthy_observers, \
-                     seen_observers, observer_summary, revision, finalized, recalculated_at) \
-                     VALUES (X'09090909090909090909090909090909', 0, ?1, 'minute', ?2, 'ok', 1, 1, 1, \
-                     X'5b5d', 1, 1, ?1)",
-                    params![now - 60_000_000_000, state],
-                )?;
-            }
             tx.execute(
                 "INSERT INTO alert_rules (id, name, rules_raw, enable, trigger_mode, notification_tag) \
                  VALUES (10, 'offline', '[{\"type\":\"offline\"}]', 1, 1, 'ops')",
@@ -558,75 +510,98 @@ mod tests {
     }
 
     #[test]
-    fn offline_rule_prefers_v2_consensus_over_last_seen() {
-        // 共识判在线，但 last_seen 已是 60 秒前（V1 时间窗会误报）。
+    fn offline_rule_fires_after_report_gap() {
         let db = temp_db();
-        seed_v2(&db, Some("online"), 60);
-        assert_eq!(
-            offline_notice_count(&db),
-            0,
-            "共识 healthy 时必须覆盖 V1 时间窗，否则移植回归"
-        );
-    }
-
-    #[test]
-    fn offline_rule_fires_when_consensus_says_offline() {
-        // 共识判离线，即使 last_seen 刚刚更新（V1 时间窗会漏报）。
-        let db = temp_db();
-        seed_v2(&db, Some("offline"), 0);
-        assert_eq!(offline_notice_count(&db), 1, "共识 offline 必须触发告警");
-    }
-
-    #[test]
-    fn offline_rule_falls_back_when_no_v2_binding() {
-        // 无 V2 绑定（protocol 非 v2）：退回 V1 时间窗。
-        let db = temp_db();
-        seed_v2(&db, None, 0);
-        // 手动把 protocol 打成 v1，节点也清掉 → 共识不可用。
-        db.write(|tx| {
-            tx.execute(
-                "UPDATE server_runtimes SET protocol = 'v1', current_node_uuid = NULL WHERE server_id = 9",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(
-            offline_notice_count(&db),
-            0,
-            "刚上报过的 V1 服务器不应被判离线"
-        );
-
-        // last_seen 推到 60 秒前 → V1 时间窗报警。
-        db.write(|tx| {
-            tx.execute(
-                "UPDATE server_runtimes SET last_seen_at = ?1 WHERE server_id = 9",
-                params![crate::util::time::now_nanos() - 60_000_000_000],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(offline_notice_count(&db), 1, "V1 回退按 6 秒窗口判定");
-    }
-
-    #[test]
-    fn offline_rule_follows_the_list_when_the_latest_bucket_is_unknown() {
-        // 停报后最新封窗桶是 unknown，不是 offline。列表据此显示离线，
-        // 规则只认 host_state=offline 时会一直沉默。
-        let db = temp_db();
-        seed_v2(&db, Some("unknown"), 600);
+        seed_host(&db, Some(60));
         assert_eq!(
             offline_notice_count(&db),
             1,
-            "列表已显示离线时，规则必须跟着触发"
+            "停报超过阈值必须触发 offline 规则"
         );
+    }
+
+    #[test]
+    fn offline_rule_ignores_a_fresh_report() {
+        let db = temp_db();
+        seed_host(&db, Some(5));
+        assert_eq!(offline_notice_count(&db), 0, "刚上报过的主机不算离线");
+    }
+
+    #[test]
+    fn reads_last_seen_written_as_sqlite_datetime() {
+        // 生产写入是 `datetime` 文本；读成 i64 会 Invalid column type，规则整条哑火。
+        let db = temp_db();
+        seed_host(&db, Some(60));
+        let stored: String = db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT last_seen_at FROM server_runtimes WHERE server_id = 9",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert!(stored.contains('+'), "夹具应写文本日期：{stored}");
+        assert_eq!(offline_notice_count(&db), 1);
+    }
+
+    #[test]
+    fn offline_rule_ignores_never_reported_hosts() {
+        let db = temp_db();
+        seed_host(&db, None);
+        assert_eq!(
+            offline_notice_count(&db),
+            0,
+            "从未上报的新建主机不得被 offline 规则点名"
+        );
+    }
+
+    #[test]
+    fn offline_rule_does_not_follow_availability_buckets() {
+        // 可用性桶说 offline：只要主端还在收报，规则不触发。
+        let db = temp_db();
+        seed_host(&db, Some(5));
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO availability_buckets (node_uuid, bucket_start, window_end, resolution, \
+                 host_state, connectivity_state, expected_observers, healthy_observers, \
+                 seen_observers, observer_summary, revision, finalized, recalculated_at) \
+                 VALUES (X'09090909090909090909090909090909', 0, ?1, 'minute', 'offline', 'unavailable', \
+                 1, 1, 0, X'5b5d', 1, 1, ?1)",
+                [crate::util::time::now_nanos() - 60_000_000_000i64],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(offline_notice_count(&db), 0);
+
+        // 桶说 online：主端已经停报，规则照样触发。
+        db.write(|tx| {
+            tx.execute("DELETE FROM availability_buckets", [])?;
+            tx.execute(
+                "INSERT INTO availability_buckets (node_uuid, bucket_start, window_end, resolution, \
+                 host_state, connectivity_state, expected_observers, healthy_observers, \
+                 seen_observers, observer_summary, revision, finalized, recalculated_at) \
+                 VALUES (X'09090909090909090909090909090909', 0, ?1, 'minute', 'online', 'full', \
+                 1, 1, 1, X'5b5d', 1, 1, ?1)",
+                [crate::util::time::now_nanos() - 60_000_000_000i64],
+            )?;
+            tx.execute(
+                "UPDATE server_runtimes SET last_seen_at = ?1 WHERE server_id = 9",
+                [crate::util::time::now_nanos() - 60_000_000_000i64],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(offline_notice_count(&db), 1);
     }
 
     #[test]
     fn duration_is_seconds_not_sample_count() {
         // 界面写「60 秒」。按采样次数要等 60 轮（约 180 秒）；按秒只要 20 轮。
         let db = temp_db();
-        seed_v2(&db, Some("offline"), 0);
+        seed_host(&db, Some(60));
         db.write(|tx| {
             tx.execute(
                 "UPDATE alert_rules SET rules_raw = '[{\"type\":\"offline\",\"duration\":60}]' WHERE id = 10",

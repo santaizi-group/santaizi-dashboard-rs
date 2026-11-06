@@ -108,7 +108,7 @@ impl IngestHandler {
         received_at_nanos: i64,
     ) -> StdResult<(), Status> {
         let snapshot = snapshot.clone();
-        let threshold = self.state.conf().telemetry.offline_threshold_seconds;
+        let threshold = self.state.conf().offline_threshold_seconds;
         let offline = OfflineHistoryPolicy::from_conf(&self.state.conf());
         blocking_write(self.state.db(), move |tx| {
             runtime::apply_realtime_snapshot(tx, &snapshot, received_at_nanos, threshold, offline)

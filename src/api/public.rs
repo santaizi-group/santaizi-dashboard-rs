@@ -253,7 +253,7 @@ async fn public_servers(
     headers: HeaderMap,
 ) -> Response {
     let token_full = user.as_ref().is_some_and(|current| current.is_api);
-    let offline_threshold_seconds = shared.conf().telemetry.offline_threshold_seconds;
+    let offline_threshold_seconds = shared.conf().offline_threshold_seconds;
     let rows = match snapshot(&headers, &shared, user.as_ref()).await {
         Ok(rows) => rows,
         Err(response) => return *response,
@@ -284,7 +284,7 @@ async fn public_server(
         );
     }
     let token_full = user.as_ref().is_some_and(|current| current.is_api);
-    let offline_threshold_seconds = shared.conf().telemetry.offline_threshold_seconds;
+    let offline_threshold_seconds = shared.conf().offline_threshold_seconds;
     let rows = match snapshot(&headers, &shared, user.as_ref()).await {
         Ok(rows) => rows,
         Err(response) => return *response,

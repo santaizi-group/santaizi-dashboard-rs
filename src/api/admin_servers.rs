@@ -320,7 +320,7 @@ async fn list_servers(
             );
         }
     };
-    let threshold = shared.conf().telemetry.offline_threshold_seconds;
+    let threshold = shared.conf().offline_threshold_seconds;
     let items: Vec<Value> = rows
         .iter()
         .map(|row| {
@@ -350,7 +350,7 @@ async fn get_server(
     .await;
     match row {
         Ok(Some((row, summaries))) => {
-            let threshold = shared.conf().telemetry.offline_threshold_seconds;
+            let threshold = shared.conf().offline_threshold_seconds;
             data_json(server_admin_dto(&row, None, threshold, &summaries))
         }
         Ok(None) => problem(StatusCode::NOT_FOUND, "server_not_found", "服务器不存在"),
@@ -539,7 +539,7 @@ async fn server_response_after_save(
     .await;
     match result {
         Ok((row, policies)) => {
-            let threshold = shared.conf().telemetry.offline_threshold_seconds;
+            let threshold = shared.conf().offline_threshold_seconds;
             let mut item = server_admin_dto(&row, secret_plain, threshold, &[]);
             item["traffic_policies"] = Value::Array(policies.iter().map(policy_dto).collect());
             let mut response = Response::new(

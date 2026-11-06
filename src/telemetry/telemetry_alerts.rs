@@ -1,7 +1,8 @@
 //! 探测面告警：对齐 Go `service/telemetry/alerts.go`。
 //!
-//! 约 15 秒扫描可用性事件、从端离线/恢复和数据丢失，写入 `telemetry_alerts`。
-//! 离线历史和离线通知同时打开时，不再为 `HOST_OFFLINE` 重复发通知。
+//! 约 15 秒扫描可用性事件（仅连通性降级）、从端离线/恢复和数据丢失，写入
+//! `telemetry_alerts`。主机离线/恢复通知不在这里：它只看主端收报间隔
+//! （`telemetry::offline_detector`），与可用性桶无关。
 
 use prost::Message as _;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -17,13 +18,11 @@ pub const DATA_LOSS: &str = "TELEMETRY_DATA_LOSS";
 
 #[derive(Debug, Clone)]
 pub struct AlertPolicy {
-    pub notify_host_offline: bool,
     pub notify_connectivity: bool,
     pub notify_correction: bool,
     pub notify_collector_offline: bool,
     pub notify_collector_online: bool,
     pub notify_data_loss: bool,
-    pub suppress_host_offline_notify: bool,
     pub collector_timeout_nanos: i64,
     pub availability_bucket_nanos: i64,
 }
@@ -36,14 +35,11 @@ impl AlertPolicy {
             conf.telemetry.availability_bucket_seconds
         };
         Self {
-            notify_host_offline: conf.enable_offline_notification,
             notify_connectivity: conf.telemetry.enable_connectivity_notification,
             notify_correction: conf.telemetry.enable_correction_notification,
             notify_collector_offline: conf.telemetry.enable_collector_offline_notification,
             notify_collector_online: conf.telemetry.enable_collector_online_notification,
             notify_data_loss: conf.telemetry.enable_data_loss_notification,
-            suppress_host_offline_notify: conf.enable_offline_history
-                && conf.enable_offline_notification,
             collector_timeout_nanos: COLLECTOR_TIMEOUT_NANOS,
             availability_bucket_nanos: (bucket_seconds as i64).saturating_mul(1_000_000_000),
         }
@@ -122,9 +118,11 @@ fn scan_incidents(
 ) -> anyhow::Result<()> {
     let cutoff = now_nanos.saturating_sub(3_600_000_000_000);
     let mut stmt = conn.prepare(
+        // 主机离线不再由可用性事件驱动：离线/恢复通知只看收报间隔（`offline_detector`）。
+        // 可用性事件只保留连通性降级。
         "SELECT id, node_uuid, initial_classification, current_classification, revision, started_at, \
          COALESCE(ended_at, 0) FROM availability_incidents \
-         WHERE current_classification IN ('HOST_OFFLINE', 'CONNECTIVITY_DEGRADED') \
+         WHERE current_classification = 'CONNECTIVITY_DEGRADED' \
            AND (COALESCE(ended_at, 0) = 0 OR started_at >= ?1)",
     )?;
     let rows = stmt.query_map([cutoff], |row| {
@@ -146,7 +144,6 @@ fn scan_incidents(
     let bucket = policy.availability_bucket_nanos;
     for incident in incidents.iter() {
         let mut notify = match incident.current.as_str() {
-            HOST_OFFLINE => policy.notify_host_offline && !policy.suppress_host_offline_notify,
             CONNECTIVITY_DEGRADED => policy.notify_connectivity,
             _ => false,
         };
@@ -711,56 +708,16 @@ mod tests {
         migrate::open_primary(dir.join("panel.db").to_str().unwrap()).unwrap()
     }
 
-    pub(super) fn policy(notify: bool, suppress: bool) -> AlertPolicy {
+    pub(super) fn policy(notify: bool) -> AlertPolicy {
         AlertPolicy {
-            notify_host_offline: notify,
-            notify_connectivity: false,
+            notify_connectivity: notify,
             notify_correction: false,
             notify_collector_offline: notify,
             notify_collector_online: false,
             notify_data_loss: false,
-            suppress_host_offline_notify: suppress,
             collector_timeout_nanos: 90_000_000_000,
             availability_bucket_nanos: 30_000_000_000,
         }
-    }
-
-    #[test]
-    fn host_offline_is_suppressed_when_history_and_notification_are_both_on() {
-        let db = temp_db();
-        let now = 1_700_000_000_000_000_000i64;
-        db.write(|tx| {
-            tx.execute(
-                "INSERT INTO availability_incidents \
-                 (node_uuid, initial_classification, current_classification, revision, started_at, ended_at) \
-                 VALUES (?1, 'HOST_OFFLINE', 'HOST_OFFLINE', 1, ?2, 0)",
-                params![vec![0x11u8; 16], now],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-        let notices = db
-            .read(|conn| scan(conn, &policy(true, true), now))
-            .unwrap();
-        assert!(notices.is_empty());
-        let notified: i64 = db
-            .read(|conn| {
-                conn.query_row(
-                    "SELECT notified FROM telemetry_alerts WHERE alert_type = 'HOST_OFFLINE'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(Into::into)
-            })
-            .unwrap();
-        assert_eq!(notified, 0);
-        let again = db
-            .read(|conn| scan(conn, &policy(true, false), now))
-            .unwrap();
-        assert!(
-            again.is_empty(),
-            "dedup keeps the suppressed row from notifying later"
-        );
     }
 
     #[test]
@@ -780,14 +737,10 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let first = db
-            .read(|conn| scan(conn, &policy(true, false), now))
-            .unwrap();
+        let first = db.read(|conn| scan(conn, &policy(true), now)).unwrap();
         assert_eq!(first.len(), 1);
         assert!(first[0].mute_key.contains("bf::tco-edge"));
-        let second = db
-            .read(|conn| scan(conn, &policy(true, false), now))
-            .unwrap();
+        let second = db.read(|conn| scan(conn, &policy(true), now)).unwrap();
         assert!(second.is_empty());
     }
 
@@ -843,7 +796,7 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let mut policy = policy(true, false);
+        let mut policy = policy(true);
         policy.notify_data_loss = true;
         let notices = db.read(|conn| scan(conn, &policy, now)).unwrap();
         let mut names: Vec<&str> = notices.iter().map(|notice| notice.name.as_str()).collect();
@@ -1028,22 +981,24 @@ mod episode_anchor_tests {
     fn sliding_window_does_not_duplicate_the_episode_alert() {
         let db = db("dup");
         let head = 1_000_000_000_000i64;
-        incident(&db, &NODE, HOST_OFFLINE, head, head + 10_000_000_000);
+        incident(
+            &db,
+            &NODE,
+            CONNECTIVITY_DEGRADED,
+            head,
+            head + 10_000_000_000,
+        );
         let tail = head + 20_000_000_000;
-        incident(&db, &NODE, HOST_OFFLINE, tail, 0);
+        incident(&db, &NODE, CONNECTIVITY_DEGRADED, tail, 0);
 
         let early = head + 30_000_000_000;
         let late = head + 3_600_000_000_000 + 30_000_000_000;
         // 窗口滑动前：episode 首次告警，一条通知。
-        let first = db
-            .read(|conn| scan(conn, &policy(true, false), early))
-            .unwrap();
+        let first = db.read(|conn| scan(conn, &policy(true), early)).unwrap();
         assert_eq!(first.len(), 1, "episode 首次应告警一次");
 
         // 窗口滑过链头之后：不得再为同一 episode 发第二条。
-        let second = db
-            .read(|conn| scan(conn, &policy(true, false), late))
-            .unwrap();
+        let second = db.read(|conn| scan(conn, &policy(true), late)).unwrap();
         assert!(
             second.is_empty(),
             "同一 episode 不得因扫描窗滑动重复告警：{second:?}"

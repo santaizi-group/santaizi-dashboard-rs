@@ -1,6 +1,8 @@
 /** 列表 / 公开站共用的主机在线判定输入。不要用浏览器墙钟去算 last_active。 */
 export type HostPresenceInput = {
   online?: boolean
+  /** 主端最近一次收到上报的时间；空串 / 缺省 = 从未上报。 */
+  last_active?: string
   telemetry?: {
     host?: string | null
     connectivity?: string | null
@@ -17,17 +19,15 @@ function connectivity(server: HostPresenceInput) {
 }
 
 /**
- * 主机是否在线：跟 V2 共识，任一健康观测点看到即在线。
- * telemetry 优先于 LastActive 算出的 `online` 标志；没有观测数据时才退回该标志。
+ * 主机是否在线：跟主端收报间隔（后端 `online`），不跟可用性共识。
+ * `online` 缺省（旧快照/测试夹具）时才退回 telemetry 字段。
  */
 export function isHostOnline(server: HostPresenceInput): boolean {
+  if (typeof server.online === 'boolean') return server.online
   const host = hostState(server)
   if (host === 'offline') return false
   const link = connectivity(server)
   if (link === 'unavailable') return false
   if (host === 'online') return true
-  if (link === 'full' || link === 'partial') return true
-  if (server.telemetry?.available === true) return true
-  if (server.telemetry?.available === false) return false
-  return server.online === true
+  return link === 'full' || link === 'partial'
 }

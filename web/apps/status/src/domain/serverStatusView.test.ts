@@ -122,12 +122,17 @@ describe('ServerStatus view adapter', () => {
     expect(view.available).toBeNull()
   })
 
-  it('treats observer-seen hosts as online even when the LastActive flag is false', () => {
+  it('follows the report-based online flag over observer telemetry', () => {
     const view = toServerStatusView(server({
       online: false,
       telemetry: { host: 'online', connectivity: 'partial', available: true, coverage: '1/2' },
     }))
-    expect(view.online).toBe(true)
+    expect(view.online).toBe(false)
+    const reporting = toServerStatusView(server({
+      online: true,
+      telemetry: { host: 'offline', connectivity: 'unavailable', available: false, coverage: '0/2' },
+    }))
+    expect(reporting.online).toBe(true)
   })
 
   it('shows GPU names in specs without a usage bar when percent is absent', () => {

@@ -81,7 +81,7 @@ pub async fn run(conf: config::Config, db_path: &str) -> Result<()> {
     }
 }
 
-/// 后台 worker：可用性共识引擎 + V2 离线检测 + STATE rollup + 数据库维护。返回停机信号
+/// 后台 worker：可用性共识引擎（仅统计）+ 收报超时离线检测 + STATE rollup + 数据库维护。返回停机信号
 /// 发送端——gRPC 服务退出即通知它们收尾（发送端丢弃同样会令 receiver 唤醒）。
 fn spawn_background_workers(
     state: &std::sync::Arc<state::AppState>,
@@ -114,18 +114,14 @@ fn spawn_background_workers(
         state.notifier(),
         worker_shutdown.clone(),
     ));
-    if state.conf().enable_offline_history {
-        let detector = std::sync::Arc::new(
-            telemetry::offline_detector::V2OfflineDetector::with_notifier(
-                state.db().clone(),
-                &state.conf(),
-                Some(state.notifier()),
-            ),
-        );
-        tokio::spawn(detector.run(worker_shutdown.clone()));
-    } else {
-        tracing::info!("离线历史未启用，跳过 V2 离线检测");
-    }
+    // 离线检测常驻：间隔/阈值/通知开关每轮重读配置，改设置不要求重启面板。
+    // 历史记录仍由 `enable_offline_history` 控制，通知由 `enable_*_notification` 控制。
+    let detector = std::sync::Arc::new(telemetry::offline_detector::OfflineDetector::new(
+        state.db().clone(),
+        state.conf_handle(),
+        Some(state.notifier()),
+    ));
+    tokio::spawn(detector.run(worker_shutdown.clone()));
     let mut rollup_worker: Option<std::sync::Arc<telemetry::rollup::RollupWorker>> = None;
     if state.conf().rollup.enabled {
         let worker = std::sync::Arc::new(telemetry::rollup::RollupWorker::new(

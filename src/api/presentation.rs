@@ -44,11 +44,11 @@ pub fn runtime_presentation(row: &PublicServerRow) -> RuntimePresentation {
         last_collected_at: 0,
         last_received_at: 0,
     };
+    presentation.last_collected_at = row.last_collected_at.unwrap_or(0);
+    presentation.last_received_at = row.last_received_at.unwrap_or(0);
     if let (Some(protocol), Some(node_uuid)) = (&row.protocol, &row.node_uuid) {
         presentation.protocol = protocol.clone();
         presentation.node_uuid = Some(node_uuid.clone());
-        presentation.last_collected_at = row.last_collected_at.unwrap_or(0);
-        presentation.last_received_at = row.last_received_at.unwrap_or(0);
         // V1 没有可用性桶，沿用运行态。
         if protocol != "v2" {
             presentation.host_state = row
@@ -95,17 +95,9 @@ pub fn runtime_presentation(row: &PublicServerRow) -> RuntimePresentation {
     presentation
 }
 
-/// Go `serverOnlineFlag`：V2 绑定节点只认共识 host_state；其余回落
-/// `LastActive` 离线阈值（Rust 产品无 V1 探针，仅兜底）。
+/// 主机在线：主端最近一次收到上报在离线阈值内。
+/// 可用性桶只描述观测点覆盖，不参与在线判定；从未上报（0）不算在线。
 pub fn online_flag(presentation: &RuntimePresentation, offline_threshold_seconds: u64) -> bool {
-    let has_v2_node = presentation.protocol == "v2"
-        && presentation
-            .node_uuid
-            .as_ref()
-            .is_some_and(|uuid| !uuid.is_empty());
-    if has_v2_node {
-        return presentation.host_state == HOST_STATE_ONLINE;
-    }
     if presentation.last_received_at <= 0 {
         return false;
     }
@@ -326,15 +318,26 @@ mod tests {
     }
 
     #[test]
-    fn v2_online_flag_follows_consensus() {
+    fn online_flag_follows_report_gap_not_availability() {
+        let now = util_time::now_nanos();
         let mut row = row();
+        row.last_received_at = Some(now - 5_000_000_000);
+        // 可用性桶说离线也不影响：主端 5 秒前刚收到上报。
         row.bucket_host_state = Some("offline".into());
-        row.bucket_connectivity_state = Some("unknown".into());
+        row.bucket_connectivity_state = Some("unavailable".into());
         let presentation = runtime_presentation(&row);
-        assert!(!online_flag(&presentation, 30));
+        assert!(online_flag(&presentation, 30));
+
+        // 桶说在线，但主端已 60 秒没收到上报。
+        row.last_received_at = Some(now - 60_000_000_000);
         row.bucket_host_state = Some("online".into());
         row.bucket_connectivity_state = Some("full".into());
         let presentation = runtime_presentation(&row);
-        assert!(online_flag(&presentation, 30));
+        assert!(!online_flag(&presentation, 30));
+
+        // 从未上报。
+        row.last_received_at = None;
+        let presentation = runtime_presentation(&row);
+        assert!(!online_flag(&presentation, 30));
     }
 }

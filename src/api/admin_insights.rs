@@ -66,7 +66,7 @@ fn database_error(err: anyhow::Error, detail: &'static str) -> Response {
 /// `GET /api/v2/admin/summary`（Go `v2AdminSummary`）。
 async fn admin_summary(State(shared): State<ApiShared>, AdminUser(_admin): AdminUser) -> Response {
     let now_nanos = util_time::now_nanos();
-    let threshold = shared.conf().telemetry.offline_threshold_seconds;
+    let threshold = shared.conf().offline_threshold_seconds;
     let result = blocking_read(&shared.db, move |conn| {
         let total_servers: i64 = conn.query_row(
             "SELECT COUNT(*) FROM servers WHERE deleted_at IS NULL",

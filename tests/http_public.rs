@@ -40,6 +40,8 @@ fn seed_runtime(fixture: &PrimaryFixture, host_ip: &str) {
     let now = util_time::now_nanos();
     let bucket_start = now - 60_000_000_000;
     let window_end = now - 30_000_000_000;
+    // 收报新鲜度决定 `online`：夹具必须落在阈值内，否则行会被判离线。
+    let last_received = now;
     fixture
         .db
         .write(|tx| {
@@ -52,7 +54,7 @@ fn seed_runtime(fixture: &PrimaryFixture, host_ip: &str) {
                     SERVER_ID,
                     node(),
                     RECEIVED_AT_NANOS,
-                    RECEIVED_AT_NANOS,
+                    last_received,
                     state_payload,
                     host_payload
                 ],
@@ -246,7 +248,13 @@ async fn public_servers_snapshot_shapes_row() {
     assert_eq!(row["public_note"], serde_json::json!({}));
     assert_eq!(row["hide_for_guest"], false);
     assert_eq!(row["online"], true);
-    assert_eq!(row["last_active"], "2026-10-15T13:40:00Z");
+    assert!(
+        row["last_active"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()),
+        "last_active 取最近上报时间：{}",
+        row["last_active"]
+    );
     assert_eq!(row["telemetry"]["host"], "online");
     assert_eq!(row["telemetry"]["connectivity"], "full");
     assert_eq!(row["telemetry"]["available"], true);

@@ -177,9 +177,18 @@ describe('buildTopology', () => {
     expect(rows[0]).toMatchObject({ online: false, rttMs: undefined })
   })
 
-  it('keeps a host online when observers still see it despite a stale LastActive flag', () => {
+  it('follows the report gap even when observers still see the host', () => {
+    // 主端已收不到上报：在线判定不再被可用性共识推翻。
     const rows = primaryLatencyRows(
       [server(1, 'tokyo', { online: false, telemetry: { host: 'online', connectivity: 'partial', available: true, coverage: '1/2' } })],
+      [path(1, 'primary', 'primary', true)],
+    )
+    expect(rows[0]).toMatchObject({ online: false, rttMs: undefined })
+  })
+
+  it('keeps a host online when observers cannot see it', () => {
+    const rows = primaryLatencyRows(
+      [server(1, 'tokyo', { online: true, telemetry: { host: 'offline', connectivity: 'unavailable', available: false, coverage: '0/2' } })],
       [path(1, 'primary', 'primary', true)],
     )
     expect(rows[0]).toMatchObject({ online: true, rttMs: 12 })

@@ -481,12 +481,37 @@ fn extract_legacy_field(desc: &str, field: &str) -> Vec<String> {
     out
 }
 
-/// `[kind] n1, n2` 的名字段。
+/// `[kind]` 之后的名字段。两种形态：
+/// - 单条事件：`name`，正文细节在后续行——只取首行，避免把「最后上报…」当名字；
+/// - 已批量：`N 台/条` 头 + 每行一个名字——跳过表头取全部行。
 fn parse_aggregated_names(rest: &str) -> Vec<String> {
-    rest.split(',')
-        .map(|part| part.trim().to_string())
+    let mut lines = rest.lines().map(str::trim).filter(|line| !line.is_empty());
+    let Some(first) = lines.next() else {
+        return Vec::new();
+    };
+    let header = first
+        .strip_suffix(" 台")
+        .or_else(|| first.strip_suffix(" 条"));
+    if header.is_some_and(|count| {
+        !count.trim().is_empty() && count.trim().chars().all(|ch| ch.is_ascii_digit())
+    }) {
+        return lines.map(str::to_string).collect();
+    }
+    first
+        .split(',')
+        .map(str::trim)
         .filter(|part| !part.is_empty())
+        .map(str::to_string)
         .collect()
+}
+
+/// 离线原因的人类可读文案（`detect_offline_reason` 的三种取值）。
+fn offline_reason_text(reason: &str) -> &'static str {
+    match reason {
+        "machine_reboot" => "机器重启",
+        "network_disconnect" => "网络断线 / 上报中断",
+        _ => "原因未知",
+    }
 }
 
 /// Go `formatAggregatedNotification`：`[kind] N 台/条` + 每行一个名字。
@@ -755,11 +780,13 @@ impl Notifier {
     }
 
     /// 离线通知（Go `sendOfflineNotification`：tag default + mute server-offline-<id>）。
+    /// 时间取主端接收钟：`started_at` = 最后上报 + 离线阈值。
     pub async fn notify_offline(
         &self,
         server_id: i64,
         started_at_nanos: i64,
         last_seen_nanos: i64,
+        threshold_seconds: u64,
         last_ip: String,
     ) {
         if !self
@@ -770,12 +797,19 @@ impl Notifier {
         {
             return;
         }
-        let Some(message) = self
-            .offline_message(server_id, started_at_nanos, last_seen_nanos, last_ip)
-            .await
-        else {
-            return;
-        };
+        let plain = self
+            .conf
+            .read()
+            .expect("config lock")
+            .enable_plain_ip_in_notification;
+        let name = self.server_name(server_id).await;
+        let message = format!(
+            "[主机离线] {name}\n最后上报：{}\n离线开始：{}\n离线阈值：{}s\n离线前 IP：{}",
+            util_time::unix_nanos_to_rfc3339(last_seen_nanos).replace("T", " "),
+            util_time::unix_nanos_to_rfc3339(started_at_nanos).replace("T", " "),
+            threshold_seconds,
+            desensitize(&last_ip, plain),
+        );
         self.send(
             "default",
             &message,
@@ -789,9 +823,11 @@ impl Notifier {
     pub async fn notify_recovery(
         &self,
         server_id: i64,
+        recovered_at_nanos: i64,
         offline_seconds: i64,
         last_ip: String,
         recovered_ip: String,
+        reason: &str,
     ) {
         if !self
             .conf
@@ -801,7 +837,6 @@ impl Notifier {
         {
             return;
         }
-        let now_nanos = util_time::now_nanos();
         let plain = self
             .conf
             .read()
@@ -809,9 +844,10 @@ impl Notifier {
             .enable_plain_ip_in_notification;
         let name = self.server_name(server_id).await;
         let message = format!(
-            "[主机恢复] {name}\n恢复时间：{}\n离线时长：{}s\n原因：原因未知\n离线前 IP：{}\n恢复后 IP：{}",
-            util_time::unix_nanos_to_rfc3339(now_nanos).replace("T", " "),
+            "[主机恢复] {name}\n恢复时间：{}\n离线时长：{}s\n原因：{}\n离线前 IP：{}\n恢复后 IP：{}",
+            util_time::unix_nanos_to_rfc3339(recovered_at_nanos).replace("T", " "),
             offline_seconds,
+            offline_reason_text(reason),
             desensitize(&last_ip, plain),
             desensitize(&recovered_ip, plain),
         );
@@ -822,30 +858,6 @@ impl Notifier {
             Some(server_id),
         )
         .await;
-    }
-
-    async fn offline_message(
-        &self,
-        server_id: i64,
-        started_at_nanos: i64,
-        last_seen_nanos: i64,
-        last_ip: String,
-    ) -> Option<String> {
-        let plain = self
-            .conf
-            .read()
-            .expect("config lock")
-            .enable_plain_ip_in_notification;
-        let db = self.db.clone();
-        let name = self.server_name(server_id).await;
-        let duration = (util_time::now_nanos() - started_at_nanos) / 1_000_000_000;
-        let _ = db;
-        Some(format!(
-            "[主机离线] {name}\n离线开始时间：{}\n最后上报：{}\n持续时间：{duration}s\n离线前 IP：{}",
-            util_time::unix_nanos_to_rfc3339(started_at_nanos).replace("T", " "),
-            util_time::unix_nanos_to_rfc3339(last_seen_nanos).replace("T", " "),
-            desensitize(&last_ip, plain),
-        ))
     }
 
     async fn server_name(&self, server_id: i64) -> String {
@@ -1032,5 +1044,41 @@ mod ssrf_tests {
     fn check_ssrf_allows_public_urls() {
         assert!(check_ssrf("https://example.com/hook").is_ok());
         assert!(check_ssrf("https://1.1.1.1/hook").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod text_tests {
+    use super::*;
+
+    #[test]
+    fn rich_offline_message_aggregates_by_host_name_only() {
+        let message = "[主机离线] node-a\n最后上报：2026-11-06 10:00:00+00:00\n\
+                       离线开始：2026-11-06 10:00:30+00:00\n离线阈值：30s\n离线前 IP：203.0.113.9";
+        let (kind, names) = classify(message).expect("主机离线归入批量类");
+        assert_eq!(kind, "主机离线");
+        assert_eq!(names, vec!["node-a"], "细节行不得混进主机名");
+        assert_eq!(format_aggregated(&kind, &names), "[主机离线] 1 台\nnode-a");
+    }
+
+    #[test]
+    fn pre_bursted_message_drops_the_count_header() {
+        let (kind, names) = classify("[主机离线] 2 台\nnode-a\nnode-b").expect("批量类");
+        assert_eq!(kind, "主机离线");
+        assert_eq!(names, vec!["node-a", "node-b"]);
+        assert_eq!(
+            format_aggregated(&kind, &names),
+            "[主机离线] 2 台\nnode-a\nnode-b"
+        );
+    }
+
+    #[test]
+    fn recovery_reason_is_localized() {
+        assert_eq!(offline_reason_text("machine_reboot"), "机器重启");
+        assert_eq!(
+            offline_reason_text("network_disconnect"),
+            "网络断线 / 上报中断"
+        );
+        assert_eq!(offline_reason_text("unknown"), "原因未知");
     }
 }

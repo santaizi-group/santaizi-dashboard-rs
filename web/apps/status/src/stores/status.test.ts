@@ -125,19 +125,21 @@ describe('ServerStatus runtime normalization', () => {
     }).online).toBeUndefined()
   })
 
-  it('prefers observer telemetry over the LastActive online flag', () => {
+  it('follows the report-based online flag over observer telemetry', () => {
+    // 主端收不到上报：观测点仍看到也不改判在线。
     expect(normalizeServer({
       id: 6,
       name: 'seen',
       online: false,
       telemetry: { host: 'online', connectivity: 'partial', available: true, coverage: '1/2' },
-    }).online).toBe(true)
+    }).online).toBe(false)
+    // 主端持续收报：观测点看不到也不改判离线。
     expect(normalizeServer({
       id: 7,
       name: 'gone',
       online: true,
       telemetry: { host: 'offline', connectivity: 'unavailable', available: false, coverage: '0/2' },
-    }).online).toBe(false)
+    }).online).toBe(true)
   })
 
   it('keeps previous online state when a WS frame omits online and telemetry', () => {
