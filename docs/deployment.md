@@ -51,7 +51,11 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-da
 | Rust 探针 | `install_agent_rs.sh`、`upgrade_agent.sh` | 同上（`SANTAIZI_AGENT_RS_BIN_*`；Go 探针升级用 `SANTAIZI_AGENT_BIN_*`） | — |
 | Rust 从端 | `install_collector.sh`、`upgrade_collector.sh` | — | `--image` / `--image-tar`；`SANTAIZI_COLLECTOR_RS_IMAGE*`；`--version` 仅在未指定 `--image` 时改 GHCR 默认 tag |
 
+Go 探针的一键安装脚本（归档仓）没有 `--bin-path`：本地 zip 只能先安装、再用 `upgrade_agent.sh --bin-path` 替换二进制。
+
 **校验和**：官方 GitHub Release 强制 `checksums.txt`。`--bin-url` 会尝试同目录 `checksums.txt`；否则须 `SANTAIZI_*_SKIP_CHECKSUM=1`。本地 zip 可选同目录 `checksums.txt`。
+
+**zip 布局**：二进制须在 zip 根目录。面板 zip 内文件名带平台后缀（`santaizi-dashboard-linux-amd64`，安装时改名）；探针 zip 内文件名固定（`santaizi-agent-rs` / `santaizi-agent`）。zip 文件名建议用官方格式 `<名字>_<系统>_<架构>.zip`；同目录 `checksums.txt` 的条目名须与 zip 文件名一致才会校验通过。
 
 **示例**
 
@@ -59,6 +63,13 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-da
 # 升级面板二进制（不交互）
 sh -c "$(curl -fsSL .../install_dashboard.sh)" -- --upgrade \
   --bin-path /srv/mirror/santaizi-dashboard-linux-amd64.zip
+
+# Rust 探针本地 zip 全新安装（仅 Linux amd64 / arm64）
+curl -fsSL .../install_agent_rs.sh | bash -s -- install_agent grpc.example.com 5555 <密钥> --tls \
+  --bin-path /srv/mirror/santaizi-agent-rs_linux_amd64.zip
+
+# 已安装探针（Go / Rust 自动识别）本地 zip 换二进制
+curl -fsSL .../upgrade_agent.sh | bash -s -- --bin-path /srv/mirror/santaizi-agent_linux_amd64.zip
 
 # 升级探针（Rust，指定 Release tag）
 /usr/local/bin/upgrade_agent.sh v1.0.7
@@ -269,6 +280,8 @@ sudo rm -rf /opt/santaizi/dashboard-rs
 ## 探针
 
 登录后台 → 服务器 → 添加服务器，在卡片上复制一键安装命令，到被监控主机执行。Rust 探针仅 Linux amd64 / arm64。
+
+内网 / 离线安装（本地 zip 或私有源）见[自定义产物](#自定义产物离线--私有源)。后台复制的一键命令默认指向归档 Go 面板仓的旧脚本（无 `--bin-path`），本地 zip 场景须改拉本仓 `script/install_agent_rs.sh` / `script/upgrade_agent.sh`。
 
 ## 故障
 

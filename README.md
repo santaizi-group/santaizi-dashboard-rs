@@ -32,9 +32,11 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/santaizi-group/santaizi-da
 sh -c "$(curl -fsSL .../install_dashboard.sh)" -- --upgrade --bin-path /path/to/santaizi-dashboard-linux-amd64.zip
 # Docker 私有镜像
 sh -c "$(curl -fsSL .../install_dashboard.sh)" -- --upgrade --image registry.example.com/santaizi-dashboard-rs:v0.2.2
+# Rust 探针本地 zip 全新安装（仅 Linux amd64 / arm64）
+curl -fsSL .../install_agent_rs.sh | bash -s -- install_agent grpc.example.com 5555 <密钥> --tls --bin-path /path/to/santaizi-agent-rs_linux_amd64.zip
 ```
 
-参数与环境变量一览见 [部署 · 自定义产物](docs/deployment.md#自定义产物离线--私有源)。
+探针的一键命令在后台「服务器」卡片复制，默认拉取归档 Go 面板仓的脚本（无 `--bin-path`）；本地 zip / 私有源场景改拉本仓 `script/` 下的同名脚本。zip 布局、校验规则与全部参数见 [部署 · 自定义产物](docs/deployment.md#自定义产物离线--私有源)。
 
 默认目录布局（程序、配置、数据都在工作目录下一块）：
 
