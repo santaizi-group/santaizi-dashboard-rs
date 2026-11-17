@@ -15,7 +15,18 @@ import {
 import LatencyChart from './LatencyChart.vue'
 import ServerResourceHistory from './ServerResourceHistory.vue'
 
-const availabilityCache = new Map<number, PublicAvailability>()
+const AVAILABILITY_TTL_MS = 60_000
+const availabilityCache = new Map<number, { data: PublicAvailability; expiresAt: number }>()
+
+function peekAvailability(id: number): PublicAvailability | null {
+  const entry = availabilityCache.get(id)
+  if (!entry) return null
+  if (entry.expiresAt <= Date.now()) {
+    availabilityCache.delete(id)
+    return null
+  }
+  return entry.data
+}
 
 const props = defineProps<{
   server: ServerStatusView
@@ -82,14 +93,14 @@ async function loadAvailability(id: number) {
     availability.value = null
     return
   }
-  const cached = availabilityCache.get(id)
+  const cached = peekAvailability(id)
   if (cached) {
     availability.value = cached
     return
   }
   try {
     const result = await getPublicServerAvailability(id, { days: 30 })
-    availabilityCache.set(id, result)
+    availabilityCache.set(id, { data: result, expiresAt: Date.now() + AVAILABILITY_TTL_MS })
     if (props.server.id === id) availability.value = result
   } catch {
     if (props.server.id === id) availability.value = null
@@ -97,7 +108,7 @@ async function loadAvailability(id: number) {
 }
 
 watch(() => props.server.id, (id) => {
-  availability.value = props.showAvailability ? (availabilityCache.get(id) ?? null) : null
+  availability.value = props.showAvailability ? peekAvailability(id) : null
   void loadAvailability(id)
 }, { immediate: true })
 </script>

@@ -22,12 +22,13 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ select: [] }>()
-const { t, te } = useI18n()
+const { t, te, locale } = useI18n()
 
 function translate(key: string, values?: Record<string, unknown>) {
   return values ? String(t(key, values)) : String(t(key))
 }
 
+const isLatin = computed(() => !locale.value.toLowerCase().startsWith('zh'))
 const price = computed(() => billingText(props.server.publicNote, translate, te))
 // 行 2：发行版 logo + 规格串（1C2G10G，用户定版替换系统名）；无规格数据回落系统名。
 const osText = computed(() => props.server.specText || [props.server.platformLabel || props.server.platform, props.server.platformVersion].filter(Boolean).join(' '))
@@ -36,19 +37,22 @@ const osText = computed(() => props.server.specText || [props.server.platformLab
 const cpuPercent = useTweenedNumber(() => props.server.cpu.percent)
 const memoryPercent = useTweenedNumber(() => props.server.memory.percent)
 const diskPercent = useTweenedNumber(() => props.server.disk.percent)
-const speedIn = useTweenedNumber(() => props.server.speedIn)
-const speedOut = useTweenedNumber(() => props.server.speedOut)
-const trafficBytes = useTweenedNumber(() => props.server.trafficUsage.valueBytes)
+const speedIn = useTweenedNumber(() => (props.server.online ? props.server.speedIn : null))
+const speedOut = useTweenedNumber(() => (props.server.online ? props.server.speedOut : null))
+const trafficBytes = useTweenedNumber(
+  () => props.server.trafficUsage.valueBytes,
+  { resetKey: () => props.server.trafficUsage.kind },
+)
 const metrics = computed(() => [
-  { id: 'cpu', label: t('cores'), percent: cpuPercent.value },
+  { id: 'cpu', label: isLatin.value ? t('cpu') : t('cores'), percent: cpuPercent.value },
   { id: 'mem', label: t('memory'), percent: memoryPercent.value },
   { id: 'disk', label: t('disk'), percent: diskPercent.value },
 ])
 const trafficParts = computed(() => trafficUsageParts(props.server.trafficUsage.kind, props.server.trafficUsage.valueLabel, translate))
 const trafficLevel = computed(() => props.server.trafficUsage.statusLevel)
-// 固定小数位格式化：补间经过整数时字符数不变，数字不会在动画中途「塌一下」。
-const speedInText = computed(() => formatTransferFixed(speedIn.value ?? 0))
-const speedOutText = computed(() => formatTransferFixed(speedOut.value ?? 0))
+// 固定小数位格式化：补间经过整数时字符数不变，数字不会在动画中途「塌一下」；离线显示「—」。
+const speedInText = computed(() => (!props.server.online ? '—' : formatTransferFixed(speedIn.value ?? 0)))
+const speedOutText = computed(() => (!props.server.online ? '—' : formatTransferFixed(speedOut.value ?? 0)))
 // 标签为空（无限流量 / 配额未知）不显示数值；补间值缺失时回落标签文本。
 const trafficText = computed(() => {
   if (!props.server.trafficUsage.valueLabel) return ''
@@ -92,6 +96,7 @@ function tone(percent: number | null) {
         />
         <span v-else-if="columns.location" class="server-flag server-flag--empty" aria-hidden="true"><i class="ri-global-line"></i></span>
         <strong class="sg-tile__name">{{ server.name }}</strong>
+        <span v-if="!server.online" class="sg-tile__offline">{{ t('offline') }}</span>
       </span>
       <span class="sg-tile__sub">
         <span class="sg-tile__os-part">
@@ -100,7 +105,7 @@ function tone(percent: number | null) {
         </span>
         <span v-if="columns.price && price" class="sg-tile__price">{{ price }}</span>
       </span>
-      <span class="sg-metrics">
+      <span class="sg-metrics" :class="{ 'is-latin': isLatin }">
         <span v-for="item in metrics" :key="item.id" class="sg-metric">
           <span class="sg-metric__label">{{ item.label }}</span>
           <span class="sg-metric__value" :class="tone(item.percent)">{{ percentLabel(item.percent) }}</span>
@@ -109,8 +114,8 @@ function tone(percent: number | null) {
       <i class="sg-tile__divider" aria-hidden="true"></i>
       <span class="sg-tile__foot">
         <span class="sg-tile__speed">
-          <span class="sg-tile__arrow">↑</span><span class="sg-tile__num">{{ speedInText }}</span>
-          <span class="sg-tile__arrow sg-tile__arrow--gap">↓</span><span class="sg-tile__num">{{ speedOutText }}</span>
+          <span class="sg-tile__arrow">↑</span><span class="sg-tile__num">{{ speedOutText }}</span>
+          <span class="sg-tile__arrow sg-tile__arrow--gap">↓</span><span class="sg-tile__num">{{ speedInText }}</span>
         </span>
         <span class="sg-tile__traffic" :class="trafficLevel ? `ss-traffic--${trafficLevel}` : ''">
           <span class="sg-tile__traffic-label">{{ trafficParts.label }}</span>

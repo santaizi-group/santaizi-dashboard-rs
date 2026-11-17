@@ -5,6 +5,7 @@ import { LineChart } from 'echarts/charts'
 import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { bytesAxisFormatter, formatSpeed, formatTransfer } from '../domain/transfer'
+import { readServiceToken } from '../domain/themeToken'
 
 echarts.use([LineChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 
@@ -28,7 +29,7 @@ let resizeObserver: ResizeObserver | undefined
 let themeObserver: MutationObserver | undefined
 
 function token(name: string, fallback: string) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
+  return readServiceToken(node.value, name, fallback)
 }
 
 function palette() {
@@ -80,7 +81,7 @@ function draw() {
       textStyle: { color: colors.text, fontSize: 12 },
     },
     legend: { show: false },
-    grid: { left: 44, right: 12, top: 16, bottom: 28 },
+    grid: { left: 8, right: 12, top: 24, bottom: 6, containLabel: true },
     xAxis: {
       type: 'time',
       axisLabel: { color: colors.muted, fontSize: 12 },

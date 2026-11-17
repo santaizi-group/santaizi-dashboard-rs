@@ -14,6 +14,7 @@ export { default as StatusGlobe } from './components/StatusGlobe.vue'
 export * from './composables/useInView'
 export * from './composables/useNetworkMonitor'
 export * from './composables/useResourceHistory'
+export * from './composables/useStatusOverlays'
 export * from './composables/useStatusSort'
 export * from './composables/useTweenedNumber'
 export * from './domain/numberTween'
@@ -27,4 +28,17 @@ export * from './domain/globeMarkers'
 export * from './domain/serverStatusView'
 export * from './domain/serviceStatusView'
 export * from './domain/statusTableColumns'
+export * from './domain/themeToken'
 export * from './domain/transfer'
+export {
+  canonicalIata,
+  cityLabel,
+  formatLocation,
+  iso2FromLocation,
+  parseLocation,
+  publicNoteCustom,
+  resolveLocation,
+  resolveServerGeo,
+  type GeoPoint,
+  type ResolvedLocation,
+} from '@santaizi/geo'

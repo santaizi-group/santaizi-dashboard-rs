@@ -2,34 +2,33 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { NazhuaServerView } from '../../domain/nazhuaServerView'
-import { formatNazhuaBilling } from '../../domain/nazhuaServerView'
+import { formatNazhuaBilling, resolveNazhuaTrafficLabel } from '../../domain/nazhuaServerView'
 import { formatLiveSpeed, splitTransfer } from '../../utils/host'
 import DonutChart from '../charts/DonutChart.vue'
 import OsLogo from '../common/OsLogo.vue'
 
 const props = defineProps<{ server: NazhuaServerView }>()
-const { t, te } = useI18n()
+const { t, te, locale } = useI18n()
 
-const trafficLabel = computed(() => {
-  if (props.server.cycle?.direction === 'out' || props.server.cycle?.direction === 'outbound') return t('nazhua.outboundTraffic')
-  if (props.server.cycle && props.server.cycle.quotaBytes > 0) return t('nazhua.remainingTraffic')
-  if (props.server.publicNote.bill.trafficType === '1') return t('trafficOneWayOut')
-  if (props.server.publicNote.bill.trafficType === '3') return t('trafficOneWayMax')
-  return t('trafficBidirectionalQuota')
-})
+const trafficLabel = computed(() => resolveNazhuaTrafficLabel(props.server, t))
 
 const billingText = computed(() => formatNazhuaBilling(props.server.publicNote, t, te))
+const cpuValue = computed(() => (
+  props.server.cpuPercent === null ? '—' : `${Number(props.server.cpuPercent.toFixed(1))}%`
+))
+const dayUnit = computed(() => (locale.value.toLowerCase().startsWith('zh') ? t('day') : 'd'))
 
 const uptime = computed(() => {
+  if (!props.server.online) return { value: '—', unit: '' }
   const seconds = Math.max(0, Math.floor(props.server.uptimeSeconds))
-  if (seconds >= 86_400) return { value: String(Math.floor(seconds / 86_400)), unit: t('day') }
+  if (seconds >= 86_400) return { value: String(Math.floor(seconds / 86_400)), unit: dayUnit.value }
   if (seconds >= 3_600) return { value: String(Math.floor(seconds / 3_600)), unit: 'h' }
   return { value: String(Math.floor(seconds / 60)), unit: 'm' }
 })
 
 const traffic = computed(() => splitTransfer(props.server.trafficBytes))
-const inSpeed = computed(() => formatLiveSpeed(props.server.speedIn))
-const outSpeed = computed(() => formatLiveSpeed(props.server.speedOut))
+const inSpeed = computed(() => (props.server.online ? formatLiveSpeed(props.server.speedIn) : { value: '—', unit: '' }))
+const outSpeed = computed(() => (props.server.online ? formatLiveSpeed(props.server.speedOut) : { value: '—', unit: '' }))
 const showFoot = computed(() => props.server.publicNote.planTags.length > 0 || Boolean(props.server.orderLink || billingText.value))
 
 function planTag(tag: string) {
@@ -54,7 +53,7 @@ function planTag(tag: string) {
     </RouterLink>
     <RouterLink :to="{ name: 'public-detail', params: { serverId: String(server.id) } }" class="nazhua-card__main" :aria-label="server.name">
       <div class="nazhua-card__metrics">
-        <DonutChart label="CPU" :percent="server.cpuPercent" :value="`${Number(server.cpuPercent.toFixed(1))}%`" :caption="server.cpuCaption" color="blue" />
+        <DonutChart label="CPU" :percent="server.cpuPercent" :value="cpuValue" :caption="server.cpuCaption" color="blue" />
         <DonutChart :label="t('nazhua.memory')" :percent="server.memoryPercent" :value="server.memoryValue" :caption="server.memoryTotalLabel" :caption-title="server.memoryCaption" color="green" />
         <DonutChart :label="t('nazhua.disk')" :percent="server.diskPercent" :value="server.diskValue" :caption="server.diskTotalLabel" :caption-title="server.diskCaption" color="cyan" />
       </div>

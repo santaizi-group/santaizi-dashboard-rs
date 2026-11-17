@@ -33,31 +33,53 @@
 
 .sg-tile {
   container-type: inline-size;
+  min-width: 0;
+}
+@container (max-width: 285px) {
+  .sg-tile .sg-metrics.is-latin {
+    justify-content: space-between;
+    gap: 4px;
+  }
+  .sg-tile .sg-metrics.is-latin .sg-metric {
+    gap: 2px;
+  }
+  .sg-tile .sg-metrics.is-latin .sg-metric__label {
+    letter-spacing: -0.01em;
+  }
+  .sg-tile .sg-metrics.is-latin .sg-metric__value {
+    min-width: 4.5ch;
+    font-size: 12px;
+  }
 }
 @container (max-width: 259.9px) {
   /* 加 .sg-tile 前缀抬权重：基础规则在文件更后，同权重会被按源码顺序反压 */
   .sg-tile .sg-tile__main { padding-left: 10px; padding-right: 10px; }
   .sg-tile .sg-metrics { gap: 5px; }
   .sg-tile .sg-metric { gap: 2px; }
+  .sg-tile .sg-metrics.is-latin { gap: 3px; }
+}
+@container (max-width: 224px) {
+  .sg-tile .sg-metrics.is-latin { flex-wrap: wrap; row-gap: 3px; }
 }
 
-.sg-tile {
-  min-width: 0;
-}
 .sg-tile.is-offline .sg-tile__main {
-  filter: grayscale(0.6);
-  opacity: 0.78;
+  border-style: dashed;
+}
+.sg-tile.is-offline .server-flag {
+  filter: grayscale(0.45);
 }
 
 .sg-tile__main {
-  /* 浅色回落现有令牌 */
+  /* 浅色回落现有令牌；--sg-label 取 >= 5.5:1 对比度以保证离线/辅助标签清晰可读 */
   --sg-surface: var(--sz-surface);
   --sg-border: var(--sz-border);
   --sg-text: var(--sz-text);
   --sg-secondary: var(--sz-text-secondary);
-  --sg-label: var(--sz-text-muted);
+  --sg-label: #586276;
   --sg-divider: var(--sz-border-subtle);
-  --sg-hot: var(--sz-warning);
+  --sg-hot: #92400e;
+  --sg-offline-bg: rgba(180, 35, 24, 0.1);
+  --sg-offline-text: #991b1b;
 
   display: flex;
   flex-direction: column;
@@ -81,10 +103,12 @@ html.dark .sg-tile__main {
   --sg-surface: #14171e;
   --sg-border: #252a35;
   --sg-text: #e7e9ee;
-  --sg-secondary: #8a92a1;
-  --sg-label: #7f8796;
+  --sg-secondary: #949dad;
+  --sg-label: #8a92a1;
   --sg-divider: #20252f;
   --sg-hot: #f5b84b;
+  --sg-offline-bg: rgba(248, 113, 113, 0.14);
+  --sg-offline-text: #fca5a5;
 }
 @media (hover: hover) {
   .sg-tile__main:hover {
@@ -106,6 +130,7 @@ html.dark .sg-tile__main {
 }
 .sg-tile__name {
   display: block;
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -115,6 +140,18 @@ html.dark .sg-tile__main {
   letter-spacing: 0.01em;
   line-height: 1.25;
   color: var(--sg-text);
+}
+.sg-tile__offline {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--sg-offline-bg);
+  color: var(--sg-offline-text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 /* 第 2 行：系统 + 价格 */
@@ -183,8 +220,13 @@ html.dark .sg-tile__main {
   white-space: nowrap;
   color: var(--sg-text);
 }
+.sg-metrics.is-latin {
+  justify-content: space-between;
+  gap: 5px;
+}
 .sg-metric__value.hot { color: var(--sg-hot); }
-.sg-metric__value.danger { color: var(--sz-danger); }
+.sg-metric__value.danger { color: #991b1b; }
+html.dark .sg-metric__value.danger { color: var(--sz-danger); }
 /* ≥100%：红色强调之上再加发光闪烁（reduced-motion 时只保留静态红字与微光） */
 .sg-metric__value.critical {
   color: var(--sz-danger);
@@ -253,10 +295,17 @@ html.dark .sg-tile__main {
   min-width: 0;
   white-space: nowrap;
 }
-.sg-tile__traffic-label { color: var(--sg-secondary); }
-.sg-tile__traffic.ss-traffic--warning .sg-tile__num { color: var(--sz-warning); }
+.sg-tile__traffic-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--sg-secondary);
+}
+.sg-tile__traffic.ss-traffic--warning .sg-tile__num { color: var(--sg-hot); }
 .sg-tile__traffic.ss-traffic--alert .sg-tile__num,
-.sg-tile__traffic.ss-traffic--over .sg-tile__num { color: var(--sz-danger); }
+.sg-tile__traffic.ss-traffic--over .sg-tile__num { color: #991b1b; }
+html.dark .sg-tile__traffic.ss-traffic--alert .sg-tile__num,
+html.dark .sg-tile__traffic.ss-traffic--over .sg-tile__num { color: var(--sz-danger); }
 
 @media (max-width: 520px) {
   .sg-grid {

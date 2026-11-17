@@ -8,6 +8,7 @@ import {
   mapCycleTransfers,
   parseCpuCores,
   percentOf,
+  resolveNazhuaTrafficLabel,
   toNazhuaServerView,
 } from '../../../../packages/theme-nazhua/src/domain/nazhuaServerView'
 
@@ -105,8 +106,38 @@ describe('Nazhua server view adapter', () => {
     expect(toNazhuaServerView(server({ host, public_note: { customData: { location: 'LAX' } } })).flagCode).toBe('us')
   })
 
-  it('does not infer online from stale telemetry', () => {
-    expect(toNazhuaServerView(server({ online: false })).online).toBe(false)
+  it('does not infer online from stale telemetry and clears dead dynamic metrics', () => {
+    const dead = toNazhuaServerView(server({ online: false }))
+    expect(dead.online).toBe(false)
+    expect(dead.cpuPercent).toBeNull()
+    expect(dead.speedIn).toBe(0)
+    expect(dead.speedOut).toBe(0)
+    expect(dead.uptimeSeconds).toBe(0)
+    expect(dead.uptime).toBe('—')
+
+    const fresh = toNazhuaServerView({
+      id: 88,
+      name: 'Fresh',
+      tag: '',
+      display_index: 0,
+      hide_for_guest: false,
+      enable_ddns: false,
+      online: false,
+    })
+    expect(fresh.cpuPercent).toBeNull()
+    expect(fresh.memoryPercent).toBeNull()
+    expect(fresh.memoryValue).toBe('—')
+    expect(fresh.diskValue).toBe('—')
+  })
+
+  it('prefers remainingTraffic label when cycle quotaBytes > 0 even if direction is out', () => {
+    const cycles = mapCycleTransfers([
+      { server_id: 7, name: '月出站', direction: 'out', used_bytes: 20, quota_bytes: 100, remaining_bytes: 80, status: 'normal' },
+    ])
+    const withCycle = toNazhuaServerView(server(), cycles)
+    expect(resolveNazhuaTrafficLabel(withCycle, (k) => k)).toBe('nazhua.remainingTraffic')
+    const outOnly = toNazhuaServerView(server({ public_note: { planDataMod: { trafficType: '1' } } }))
+    expect(resolveNazhuaTrafficLabel(outOnly, (k) => k)).toBe('trafficOneWayOut')
   })
 
   it('maps and aggregates one homepage cycle-transfer response', () => {

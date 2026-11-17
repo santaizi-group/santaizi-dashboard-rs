@@ -119,56 +119,109 @@ function text(source: Record<string, unknown>, ...keys: string[]) {
   return ''
 }
 
-export function sortValue(server: ServerRecord, prop: ServerSortProp): number | string {
+function optNum(source: Record<string, unknown>, ...keys: string[]): number | null {
+  for (const key of keys) {
+    const raw = source[key]
+    if (raw !== undefined && raw !== null && raw !== '') {
+      const n = typeof raw === 'number' ? raw : Number(raw)
+      if (Number.isFinite(n)) return n
+    }
+  }
+  return null
+}
+
+function usageRatio(used: number, total: number): number | null {
+  if (!(total > 0) || !Number.isFinite(used) || !Number.isFinite(total)) return null
+  return Math.max(0, Math.min(100, (used / total) * 100))
+}
+
+/**
+ * 提取排序值。返回 `null` 表示未知/离线/未上报：
+ * 无论升序还是降序，缺失指标一律排在有效数据末尾，避免离线或总量未知的主机在升序时霸占榜首。
+ */
+export function sortValue(server: ServerRecord, prop: ServerSortProp): number | string | null {
   const host = asRecord(server.host)
   const state = asRecord(server.state)
+  const online = isHostOnline(server)
   switch (prop) {
     case 'name':
       return server.name
     case 'online':
-      return Number(isHostOnline(server))
-    case 'country_code':
-      return text(host, 'CountryCode', 'country_code').toLowerCase()
-    case 'platform':
-      return text(host, 'Platform', 'platform').toLowerCase()
+      return Number(online)
+    case 'country_code': {
+      const code = text(host, 'CountryCode', 'country_code').toLowerCase()
+      return code || null
+    }
+    case 'platform': {
+      const plat = text(host, 'Platform', 'platform').toLowerCase()
+      return plat || null
+    }
     case 'boot_time': {
+      if (!online) return null
+      const uptime = num(state, 'Uptime', 'uptime')
+      if (uptime > 0) return uptime
       const boot = num(host, 'BootTime', 'boot_time')
-      return boot > 0 ? Date.now() / 1000 - boot : 0
+      if (!(boot > 0)) return null
+      const bootSec = boot > 1e12 ? boot / 1000 : boot
+      return Math.max(0, Date.now() / 1000 - bootSec)
     }
     case 'net_in_speed':
-      return num(state, 'NetInSpeed', 'net_in_speed')
+      return online ? num(state, 'NetInSpeed', 'net_in_speed') : null
     case 'net_out_speed':
-      return num(state, 'NetOutSpeed', 'net_out_speed')
+      return online ? num(state, 'NetOutSpeed', 'net_out_speed') : null
     case 'net_in_transfer':
-      return num(state, 'NetInTransfer', 'net_in_transfer')
+      return online && server.state ? num(state, 'NetInTransfer', 'net_in_transfer') : null
     case 'net_out_transfer':
-      return num(state, 'NetOutTransfer', 'net_out_transfer')
+      return online && server.state ? num(state, 'NetOutTransfer', 'net_out_transfer') : null
     case 'total_transfer':
-      return num(state, 'NetInTransfer', 'net_in_transfer') + num(state, 'NetOutTransfer', 'net_out_transfer')
+      return online && server.state
+        ? num(state, 'NetInTransfer', 'net_in_transfer') + num(state, 'NetOutTransfer', 'net_out_transfer')
+        : null
     case 'tcp_conn_count':
-      return num(state, 'TcpConnCount', 'tcp_conn_count')
+      return online ? optNum(state, 'TcpConnCount', 'tcp_conn_count') : null
     case 'udp_conn_count':
-      return num(state, 'UdpConnCount', 'udp_conn_count')
-    case 'total_conn_count':
-      return num(state, 'TcpConnCount', 'tcp_conn_count') + num(state, 'UdpConnCount', 'udp_conn_count')
+      return online ? optNum(state, 'UdpConnCount', 'udp_conn_count') : null
+    case 'total_conn_count': {
+      if (!online) return null
+      const tcp = optNum(state, 'TcpConnCount', 'tcp_conn_count')
+      const udp = optNum(state, 'UdpConnCount', 'udp_conn_count')
+      return tcp === null && udp === null ? null : (tcp ?? 0) + (udp ?? 0)
+    }
     case 'load1':
-      return num(state, 'Load1', 'load1')
+      return online ? optNum(state, 'Load1', 'load1') : null
     case 'cpu':
-      return num(state, 'CPU', 'Cpu', 'cpu')
-    case 'cpu_cores':
-      return parseCpuCores(host.CPU ?? host.cpu)
-    case 'mem_used':
-      return num(state, 'MemUsed', 'mem_used')
-    case 'mem_total':
-      return num(host, 'MemTotal', 'mem_total') || num(state, 'MemTotal', 'mem_total')
-    case 'swap_used':
-      return num(state, 'SwapUsed', 'swap_used')
-    case 'swap_total':
-      return num(host, 'SwapTotal', 'swap_total') || num(state, 'SwapTotal', 'swap_total')
-    case 'disk_used':
-      return num(state, 'DiskUsed', 'disk_used')
-    case 'disk_total':
-      return num(host, 'DiskTotal', 'disk_total') || num(state, 'DiskTotal', 'disk_total')
+      return online ? optNum(state, 'CPU', 'Cpu', 'cpu') : null
+    case 'cpu_cores': {
+      const cores = parseCpuCores(host.CPU ?? host.cpu)
+      return cores > 0 ? cores : null
+    }
+    case 'mem_used': {
+      if (!online || !server.state) return null
+      const total = num(host, 'MemTotal', 'mem_total') || num(state, 'MemTotal', 'mem_total')
+      return usageRatio(num(state, 'MemUsed', 'mem_used'), total)
+    }
+    case 'mem_total': {
+      const total = num(host, 'MemTotal', 'mem_total') || num(state, 'MemTotal', 'mem_total')
+      return total > 0 ? total : null
+    }
+    case 'swap_used': {
+      if (!online || !server.state) return null
+      const total = num(host, 'SwapTotal', 'swap_total') || num(state, 'SwapTotal', 'swap_total')
+      return usageRatio(num(state, 'SwapUsed', 'swap_used'), total)
+    }
+    case 'swap_total': {
+      const total = num(host, 'SwapTotal', 'swap_total') || num(state, 'SwapTotal', 'swap_total')
+      return total > 0 ? total : null
+    }
+    case 'disk_used': {
+      if (!online || !server.state) return null
+      const total = num(host, 'DiskTotal', 'disk_total') || num(state, 'DiskTotal', 'disk_total')
+      return usageRatio(num(state, 'DiskUsed', 'disk_used'), total)
+    }
+    case 'disk_total': {
+      const total = num(host, 'DiskTotal', 'disk_total') || num(state, 'DiskTotal', 'disk_total')
+      return total > 0 ? total : null
+    }
     default:
       return server.display_index
   }
@@ -188,6 +241,11 @@ export function sortServers(
   return [...list].sort((a, b) => {
     const left = sortValue(a, resolved)
     const right = sortValue(b, resolved)
+    if (left === null && right === null) {
+      return (b.display_index - a.display_index) || (a.id - b.id)
+    }
+    if (left === null) return 1
+    if (right === null) return -1
     if (typeof left === 'string' || typeof right === 'string') {
       return String(left).localeCompare(String(right)) * direction
     }

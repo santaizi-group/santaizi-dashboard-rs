@@ -30,17 +30,16 @@ const paths = computed(() => {
     preserveAspectRatio="none"
     aria-hidden="true"
   >
-    <path
-      v-for="item in paths"
-      :key="`${item.tone}-line`"
-      :d="item.fill ? item.area : item.line"
-      :class="item.fill ? `svc-spark__fill svc-spark__s${item.tone}` : `svc-spark__line svc-spark__s${item.tone}`"
-    />
-    <path
-      v-for="item in paths"
-      :key="`${item.tone}-stroke`"
-      :d="item.line"
-      :class="`svc-spark__line svc-spark__s${item.tone}`"
-    />
+    <template v-for="item in paths" :key="item.tone">
+      <path
+        v-if="item.fill && item.area"
+        :d="item.area"
+        :class="`svc-spark__fill svc-spark__s${item.tone}`"
+      />
+      <path
+        :d="item.line"
+        :class="`svc-spark__line svc-spark__s${item.tone}`"
+      />
+    </template>
   </svg>
 </template>

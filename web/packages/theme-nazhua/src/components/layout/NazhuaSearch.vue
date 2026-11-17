@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 import type { ServerRecord } from '@santaizi/api'
 import { isHostOnline } from '@santaizi/api'
 import { AppDialog } from '@santaizi/ui'
+import { matchesServerSearch } from '../../composables/useServerListFilters'
 
 const props = defineProps<{ servers: ServerRecord[]; modelValue: string }>()
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
@@ -14,17 +15,9 @@ const open = ref(false)
 const inputRef = ref<{ focus: () => void }>()
 
 const results = computed(() => {
-  const q = props.modelValue.trim().toLowerCase()
+  const q = props.modelValue.trim()
   if (!q) return props.servers.slice(0, 12)
-  return props.servers.filter((server) => {
-    const haystack = [
-      server.name,
-      server.tag,
-      server.host?.Platform,
-      server.host?.CountryCode,
-    ].join(' ').toLowerCase()
-    return haystack.includes(q)
-  }).slice(0, 12)
+  return props.servers.filter((server) => matchesServerSearch(server, q)).slice(0, 12)
 })
 
 async function activate() {

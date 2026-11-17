@@ -93,11 +93,13 @@ onBeforeUnmount(() => window.removeEventListener('resize', updateViewport))
         :sort-prop="sortProp"
         :sort-order="sortOrder"
         :show-online-filter="showOnlineFilter"
+        :search-word="searchWord"
         @update:tag-filter="tagFilter = $event"
         @update:online-filter="onlineFilter = $event"
         @update:list-mode="setListMode($event)"
         @update:sort-prop="setSortProp($event)"
         @update:sort-order="setSortOrder($event)"
+        @clear-search="searchWord = ''"
       />
       <div v-if="serverViews.length" class="nazhua-home__list" :class="`mode-${effectiveListMode}`">
         <template v-if="effectiveListMode === 'card'">
@@ -113,6 +115,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', updateViewport))
           :description="t(store.loadError ? 'nazhua.requestFailed' : store.loading ? 'nazhua.loading' : 'nazhua.noData')"
         />
         <el-button v-if="store.loadError" type="primary" @click="retry"><i class="ri-refresh-line"></i>{{ t('nazhua.refresh') }}</el-button>
+        <el-button v-else-if="!store.loading && searchWord.trim()" @click="searchWord = ''"><i class="ri-close-line"></i>{{ t('reset') }}</el-button>
       </div>
     </div>
   </div>

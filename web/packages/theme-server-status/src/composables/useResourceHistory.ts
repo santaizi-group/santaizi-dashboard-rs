@@ -45,8 +45,8 @@ export function useResourceHistory(serverId: MaybeRefOrGetter<number>) {
     if (!query) return
     const seq = ++requestSeq
     loading.value = true
+    failed.value = false
     if (!points.value.length) {
-      failed.value = false
       empty.value = false
     }
     try {
@@ -61,8 +61,9 @@ export function useResourceHistory(serverId: MaybeRefOrGetter<number>) {
       failed.value = false
     } catch {
       if (seq !== requestSeq) return
+      points.value = []
+      empty.value = false
       failed.value = true
-      if (!points.value.length) empty.value = false
     } finally {
       if (seq === requestSeq) loading.value = false
     }

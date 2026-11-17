@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { getPublicMetrics, type PublicMetricPoint, type ServerRecord } from '@santaizi/api'
-import { formatSpeed } from '@santaizi/theme-server-status'
+import { formatSpeed, resolutionFor } from '@santaizi/theme-server-status'
 import { AppEmpty } from '@santaizi/ui'
 import { toNazhuaServerView } from '../../domain/nazhuaServerView'
 import ResourceHistoryChart, { type HistorySeries, type HistoryUnit } from './ResourceHistoryChart.vue'
@@ -52,13 +52,13 @@ function disabledHistoryDate(date: Date) {
   return time > now || time < now - MAX_RANGE_MS
 }
 
-function rangeQuery(): { start: string; end: string } | null {
+function rangeQuery(): { start: string; end: string; startMs: number; endMs: number } | null {
   const value = range.value
   if (!value?.[0] || !value[1]) return null
   const start = value[0].getTime()
   const end = value[1].getTime()
   if (!(end > start) || end - start > MAX_RANGE_MS) return null
-  return { start: value[0].toISOString(), end: value[1].toISOString() }
+  return { start: value[0].toISOString(), end: value[1].toISOString(), startMs: start, endMs: end }
 }
 
 const view = computed(() => toNazhuaServerView(props.server))
@@ -149,20 +149,25 @@ async function load() {
   if (!query) return
   const seq = ++requestSeq
   loading.value = true
+  failed.value = false
   if (!points.value.length) {
-    failed.value = false
     empty.value = false
   }
   try {
-    const result = await getPublicMetrics(props.server.id, { resolution: '1m', ...query })
+    const result = await getPublicMetrics(props.server.id, {
+      resolution: resolutionFor(query.startMs, query.endMs),
+      start: query.start,
+      end: query.end,
+    })
     if (seq !== requestSeq) return
     points.value = result.data || []
     empty.value = !points.value.length
     failed.value = false
   } catch {
     if (seq !== requestSeq) return
+    points.value = []
+    empty.value = false
     failed.value = true
-    if (!points.value.length) empty.value = false
   } finally {
     if (seq === requestSeq) loading.value = false
   }
@@ -190,7 +195,7 @@ watch(() => props.server.id, load, { immediate: true })
       />
     </header>
     <div class="nazhua-history__body" v-loading="loading && hasCharts">
-      <div v-if="!hasCharts && (loading || failed || empty)" class="nazhua-monitor__empty">
+      <div v-if="failed || (!hasCharts && (loading || empty))" class="nazhua-monitor__empty">
         <AppEmpty
           :tone="failed ? 'danger' : 'default'"
           :icon="failed ? 'ri-error-warning-line' : loading ? 'ri-loader-4-line' : 'ri-line-chart-line'"

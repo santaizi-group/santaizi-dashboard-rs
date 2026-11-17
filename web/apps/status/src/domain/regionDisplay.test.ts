@@ -33,5 +33,18 @@ describe('regionDisplay', () => {
     expect(regionDisplayName('us', 'en-US')).toBe('United States')
     expect(resolveFlagCode('cn', 'HKG', 'us')).toBe('cn')
     expect(resolveFlagCode('', 'HKG', 'us')).toBe('hk')
+    expect(resolveIso2('CAN')).toBe('cn')
+    expect(resolveFlagCode('', 'CAN', '')).toBe('cn')
+    expect(resolveRegionLabel('', 'CAN', '', 'zh-CN')).toBe('中国')
+    for (const usCity of ['SJC', 'SEA', 'NYC', 'ORD', 'MIA', 'IAD', 'DFW', 'ATL', 'LAS', 'SLC', 'HNL']) {
+      expect(resolveIso2(usCity)).toBe('us')
+      expect(resolveFlagCode('', usCity, '')).toBe('us')
+    }
+    expect(resolveIso2('PVG')).toBe('cn')
+    expect(resolveIso2('OSA')).toBe('jp')
+    expect(resolveIso2('BER')).toBe('de')
+    expect(resolveIso2('JHB')).toBe('my')
+    expect(resolveIso2('SGN')).toBe('vn')
+    expect(resolveIso2('BOM')).toBe('in')
   })
 })

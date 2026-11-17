@@ -9,6 +9,7 @@ const emit = defineEmits<{
   'update:listMode': [value: ListMode]
   'update:sortProp': [value: SortProp]
   'update:sortOrder': [value: SortOrder]
+  clearSearch: []
 }>()
 
 const { t } = useI18n()
@@ -20,6 +21,7 @@ const props = defineProps<{
   sortProp: SortProp
   sortOrder: SortOrder
   showOnlineFilter: boolean
+  searchWord?: string
 }>()
 
 const sortLabel = computed(() => {
@@ -44,32 +46,43 @@ function toggleOnline(value: 'online' | 'offline') {
       </el-button>
     </div>
     <div class="nazhua-filter__tools">
-      <el-dropdown trigger="click" popper-class="nazhua-sort-menu" @command="emit('update:sortProp', $event as SortProp)">
-        <el-button class="nazhua-filter__sort" :aria-label="t('nazhua.sort')">
-          <span>{{ sortLabel }}</span>
-          <span
-            class="nazhua-filter__sort-order"
-            role="button"
-            tabindex="0"
-            :aria-label="t('nazhua.sort')"
-            @click.stop="emit('update:sortOrder', sortOrder === 'asc' ? 'desc' : 'asc')"
-            @keydown.enter.stop="emit('update:sortOrder', sortOrder === 'asc' ? 'desc' : 'asc')"
-            @keydown.space.prevent.stop="emit('update:sortOrder', sortOrder === 'asc' ? 'desc' : 'asc')"
-          ><i :class="sortOrder === 'asc' ? 'ri-arrow-up-line' : 'ri-arrow-down-line'"></i></span>
+      <el-button
+        v-if="searchWord?.trim()"
+        type="primary"
+        class="nazhua-filter__search-chip"
+        :aria-label="`${t('reset')}: ${searchWord.trim()}`"
+        @click="emit('clearSearch')"
+      >
+        <i class="ri-search-line"></i>
+        <span class="nazhua-filter__search-text">{{ searchWord.trim() }}</span>
+        <i class="ri-close-line"></i>
+      </el-button>
+      <el-button-group class="nazhua-filter__sort-group">
+        <el-dropdown trigger="click" popper-class="nazhua-sort-menu" @command="emit('update:sortProp', $event as SortProp)">
+          <el-button class="nazhua-filter__sort" :aria-label="`${t('nazhua.sort')}: ${sortLabel}`">
+            <span>{{ sortLabel }}</span>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <div v-for="column in SORT_OPTION_COLUMNS" :key="column.group" class="nazhua-sort-menu__column" role="none">
+                <el-dropdown-item
+                  v-for="option in column.options"
+                  :key="option.prop"
+                  :command="option.prop"
+                  :class="{ 'is-current': option.prop === sortProp }"
+                >{{ t(option.labelKey) }}</el-dropdown-item>
+              </div>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <el-button
+          class="nazhua-filter__sort-order"
+          :aria-label="`${t('nazhua.sort')} (${sortOrder === 'asc' ? '↑' : '↓'})`"
+          @click="emit('update:sortOrder', sortOrder === 'asc' ? 'desc' : 'asc')"
+        >
+          <i :class="sortOrder === 'asc' ? 'ri-arrow-up-line' : 'ri-arrow-down-line'"></i>
         </el-button>
-        <template #dropdown>
-          <el-dropdown-menu>
-            <div v-for="column in SORT_OPTION_COLUMNS" :key="column.group" class="nazhua-sort-menu__column" role="none">
-              <el-dropdown-item
-                v-for="option in column.options"
-                :key="option.prop"
-                :command="option.prop"
-                :class="{ 'is-current': option.prop === sortProp }"
-              >{{ t(option.labelKey) }}</el-dropdown-item>
-            </div>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
+      </el-button-group>
       <div v-if="showOnlineFilter" class="nazhua-filter__online">
         <el-button :type="onlineFilter === 'online' ? 'primary' : 'default'" @click="toggleOnline('online')">{{ t('nazhua.online') }}</el-button>
         <el-button :type="onlineFilter === 'offline' ? 'primary' : 'default'" @click="toggleOnline('offline')">{{ t('nazhua.offline') }}</el-button>

@@ -26,6 +26,11 @@ const outSpeed = computed(() => formatHeaderStat(props.speedOut))
   <header class="nazhua-header">
     <div class="nazhua-header__inner">
       <RouterLink to="/" class="nazhua-header__brand">{{ title }}</RouterLink>
+      <nav class="nazhua-header__nav" :aria-label="t('statusNavigation')">
+        <RouterLink to="/"><i class="ri-server-line"></i><span>{{ t('statusHome') }}</span></RouterLink>
+        <RouterLink to="/service"><i class="ri-heart-pulse-line"></i><span>{{ t('statusServices') }}</span></RouterLink>
+        <RouterLink to="/network"><i class="ri-line-chart-line"></i><span>{{ t('statusNetwork') }}</span></RouterLink>
+      </nav>
       <div class="nazhua-header__stats">
         <div v-if="total > 0" class="nazhua-server-count">
           <span>{{ t('nazhua.totalPrefix') }} <strong>{{ total }}</strong> {{ t('nazhua.serverCount') }}</span>

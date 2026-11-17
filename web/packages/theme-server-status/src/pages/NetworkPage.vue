@@ -1,19 +1,26 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { AppDrawer, AppEmpty } from '@santaizi/ui'
 import { useInjectedStatusStore } from '@santaizi/status-core'
 import LatencyChart from '../components/LatencyChart.vue'
 import NetworkHostCard from '../components/NetworkHostCard.vue'
+import { useStatusDrawerRoute } from '../composables/useStatusOverlays'
 import { networkGridColumns, networkGridDensity, toNetworkHostTiles } from '../domain/networkSparkline'
 
 const { t } = useI18n()
 const store = useInjectedStatusStore()
-const selected = ref(0)
-const drawerOpen = ref(false)
 
 const tiles = computed(() => toNetworkHostTiles(store.servers))
-const selectedTile = computed(() => tiles.value.find((tile) => tile.id === selected.value) || null)
+const {
+  selectedId: selected,
+  selectedItem: selectedTile,
+  drawerOpen,
+  openDrawer,
+} = useStatusDrawerRoute({
+  resolveItem: (id) => tiles.value.find((tile) => tile.id === id) || null,
+  isLoaded: () => store.bootstrapped && !store.loading && !store.loadError,
+})
 const density = computed(() => networkGridDensity(tiles.value.length))
 const gridStyle = computed(() => {
   const columns = networkGridColumns(tiles.value.length)
@@ -21,8 +28,7 @@ const gridStyle = computed(() => {
 })
 
 function openTile(id: number) {
-  selected.value = id
-  drawerOpen.value = true
+  void openDrawer(id)
 }
 
 onMounted(async () => {

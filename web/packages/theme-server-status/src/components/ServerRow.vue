@@ -28,8 +28,18 @@ const availabilityLabel = computed(() => {
   if (props.server.available === false) return t('unavailable')
   return t('unknown')
 })
-const speed = computed(() => `${props.server.speedInLabel.replace(/\/s$/, '')} | ${props.server.speedOutLabel.replace(/\/s$/, '')}`)
+const speed = computed(() => (
+  props.server.online
+    ? `${props.server.speedInLabel.replace(/\/s$/, '')} | ${props.server.speedOutLabel.replace(/\/s$/, '')}`
+    : '—'
+))
 const conn = computed(() => formatConnPair(props.server.tcp, props.server.udp) || '—')
+const rowLabel = computed(() => `${props.server.name} · ${props.server.online ? t('online') : t('offline')} · ${t('serverDetail')}`)
+
+function usageClass(percent: number | null) {
+  if (percent === null) return 'ss-usage--empty'
+  return `ss-usage--${usageTone(percent)}`
+}
 </script>
 
 <template>
@@ -38,7 +48,7 @@ const conn = computed(() => formatConnPair(props.server.tcp, props.server.udp) |
       type="button"
       class="ss-row__main"
       aria-haspopup="dialog"
-      :aria-label="t('serverDetail')"
+      :aria-label="rowLabel"
       @click="emit('select')"
     >
       <span class="ss-cell ss-cell--status" :data-label="t('status')">
@@ -74,24 +84,26 @@ const conn = computed(() => formatConnPair(props.server.tcp, props.server.udp) |
         :data-label="t('traffic')"
       >{{ traffic }}</span>
       <span class="ss-cell" :data-label="t('cores')">
-        <span class="ss-usage" :class="`ss-usage--${usageTone(server.cpu.percent)}`">{{ percentText(server.cpu.percent) }}</span>
+        <span class="ss-usage" :class="usageClass(server.cpu.percent)">{{ percentText(server.cpu.percent) }}</span>
       </span>
       <span class="ss-cell" :data-label="t('memory')">
-        <span class="ss-usage" :class="`ss-usage--${usageTone(server.memory.percent)}`">{{ percentText(server.memory.percent) }}</span>
+        <span class="ss-usage" :class="usageClass(server.memory.percent)">{{ percentText(server.memory.percent) }}</span>
       </span>
       <span class="ss-cell" :data-label="t('disk')">
-        <span class="ss-usage" :class="`ss-usage--${usageTone(server.disk.percent)}`">{{ percentText(server.disk.percent) }}</span>
+        <span class="ss-usage" :class="usageClass(server.disk.percent)">{{ percentText(server.disk.percent) }}</span>
       </span>
-      <span
-        v-if="columns.remaining"
-        class="ss-cell"
-        :class="{
-          'meta-tag--success': server.publicNote.bill.remainingTone === 'success',
-          'meta-tag--warning': server.publicNote.bill.remainingTone === 'warning',
-          'meta-tag--danger': server.publicNote.bill.remainingTone === 'danger',
-        }"
-        :data-label="t('remaining')"
-      >{{ remaining || '—' }}</span>
+      <span v-if="columns.remaining" class="ss-cell" :data-label="t('remaining')">
+        <span
+          v-if="remaining"
+          class="meta-tag"
+          :class="{
+            'meta-tag--success': server.publicNote.bill.remainingTone === 'success',
+            'meta-tag--warning': server.publicNote.bill.remainingTone === 'warning',
+            'meta-tag--danger': server.publicNote.bill.remainingTone === 'danger',
+          }"
+        >{{ remaining }}</span>
+        <template v-else>—</template>
+      </span>
     </button>
   </div>
 </template>

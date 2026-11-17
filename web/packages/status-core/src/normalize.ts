@@ -43,6 +43,21 @@ function telemetryPresentation(raw: Record<string, unknown> | undefined) {
   }
 }
 
+const HAS_EXPLICIT_TAG = Symbol('hasExplicitTag')
+
+type NormalizedServerRecord = ServerRecord & {
+  [HAS_EXPLICIT_TAG]?: boolean
+}
+
+function hasOwnField(object: Record<string, unknown>, ...keys: string[]) {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(object, key) && object[key] !== undefined && object[key] !== null) {
+      return true
+    }
+  }
+  return false
+}
+
 export function normalizeServer(raw: Record<string, unknown>): ServerRecord {
   const value = (
     raw.data && typeof raw.data === 'object' && !Array.isArray(raw.data)
@@ -53,67 +68,71 @@ export function normalizeServer(raw: Record<string, unknown>): ServerRecord {
   const lastActive = String(pick(value, 'last_active', 'LastActive') ?? '')
   const telemetry = telemetryPresentation(asRecord(pick(value, 'telemetry', 'Telemetry')))
   const onlineFlag = asBoolean(pick(value, 'online', 'Online'))
-  return {
+  const explicitTag = hasOwnField(value, 'tag', 'Tag')
+  const explicitNote = hasOwnField(value, 'public_note', 'PublicNote')
+  const record: NormalizedServerRecord = {
     id: asNumber(pick(value, 'id', 'ID')),
     name: String(pick(value, 'name', 'Name') ?? ''),
     tag: String(pick(value, 'tag', 'Tag') ?? ''),
     display_index: asNumber(pick(value, 'display_index', 'DisplayIndex')),
     hide_for_guest: Boolean(pick(value, 'hide_for_guest', 'HideForGuest')),
     enable_ddns: Boolean(pick(value, 'enable_ddns', 'EnableDDNS')),
-    public_note: publicNote(pick(value, 'public_note', 'PublicNote')),
+    public_note: explicitNote ? publicNote(pick(value, 'public_note', 'PublicNote')) : undefined,
     host: asRecord(pick(value, 'host', 'Host')) as ServerHost | undefined,
     state: asRecord(pick(value, 'state', 'State')) as ServerState | undefined,
     last_active: lastActive,
     online: telemetry || onlineFlag !== undefined ? isHostOnline({ online: onlineFlag, telemetry }) : undefined,
     telemetry,
   }
+  Object.defineProperty(record, HAS_EXPLICIT_TAG, {
+    value: explicitTag,
+    enumerable: false,
+    configurable: true,
+  })
+  return record
 }
 
 function isEmptyRecord(value: ServerHost | ServerState | Record<string, unknown> | undefined) {
   return !value || Object.keys(value).length === 0
 }
 
-function mergePublicNote(
-  prev: Record<string, unknown> | undefined,
-  next: Record<string, unknown> | undefined,
-): Record<string, unknown> {
-  if (isEmptyRecord(next)) return prev || {}
-  if (isEmptyRecord(prev)) return next || {}
-  const prevNote = prev || {}
-  const nextNote = next || {}
-  const mergeSection = (key: string) => {
-    const prevSection = asRecord(prevNote[key])
-    const nextSection = asRecord(nextNote[key])
-    if (isEmptyRecord(nextSection)) return prevSection || nextNote[key]
-    if (isEmptyRecord(prevSection)) return nextSection
-    return { ...prevSection, ...nextSection }
+function resolveMergedTag(prev: ServerRecord, next: NormalizedServerRecord): string {
+  if (typeof next[HAS_EXPLICIT_TAG] === 'boolean') {
+    return next[HAS_EXPLICIT_TAG] ? next.tag : prev.tag
   }
-  return {
-    ...prevNote,
-    ...nextNote,
-    billingDataMod: mergeSection('billingDataMod'),
-    planDataMod: mergeSection('planDataMod'),
-    customData: mergeSection('customData'),
-  }
+  return next.tag !== undefined ? next.tag : prev.tag
 }
 
-/** WS 帧可能缺 public_note/name；用已有 HTTP 快照补齐，避免整表覆盖冲掉公开备注 */
+/**
+ * 增量 WS 帧缺省字段（undefined）时回退已有快照；
+ * 完整快照明确携带 tag（含空串 ""）或 public_note 时以最新快照为准覆盖，
+ * 避免后台清空分组或删除备注字段后前台永久残留旧值。
+ */
 export function mergeServerSnapshot(prev: ServerRecord | undefined, next: ServerRecord): ServerRecord {
   if (!prev) {
-    return { ...next, online: isHostOnline(next) }
+    return {
+      ...next,
+      public_note: next.public_note ?? {},
+      online: isHostOnline(next),
+    }
   }
   const telemetry = next.telemetry || prev.telemetry
-  const merged: ServerRecord = {
+  const merged: NormalizedServerRecord = {
     ...prev,
     ...next,
     name: next.name || prev.name,
-    tag: next.tag || prev.tag,
-    public_note: mergePublicNote(prev.public_note, next.public_note),
+    tag: resolveMergedTag(prev, next as NormalizedServerRecord),
+    public_note: next.public_note !== undefined ? next.public_note : (prev.public_note ?? {}),
     host: isEmptyRecord(next.host) ? prev.host : next.host,
     state: isEmptyRecord(next.state) ? prev.state : next.state,
     telemetry,
     last_active: next.last_active || prev.last_active,
   }
+  Object.defineProperty(merged, HAS_EXPLICIT_TAG, {
+    value: true,
+    enumerable: false,
+    configurable: true,
+  })
   merged.online = isHostOnline({
     online: next.online !== undefined ? next.online : prev.online,
     telemetry,

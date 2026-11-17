@@ -2,26 +2,33 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { ServerRecord } from '@santaizi/api'
-import { toNazhuaServerView } from '../../domain/nazhuaServerView'
+import { resolveNazhuaTrafficLabel, toNazhuaServerView, type NazhuaCycleTransferMap } from '../../domain/nazhuaServerView'
 import { formatLiveSpeed, splitTransfer } from '../../utils/host'
 import DonutChart from '../charts/DonutChart.vue'
 
-const props = defineProps<{ server: ServerRecord }>()
-const { t } = useI18n()
-const view = computed(() => toNazhuaServerView(props.server))
+const props = defineProps<{ server: ServerRecord; cycles?: NazhuaCycleTransferMap }>()
+const { t, locale } = useI18n()
+const view = computed(() => toNazhuaServerView(props.server, props.cycles))
+const cpuValue = computed(() => (
+  view.value.cpuPercent === null ? '—' : `${Number(view.value.cpuPercent.toFixed(1))}%`
+))
+const dayUnit = computed(() => (locale.value.toLowerCase().startsWith('zh') ? t('day') : 'd'))
 
 const stats = computed(() => {
+  const online = view.value.online
   const seconds = Math.max(0, Math.floor(view.value.uptimeSeconds))
-  const uptime = seconds >= 86_400
-    ? { value: String(Math.floor(seconds / 86_400)), unit: t('day') }
-    : seconds >= 3_600
-      ? { value: String(Math.floor(seconds / 3_600)), unit: 'h' }
-      : { value: String(Math.floor(seconds / 60)), unit: 'm' }
+  const uptime = !online
+    ? { value: '—', unit: '' }
+    : seconds >= 86_400
+      ? { value: String(Math.floor(seconds / 86_400)), unit: dayUnit.value }
+      : seconds >= 3_600
+        ? { value: String(Math.floor(seconds / 3_600)), unit: 'h' }
+        : { value: String(Math.floor(seconds / 60)), unit: 'm' }
   return [
     { key: 'duration', value: uptime.value, unit: uptime.unit, label: t('nazhua.uptime') },
-    { key: 'traffic', ...splitTransfer(view.value.trafficBytes), label: view.value.cycle?.quotaBytes ? t('nazhua.remainingTraffic') : t('trafficBidirectionalQuota') },
-    { key: 'in', ...toSpeed(view.value.speedIn), label: t('nazhua.download') },
-    { key: 'out', ...toSpeed(view.value.speedOut), label: t('nazhua.upload') },
+    { key: 'traffic', ...splitTransfer(view.value.trafficBytes), label: resolveNazhuaTrafficLabel(view.value, t) },
+    { key: 'in', ...(online ? toSpeed(view.value.speedIn) : { value: '—', unit: '' }), label: t('nazhua.download') },
+    { key: 'out', ...(online ? toSpeed(view.value.speedOut) : { value: '—', unit: '' }), label: t('nazhua.upload') },
   ]
 })
 
@@ -35,7 +42,7 @@ function toSpeed(value: number) {
   <section class="nazhua-detail-status">
     <div class="nazhua-detail-status__metrics">
       <div class="nazhua-detail-status__metric">
-        <DonutChart label="CPU" :percent="view.cpuPercent" :value="`${Number(view.cpuPercent.toFixed(1))}%`" :caption="view.cpuCaption" color="blue" />
+        <DonutChart label="CPU" :percent="view.cpuPercent" :value="cpuValue" :caption="view.cpuCaption" color="blue" />
       </div>
       <div class="nazhua-detail-status__metric">
         <DonutChart :label="t('nazhua.memory')" :percent="view.memoryPercent" :value="view.memoryValue" :caption="view.memoryTotalLabel" :caption-title="view.memoryCaption" color="green" />

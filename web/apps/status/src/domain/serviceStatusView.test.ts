@@ -45,4 +45,38 @@ describe('serviceStatusView', () => {
     expect(formatLatencyMs(null)).toBe('')
     expect(formatLatencyMs(1.586)).toBe('1.59')
   })
+
+  it('marks zero-sample days as empty instead of down and avoids false red 0.00% on unprobed services', () => {
+    const fresh = toServiceStatusView({
+      id: 3,
+      name: 'Brand New',
+      current_up: 0,
+      current_down: 0,
+      up: [0, 0, 0],
+      down: [0, 0, 0],
+    })
+    expect(fresh.uptimePercent).toBeNull()
+    expect(fresh.uptimeLabel).toBe('—')
+    expect(fresh.tone).toBe('empty')
+    expect(fresh.live).toBe(false)
+    expect(fresh.days).toEqual([
+      { percent: null, tone: 'empty' },
+      { percent: null, tone: 'empty' },
+      { percent: null, tone: 'empty' },
+    ])
+
+    const midnightRollover = toServiceStatusView({
+      id: 4,
+      name: 'Midnight Rollover',
+      current_up: 0,
+      current_down: 0,
+      up: [0, 98, 0],
+      down: [0, 2, 0],
+    })
+    expect(midnightRollover.days.map((d) => d.tone)).toEqual(['empty', 'good', 'empty'])
+    expect(midnightRollover.uptimePercent).toBe(98)
+    expect(midnightRollover.uptimeLabel).toBe('98.00%')
+    expect(midnightRollover.live).toBe(true)
+    expect(midnightRollover.tone).toBe('online')
+  })
 })

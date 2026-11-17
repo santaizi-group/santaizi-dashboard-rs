@@ -1,6 +1,13 @@
 import { getPublicNetwork, type MonitorHistory } from '@santaizi/api'
 
-const cache = new Map<number, MonitorHistory[]>()
+const CACHE_TTL_MS = 60_000
+
+interface CacheEntry {
+  rows: MonitorHistory[]
+  expiresAt: number
+}
+
+const cache = new Map<number, CacheEntry>()
 const inflight = new Map<number, Promise<MonitorHistory[]>>()
 const waiting: Array<() => void> = []
 const LIMIT = 4
@@ -24,17 +31,23 @@ function release() {
   waiting.shift()?.()
 }
 
-export function peekNetworkHistory(id: number) {
-  return cache.get(id)
+export function peekNetworkHistory(id: number, now = Date.now()) {
+  const entry = cache.get(id)
+  if (!entry) return undefined
+  if (entry.expiresAt <= now) {
+    cache.delete(id)
+    return undefined
+  }
+  return entry.rows
 }
 
-export function rememberNetworkHistory(id: number, rows: MonitorHistory[]) {
-  cache.set(id, rows)
+export function rememberNetworkHistory(id: number, rows: MonitorHistory[], now = Date.now()) {
+  cache.set(id, { rows, expiresAt: now + CACHE_TTL_MS })
 }
 
 export async function loadNetworkHistory(id: number, options?: { force?: boolean }) {
   if (!options?.force) {
-    const hit = cache.get(id)
+    const hit = peekNetworkHistory(id)
     if (hit) return hit
     const pending = inflight.get(id)
     if (pending) return pending
@@ -43,11 +56,11 @@ export async function loadNetworkHistory(id: number, options?: { force?: boolean
     await acquire()
     try {
       if (!options?.force) {
-        const cached = cache.get(id)
+        const cached = peekNetworkHistory(id)
         if (cached) return cached
       }
       const rows = (await getPublicNetwork(id)).data || []
-      cache.set(id, rows)
+      rememberNetworkHistory(id, rows)
       return rows
     } finally {
       release()

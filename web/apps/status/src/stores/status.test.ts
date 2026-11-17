@@ -65,54 +65,54 @@ describe('ServerStatus runtime normalization', () => {
     expect(mergeServerSnapshot(prev, next).state).toEqual({ CPU: 0 })
   })
 
-  it('keeps previous public_note when WS sends empty object', () => {
+  it('overwrites public_note when WS explicitly sends empty object or removes fields', () => {
     const prev = normalizeServer({
       id: 2,
       name: 'Demo2',
-      public_note: { customData: { slogan: 'edge' } },
-    })
-    const next = normalizeServer({ id: 2, name: 'Demo2', public_note: {}, state: { CPU: 12 } })
-    expect(mergeServerSnapshot(prev, next).public_note).toEqual(prev.public_note)
-  })
-
-  it('merges public_note sections when WS sends partial note', () => {
-    const prev = normalizeServer({
-      id: 3,
-      name: 'Demo3',
       public_note: {
-        customData: { location: 'HKG', slogan: 'old' },
+        customData: { location: 'HKG', slogan: 'edge', orderLink: 'https://buy.example.com' },
         billingDataMod: { amount: '$1' },
       },
     })
-    const next = normalizeServer({
-      id: 3,
-      name: 'Demo3',
-      public_note: { customData: { slogan: 'new' } },
+    const removedLink = normalizeServer({
+      id: 2,
+      name: 'Demo2',
+      public_note: { customData: { location: 'HKG' } },
+      state: { CPU: 12 },
     })
-    expect(mergeServerSnapshot(prev, next).public_note).toEqual({
-      customData: { location: 'HKG', slogan: 'new' },
-      billingDataMod: { amount: '$1' },
+    expect(mergeServerSnapshot(prev, removedLink).public_note).toEqual({
+      customData: { location: 'HKG' },
     })
+
+    const cleared = normalizeServer({ id: 2, name: 'Demo2', public_note: {}, state: { CPU: 12 } })
+    expect(mergeServerSnapshot(prev, cleared).public_note).toEqual({})
   })
 
-  it('does not blank name or host with empty WS fields', () => {
+  it('keeps previous tag when incremental WS frame omits tag, and clears tag when WS sends empty string', () => {
     const prev = normalizeServer({
-      id: 4,
-      name: 'KeepMe',
+      id: 3,
+      name: 'Demo3',
       tag: 'edge',
       host: { Platform: 'linux' },
       state: { CPU: 1 },
     })
-    const next = normalizeServer({
-      id: 4,
+    const omitted = normalizeServer({
+      ID: 3,
+      Name: 'Demo3',
+      State: { CPU: 5 },
+    })
+    expect(mergeServerSnapshot(prev, omitted).tag).toBe('edge')
+
+    const clearedTag = normalizeServer({
+      id: 3,
       name: '',
       tag: '',
       host: {},
       state: { CPU: 9 },
     })
-    const merged = mergeServerSnapshot(prev, next)
-    expect(merged.name).toBe('KeepMe')
-    expect(merged.tag).toBe('edge')
+    const merged = mergeServerSnapshot(prev, clearedTag)
+    expect(merged.name).toBe('Demo3')
+    expect(merged.tag).toBe('')
     expect(merged.host).toEqual({ Platform: 'linux' })
     expect(merged.state).toEqual({ CPU: 9 })
   })
@@ -163,12 +163,31 @@ describe('status store websocket generation guard', () => {
   let store: ReturnType<typeof useStatusStore>
   let timers: Array<() => void>
 
+  let windowListeners: Map<string, Set<() => void>>
+  let docListeners: Map<string, Set<() => void>>
+  let docHidden = false
+
   beforeEach(async () => {
     vi.resetModules()
     FakeSocket.instances = []
     timers = []
+    windowListeners = new Map()
+    docListeners = new Map()
+    docHidden = false
     vi.stubGlobal('WebSocket', FakeSocket)
     vi.stubGlobal('location', { protocol: 'https:', host: 'status.test' })
+    vi.stubGlobal('document', {
+      get hidden() {
+        return docHidden
+      },
+      addEventListener: (event: string, fn: () => void) => {
+        if (!docListeners.has(event)) docListeners.set(event, new Set())
+        docListeners.get(event)!.add(fn)
+      },
+      removeEventListener: (event: string, fn: () => void) => {
+        docListeners.get(event)?.delete(fn)
+      },
+    })
     vi.stubGlobal('window', {
       setTimeout: (fn: () => void) => {
         timers.push(fn)
@@ -176,6 +195,13 @@ describe('status store websocket generation guard', () => {
       },
       clearTimeout: () => {
         timers = []
+      },
+      addEventListener: (event: string, fn: () => void) => {
+        if (!windowListeners.has(event)) windowListeners.set(event, new Set())
+        windowListeners.get(event)!.add(fn)
+      },
+      removeEventListener: (event: string, fn: () => void) => {
+        windowListeners.get(event)?.delete(fn)
       },
     })
     store = (await import('./status')).useStatusStore()
@@ -232,5 +258,31 @@ describe('status store websocket generation guard', () => {
     for (const timer of timers.splice(0)) timer()
     expect(FakeSocket.instances).toHaveLength(1)
     expect(store.connected).toBe(false)
+  })
+
+  it('reconnects immediately when tab becomes visible or network returns online', () => {
+    store.connect()
+    const first = FakeSocket.instances.at(-1)!
+    first.emitOpen()
+    first.emitClose()
+    expect(store.connected).toBe(false)
+    expect(timers).toHaveLength(1)
+
+    // 切到后台时 visibilitychange 不立即重连
+    docHidden = true
+    for (const fn of docListeners.get('visibilitychange') || []) fn()
+    expect(FakeSocket.instances).toHaveLength(1)
+
+    // 切回前台立即取消退避并重连
+    docHidden = false
+    for (const fn of docListeners.get('visibilitychange') || []) fn()
+    expect(FakeSocket.instances).toHaveLength(2)
+    expect(timers).toHaveLength(0)
+
+    const second = FakeSocket.instances.at(-1)!
+    second.emitClose()
+    expect(timers).toHaveLength(1)
+    for (const fn of windowListeners.get('online') || []) fn()
+    expect(FakeSocket.instances).toHaveLength(3)
   })
 })

@@ -217,4 +217,47 @@ describe('ServerStatus view adapter', () => {
     expect(formatConnPair(null, 3)).toBe('0 / 3')
     expect(formatConnPair(null, null)).toBe('')
   })
+
+  it('clears dynamic snapshot metrics when offline and shows null CPU for unreported hosts', () => {
+    const dead = toServerStatusView(server({
+      online: false,
+      host: { Platform: 'linux', MemTotal: 2048, DiskTotal: 4096, BootTime: 1_700_000_000 },
+      state: {
+        CPU: 95.4,
+        MemUsed: 1024,
+        DiskUsed: 2048,
+        Uptime: 0,
+        NetInSpeed: 60_000_000,
+        NetOutSpeed: 40_000_000,
+        Load1: 8.5,
+        TcpConnCount: 500,
+        UdpConnCount: 20,
+      },
+    }), undefined, 1_710_000_000_000)
+    expect(dead.online).toBe(false)
+    expect(dead.cpu.percent).toBeNull()
+    expect(dead.speedIn).toBe(0)
+    expect(dead.speedOut).toBe(0)
+    expect(dead.speedInLabel).toBe('—')
+    expect(dead.hasLoad).toBe(false)
+    expect(dead.load1).toBe(0)
+    expect(dead.tcp).toBeNull()
+    expect(dead.udp).toBeNull()
+    expect(dead.uptimeSeconds).toBe(0)
+    expect(dead.uptimeLabel).toBe('')
+
+    const fresh = toServerStatusView({
+      id: 99,
+      name: 'NEW-NODE',
+      tag: '',
+      display_index: 0,
+      hide_for_guest: false,
+      enable_ddns: false,
+      online: false,
+    })
+    expect(fresh.cpu.percent).toBeNull()
+    expect(fresh.memory.percent).toBeNull()
+    expect(fresh.disk.percent).toBeNull()
+    expect(fresh.uptimeSeconds).toBe(0)
+  })
 })

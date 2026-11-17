@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canonicalIata, cityLabel, DEFAULT_VIEW, formatLocation, locationOptions, parseLocation, resolveServerGeo, sphericalMean } from './geo'
+import { canonicalIata, cityLabel, DEFAULT_VIEW, formatLocation, iso2FromLocation, locationOptions, parseLocation, resolveLocation, resolveServerGeo, sphericalMean } from './geo'
 import { IATA_COORDS, IATA_NAMES } from './locationMaps'
 
 describe('parseLocation', () => {
@@ -20,6 +20,12 @@ describe('parseLocation', () => {
     expect(parseLocation('SGP')?.lon).toBeCloseTo(103.8198)
     expect(parseLocation('SLC')?.lon).toBeCloseTo(-111.891)
     expect(parseLocation('NRT')?.lat).toBeCloseTo(35.6762)
+    // CAN 是广州白云机场，不得错映到重庆 CKG
+    expect(parseLocation('CAN')?.lon).toBeCloseTo(113.2644)
+    expect(parseLocation('CAN')?.lat).toBeCloseTo(23.1291)
+    expect(canonicalIata('CAN')).toBe('CAN')
+    expect(cityLabel('CAN', 'zh-CN')).toBe('广州')
+    expect(cityLabel('CAN', 'en-US')).toBe('Guangzhou')
   })
 
   it('averages points on the sphere', () => {
@@ -75,5 +81,20 @@ describe('resolveServerGeo', () => {
       public_note: {},
     })?.point.lat).toBeCloseTo(35.6762)
     expect(resolveServerGeo({ host: { CountryCode: 'ZZ' }, public_note: {} })).toBeNull()
+  })
+
+  it('resolves ISO2 for all non-capital IATA city codes and resolveLocation fallback', () => {
+    const expected: Record<string, string> = {
+      SJC: 'US', SEA: 'US', NYC: 'US', ORD: 'US', MIA: 'US', IAD: 'US',
+      DFW: 'US', ATL: 'US', LAS: 'US', SLC: 'US', HNL: 'US',
+      PVG: 'CN', CKG: 'CN', TFU: 'CN', CAN: 'CN',
+      OSA: 'JP', BER: 'DE', JHB: 'MY', SGN: 'VN', BOM: 'IN',
+    }
+    for (const [iata, iso] of Object.entries(expected)) {
+      expect(iso2FromLocation(iata)).toBe(iso)
+    }
+    expect(Object.keys(IATA_COORDS).every(code => Boolean(iso2FromLocation(code)))).toBe(true)
+    expect(resolveLocation('CH', 'en-US')?.iso2).toBe('CH')
+    expect(resolveLocation('ZA', 'en-US')?.point.lat).toBeCloseTo(-26.2)
   })
 })

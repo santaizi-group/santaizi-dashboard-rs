@@ -26,6 +26,13 @@ function schedule() {
 
 function tick(timestamp: number) {
   frame = undefined
+  if (pageHidden()) {
+    for (const item of active) {
+      item.emit(item.state.to)
+    }
+    active.clear()
+    return
+  }
   const now = Number.isFinite(timestamp) ? timestamp : nowMs()
   for (const item of active) {
     if (tweenDoneAt(item.state, now)) {
@@ -36,6 +43,10 @@ function tick(timestamp: number) {
     }
   }
   if (active.size) schedule()
+}
+
+function pageHidden() {
+  return typeof document !== 'undefined' && Boolean(document.hidden)
 }
 
 function reducedMotion() {
@@ -52,15 +63,16 @@ function numeric(value: number | null | undefined): number | null {
  * 数值从上一帧平滑滚到新帧。
  *
  * 首值直接落位（不玩 0 → x 的假滚动）；`null`（未知用量）与数字互切直接落位；
- * `prefers-reduced-motion` 或无 rAF 环境（测试）瞬跳。补间途中来新目标时从
- * 当前显示值续接，不回退。
+ * 后台标签页（`document.hidden`）、跨物理量（`resetKey` 变化）、`prefers-reduced-motion`
+ * 或无 rAF 环境（测试）瞬跳。补间途中来新目标时从当前显示值续接，不回退。
  */
 export function useTweenedNumber(
   source: () => number | null | undefined,
-  options?: { duration?: number },
+  options?: { duration?: number; resetKey?: () => unknown },
 ): Ref<number | null> {
   const duration = options?.duration ?? DEFAULT_DURATION
   const shown = ref<number | null>(numeric(source()))
+  let lastKey = options?.resetKey ? options.resetKey() : undefined
   let entry: ActiveTween | null = null
 
   function stop() {
@@ -74,29 +86,36 @@ export function useTweenedNumber(
     shown.value = value
   }
 
-  watch(source, (next) => {
-    const target = numeric(next)
-    const current = shown.value
-    if (
-      target === null
-      || current === null
-      || target === current
-      || !(duration > 0)
-      || reducedMotion()
-      || typeof requestAnimationFrame !== 'function'
-    ) {
-      snap(target)
-      return
-    }
-    stop()
-    const started: ActiveTween = {
-      state: createTween(current, target, nowMs(), duration),
-      emit: (value) => { shown.value = value },
-    }
-    active.add(started)
-    entry = started
-    schedule()
-  })
+  watch(
+    () => [source(), options?.resetKey ? options.resetKey() : undefined] as const,
+    ([next, nextKey]) => {
+      const target = numeric(next)
+      const current = shown.value
+      const keyChanged = options?.resetKey !== undefined && nextKey !== lastKey
+      lastKey = nextKey
+      if (
+        keyChanged
+        || pageHidden()
+        || target === null
+        || current === null
+        || target === current
+        || !(duration > 0)
+        || reducedMotion()
+        || typeof requestAnimationFrame !== 'function'
+      ) {
+        snap(target)
+        return
+      }
+      stop()
+      const started: ActiveTween = {
+        state: createTween(current, target, nowMs(), duration),
+        emit: (value) => { shown.value = value },
+      }
+      active.add(started)
+      entry = started
+      schedule()
+    },
+  )
 
   onScopeDispose(stop)
   return shown

@@ -1,70 +1,9 @@
+import { IATA_COUNTRY, LOCATION_ALIAS } from '@santaizi/geo'
+
 /**
  * ServerStatus 国家/地区展示：位置码与 ISO2 归一成可读名和合法旗帜。
- * 别名表与 Nazhua 点阵地图同源，但不引入 theme-nazhua 包依赖。
+ * 与 `@santaizi/geo` 共享全量城市 IATA → ISO2 映射表，确保非首都城市码也能准确反查国旗与地区名。
  */
-
-/** IATA / 俗称 → 规范位置码。与 Nazhua `aliasMapping` 保持一致。 */
-const ALIAS: Record<string, string> = {
-  SGP: 'SIN',
-  ICN: 'SEL',
-  NRT: 'TYO',
-  HND: 'TYO',
-  KIX: 'OSA',
-  PAR: 'CDG',
-  MOW: 'SVO',
-  CHI: 'ORD',
-  SHA: 'PVG',
-  CAN: 'CKG',
-  CTU: 'TFU',
-  BJS: 'PEK',
-  HK: 'HKG',
-  MO: 'MFM',
-  TW: 'TPE',
-  ASH: 'IAD',
-}
-
-/** ISO2 → 代表城市位置码。与 Nazhua `countryCodeMapping` 保持一致。 */
-const COUNTRY_IATA: Record<string, string> = {
-  CN: 'PEK',
-  JP: 'TYO',
-  SG: 'SIN',
-  KR: 'SEL',
-  MY: 'KUL',
-  VN: 'HAN',
-  IN: 'DEL',
-  TH: 'BKK',
-  AE: 'DXB',
-  TR: 'IST',
-  RO: 'OTP',
-  LU: 'LUX',
-  FR: 'CDG',
-  RU: 'SVO',
-  DE: 'FRA',
-  NL: 'AMS',
-  UK: 'LON',
-  GB: 'LON',
-  AU: 'SYD',
-  US: 'LAX',
-  CA: 'YYZ',
-  MX: 'MEX',
-  CL: 'SCQ',
-  BR: 'GRU',
-  IT: 'MXP',
-  ES: 'MAD',
-  PL: 'WAW',
-  BG: 'SOF',
-  LT: 'VNO',
-  NO: 'OSL',
-  MA: 'RBA',
-}
-
-const IATA_TO_ISO2: Record<string, string> = {}
-for (const [iso, iata] of Object.entries(COUNTRY_IATA)) {
-  IATA_TO_ISO2[iata] = iso === 'UK' ? 'GB' : iso
-}
-for (const [from, to] of Object.entries(ALIAS)) {
-  if (from.length === 2) IATA_TO_ISO2[to] = from === 'UK' ? 'GB' : from
-}
 
 const FLAG_SUBDIVISION = /^[a-z]{2}-[a-z]{2,8}$/
 const LETTERS_2 = /^[A-Za-z]{2}$/
@@ -79,7 +18,7 @@ function canonicalize(raw: string) {
   const seen = new Set<string>()
   while (code && !seen.has(code)) {
     seen.add(code)
-    const next = ALIAS[code]
+    const next = LOCATION_ALIAS[code]
     if (!next || next === code) break
     code = next
   }
@@ -111,7 +50,7 @@ export function resolveIso2(value: unknown) {
   if (asFlag) return asFlag
   const canon = canonicalize(raw)
   if (canon.length === 2) return normalizeFlagCode(canon)
-  const iso = IATA_TO_ISO2[canon]
+  const iso = IATA_COUNTRY[canon] || IATA_COUNTRY[raw.toUpperCase()]
   return iso ? normalizeFlagCode(iso) : ''
 }
 

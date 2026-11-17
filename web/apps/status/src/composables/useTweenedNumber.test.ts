@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { effectScope, nextTick, ref } from 'vue'
 import { useTweenedNumber } from '@santaizi/theme-server-status'
 
@@ -100,5 +100,36 @@ describe('useTweenedNumber', () => {
     flushFrame(performance.now() + 5000)
     expect(shown?.value).toBe(100) // 已摘除，不再写显示值
     expect(frames).toHaveLength(0)
+  })
+
+  it('snaps immediately when document.hidden is true or resetKey changes', async () => {
+    const scope = effectScope()
+    const source = ref(500)
+    const kind = ref<'both' | 'cycle'>('both')
+    const shown = scope.run(() => useTweenedNumber(() => source.value, { resetKey: () => kind.value }))
+
+    // 跨物理量（累计流量 -> 周期剩余流量）直接瞬跳，不做倒数滚动
+    source.value = 120
+    kind.value = 'cycle'
+    await nextTick()
+    expect(shown?.value).toBe(120)
+    expect(frames).toHaveLength(0)
+
+    // 后台标签页直接 snap，不排 rAF
+    vi.stubGlobal('document', { hidden: true })
+    try {
+      source.value = 80
+      await nextTick()
+      expect(shown?.value).toBe(80)
+      expect(frames).toHaveLength(0)
+    } finally {
+      vi.unstubAllGlobals()
+      ;(globalThis as unknown as Record<string, unknown>).requestAnimationFrame =
+        (callback: FrameRequestCallback) => {
+          frames.push(callback)
+          return frames.length
+        }
+    }
+    scope.stop()
   })
 })

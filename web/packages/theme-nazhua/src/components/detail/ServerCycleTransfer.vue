@@ -9,6 +9,7 @@ import { percentOf } from '../../domain/nazhuaServerView'
 import { formatDateTime } from '../../utils/host'
 
 const props = defineProps<{ server: ServerRecord }>()
+const emit = defineEmits<{ loaded: [rows: CycleTransfer[]] }>()
 const { t, locale } = useI18n()
 const rows = ref<CycleTransfer[]>([])
 const loading = ref(false)
@@ -20,9 +21,11 @@ async function load() {
   try {
     const result = await listPublicCycleTransfer(props.server.id)
     rows.value = result.data || []
+    emit('loaded', rows.value)
   } catch {
     failed.value = true
     rows.value = []
+    emit('loaded', [])
   } finally {
     loading.value = false
   }

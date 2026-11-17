@@ -17,6 +17,7 @@ import { router } from './router'
 const supported: Locale[] = ['zh-CN', 'zh-TW', 'en-US', 'es-ES']
 const stored = localStorage.getItem('santaizi-locale') || document.documentElement.lang
 const locale = supported.includes(stored as Locale) ? stored as Locale : 'zh-CN'
+document.documentElement.lang = locale
 const app = createApp(App)
 app.use(router)
 app.use(createSantaiziI18n(locale))

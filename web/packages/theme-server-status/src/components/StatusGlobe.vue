@@ -16,12 +16,15 @@ import {
 const props = defineProps<{
   servers: ServerRecord[]
   locale: string
+  occluded?: boolean
 }>()
 const emit = defineEmits<{ select: [id: number] }>()
 const { t } = useI18n()
 
 const boxRef = ref<HTMLElement>()
 const canvasRef = ref<HTMLCanvasElement>()
+const boxSize = ref({ w: 360, h: 360 })
+const inViewport = ref(true)
 const tooltip = ref<{ x: number; y: number; marker: GlobeMarker } | null>(null)
 const pinned = ref<{ x: number; y: number; marker: GlobeMarker } | null>(null)
 const ready = ref(false)
@@ -37,6 +40,7 @@ type Hit = { marker: GlobeMarker; x: number; y: number; r: number }
 
 let world: WorldGeo | null = null
 let resizeObserver: ResizeObserver | undefined
+let visibilityObserver: IntersectionObserver | undefined
 let themeObserver: MutationObserver | undefined
 let frame = 0
 let pulse = 0
@@ -44,6 +48,10 @@ let baseLayer: HTMLCanvasElement | null = null
 let baseKey = ''
 let haloDiameter = 0
 let dragging = false
+let dragMoved = false
+let dragPointerId: number | null = null
+const activePointers = new Map<number, { x: number; y: number }>()
+let pinchStart: { dist: number; scale: number } | null = null
 let viewed = false
 let lambda = 0
 let phi = -20
@@ -102,7 +110,13 @@ function coarsePointer() {
 }
 
 function shouldPulse() {
-  return !document.hidden && !reduceMotion() && markers.value.some(marker => marker.status === 'online')
+  return (
+    !document.hidden
+    && !props.occluded
+    && inViewport.value
+    && !reduceMotion()
+    && markers.value.some(marker => marker.status === 'online')
+  )
 }
 
 function shouldLoop() {
@@ -278,6 +292,9 @@ function render() {
   if (!canvas || !box) return
   const width = Math.max(160, box.clientWidth)
   const height = Math.max(160, box.clientHeight)
+  if (boxSize.value.w !== width || boxSize.value.h !== height) {
+    boxSize.value = { w: width, h: height }
+  }
   const size = Math.min(width, height)
   scaleMul = Math.min(maxScale(size), Math.max(GLOBE_SCALE_MIN, scaleMul || GLOBE_SCALE_DEFAULT))
   const ratio = Math.min(window.devicePixelRatio || 1, 2)
@@ -395,20 +412,72 @@ function localPoint(event: PointerEvent) {
   return { x: event.clientX - rect.left, y: event.clientY - rect.top }
 }
 
+function clampScale(nextScale: number) {
+  const box = boxRef.value
+  const size = box ? Math.min(Math.max(160, box.clientWidth), Math.max(160, box.clientHeight)) : 160
+  return Math.min(maxScale(size), Math.max(GLOBE_SCALE_MIN, nextScale))
+}
+
+function zoomBy(factor: number) {
+  clearPinned()
+  scaleMul = clampScale(scaleMul * factor)
+  schedule()
+}
+
+function pointerDistance() {
+  const pts = [...activePointers.values()]
+  if (pts.length < 2 || !pts[0] || !pts[1]) return 0
+  return Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y)
+}
+
 function onPointerDown(event: PointerEvent) {
-  if (event.button !== 0) return
-  dragging = true
-  viewed = true
+  if (event.pointerType === 'mouse' && event.button !== 0) return
   const point = localPoint(event)
-  dragStart = { x: point.x, y: point.y, lambda, phi }
-  canvasRef.value?.setPointerCapture(event.pointerId)
+  activePointers.set(event.pointerId, point)
+  try {
+    canvasRef.value?.setPointerCapture(event.pointerId)
+  } catch { /* ignore synthetic events */ }
+
+  if (activePointers.size === 1) {
+    dragPointerId = event.pointerId
+    dragging = true
+    dragMoved = false
+    viewed = true
+    pinchStart = null
+    dragStart = { x: point.x, y: point.y, lambda, phi }
+    return
+  }
+
+  if (activePointers.size === 2) {
+    // 双指进入捏合缩放，停止单指旋转起点，防止地球瞬移乱跳
+    dragPointerId = null
+    dragStart = null
+    dragMoved = true
+    tooltip.value = null
+    clearPinned()
+    pinchStart = { dist: Math.max(12, pointerDistance()), scale: scaleMul }
+  }
 }
 
 function onPointerMove(event: PointerEvent) {
   const point = localPoint(event)
-  if (dragging && dragStart) {
+  if (activePointers.has(event.pointerId)) {
+    activePointers.set(event.pointerId, point)
+  }
+
+  if (activePointers.size >= 2 && pinchStart) {
+    const dist = pointerDistance()
+    if (dist > 0) {
+      scaleMul = clampScale(pinchStart.scale * (dist / pinchStart.dist))
+      schedule()
+    }
+    return
+  }
+
+  if (dragging && event.pointerId === dragPointerId && dragStart) {
     const moved = Math.hypot(point.x - dragStart.x, point.y - dragStart.y) > 4
     if (moved) {
+      dragMoved = true
       tooltip.value = null
       clearPinned()
     }
@@ -417,6 +486,8 @@ function onPointerMove(event: PointerEvent) {
     schedule()
     return
   }
+
+  if (activePointers.size > 0) return
   const hit = hitTest(point.x, point.y)
   canvasRef.value?.style.setProperty('cursor', hit ? 'pointer' : 'grab')
   tooltip.value = pinned.value || !hit ? null : { x: hit.x, y: hit.y, marker: hit.marker }
@@ -424,11 +495,27 @@ function onPointerMove(event: PointerEvent) {
 
 function onPointerUp(event: PointerEvent) {
   const point = localPoint(event)
-  const moved = dragStart ? Math.hypot(point.x - dragStart.x, point.y - dragStart.y) > 4 : false
+  const wasPrimaryDrag = event.pointerId === dragPointerId
+  const moved = dragMoved || (wasPrimaryDrag && dragStart ? Math.hypot(point.x - dragStart.x, point.y - dragStart.y) > 4 : false)
+  activePointers.delete(event.pointerId)
+
+  if (activePointers.size === 1) {
+    const [remId, remPoint] = [...activePointers.entries()][0]!
+    dragPointerId = remId
+    dragStart = { x: remPoint.x, y: remPoint.y, lambda, phi }
+    pinchStart = null
+    dragMoved = true
+    return
+  }
+
+  if (activePointers.size > 1) return
+
   dragging = false
+  dragPointerId = null
   dragStart = null
+  pinchStart = null
   schedule()
-  if (moved || event.type === 'pointercancel') {
+  if (moved || !wasPrimaryDrag || event.type === 'pointercancel') {
     if (moved) clearPinned()
     return
   }
@@ -447,15 +534,11 @@ function onPointerLeave() {
 
 function onWheel(event: WheelEvent) {
   event.preventDefault()
-  clearPinned()
-  const box = boxRef.value
-  const size = box ? Math.min(Math.max(160, box.clientWidth), Math.max(160, box.clientHeight)) : 160
-  scaleMul = Math.min(maxScale(size), Math.max(GLOBE_SCALE_MIN, scaleMul * (event.deltaY > 0 ? 0.92 : 1.08)))
-  schedule()
+  zoomBy(event.deltaY > 0 ? 0.92 : 1.08)
 }
 
-function onVisibility() {
-  if (document.hidden) stopPulse()
+function syncPulseState() {
+  if (!shouldLoop()) stopPulse()
   else ensurePulse()
 }
 
@@ -475,10 +558,17 @@ async function loadGeo() {
 const overlayStyle = computed(() => {
   const tip = pinned.value || tooltip.value
   if (!tip) return {}
-  const below = tip.y < 96
+  const { w, h } = boxSize.value
+  const flipThreshold = pinned.value ? Math.min(248, h * 0.5) : 84
+  const below = tip.y < flipThreshold
+  const halfPad = pinned.value ? 132 : 84
+  const clampedX = w > halfPad * 2
+    ? Math.max(halfPad, Math.min(w - halfPad, tip.x))
+    : w / 2
+  const clampedY = Math.max(12, Math.min(h - 12, tip.y))
   return {
-    left: `${tip.x}px`,
-    top: `${tip.y}px`,
+    left: `${clampedX}px`,
+    top: `${clampedY}px`,
     transform: below ? 'translate(-50%, 12px)' : 'translate(-50%, calc(-100% - 10px))',
   }
 })
@@ -497,14 +587,23 @@ watch(markers, () => {
   schedule()
 })
 
+watch(() => props.occluded, syncPulseState)
+
 onMounted(() => {
   void loadGeo()
   const canvas = canvasRef.value
   canvas?.addEventListener('wheel', onWheel, { passive: false })
-  document.addEventListener('visibilitychange', onVisibility)
+  document.addEventListener('visibilitychange', syncPulseState)
   if (boxRef.value && typeof ResizeObserver !== 'undefined') {
     resizeObserver = new ResizeObserver(() => schedule())
     resizeObserver.observe(boxRef.value)
+  }
+  if (boxRef.value && typeof IntersectionObserver !== 'undefined') {
+    visibilityObserver = new IntersectionObserver(([entry]) => {
+      inViewport.value = Boolean(entry?.isIntersecting)
+      syncPulseState()
+    })
+    visibilityObserver.observe(boxRef.value)
   }
   themeObserver = new MutationObserver(() => invalidateBase())
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] })
@@ -515,8 +614,9 @@ onBeforeUnmount(() => {
   stopPulse()
   if (frame) cancelAnimationFrame(frame)
   canvasRef.value?.removeEventListener('wheel', onWheel)
-  document.removeEventListener('visibilitychange', onVisibility)
+  document.removeEventListener('visibilitychange', syncPulseState)
   resizeObserver?.disconnect()
+  visibilityObserver?.disconnect()
   themeObserver?.disconnect()
 })
 </script>
@@ -533,6 +633,10 @@ onBeforeUnmount(() => {
       @pointercancel="onPointerUp"
       @pointerleave="onPointerLeave"
     />
+    <div v-if="markers.length > 0" class="status-globe__zoom">
+      <button type="button" aria-label="Zoom in" @click="zoomBy(1.16)"><i class="ri-add-line"></i></button>
+      <button type="button" aria-label="Zoom out" @click="zoomBy(1 / 1.16)"><i class="ri-subtract-line"></i></button>
+    </div>
     <AppEmpty
       v-if="ready && markers.length === 0"
       class="status-globe__empty"

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useInjectedStatusStore } from '@santaizi/status-core'
 import { isHostOnline } from '@santaizi/api'
 import bgImage from './assets/bg.webp?url'
@@ -13,6 +13,7 @@ const props = defineProps<{
   publicTheme: 'server-status' | 'server-grid' | 'nazhua'
   allowThemeSwitch: boolean
   actualColorMode: string
+  colorMode?: 'light' | 'dark' | 'system'
 }>()
 
 const emit = defineEmits<{
@@ -21,7 +22,8 @@ const emit = defineEmits<{
   toggleColor: []
 }>()
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
+const route = useRoute()
 const router = useRouter()
 const store = useInjectedStatusStore()
 const footerText = computed(() => store.bootstrap?.footer_text?.trim() || '')
@@ -32,6 +34,16 @@ const counts = computed(() => ({
   online: store.servers.filter(isHostOnline).length,
   offline: store.servers.filter(server => !isHostOnline(server)).length,
 }))
+const colorModeIcon = computed(() => {
+  const mode = props.colorMode || props.actualColorMode
+  if (mode === 'system') return 'ri-contrast-2-line'
+  return mode === 'dark' ? 'ri-moon-line' : 'ri-sun-line'
+})
+const colorModeLabel = computed(() => {
+  const mode = props.colorMode || props.actualColorMode
+  if (mode === 'system') return t('system')
+  return mode === 'dark' ? t('dark') : t('light')
+})
 
 function menuCommand(command: string) {
   if (command.startsWith('route:')) {
@@ -63,10 +75,11 @@ function menuCommand(command: string) {
         <button
           type="button"
           class="nazhua-theme-button"
-          :aria-label="t(actualColorMode === 'dark' ? 'light' : 'dark')"
+          :aria-label="colorModeLabel"
+          :title="colorModeLabel"
           @click="emit('toggleColor')"
         >
-          <i :class="actualColorMode === 'dark' ? 'ri-sun-line' : 'ri-moon-line'"></i>
+          <i :class="colorModeIcon"></i>
         </button>
         <el-dropdown trigger="click" popper-class="nazhua-function-menu" @command="menuCommand">
           <button type="button" class="nazhua-menu-button" :aria-label="t('actions')">
@@ -74,18 +87,18 @@ function menuCommand(command: string) {
           </button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="route:/"><i class="ri-server-line"></i>{{ t('statusHome') }}</el-dropdown-item>
-              <el-dropdown-item command="route:/service"><i class="ri-heart-pulse-line"></i>{{ t('statusServices') }}</el-dropdown-item>
-              <el-dropdown-item command="route:/network"><i class="ri-line-chart-line"></i>{{ t('statusNetwork') }}</el-dropdown-item>
+              <el-dropdown-item command="route:/" :class="{ 'is-current': route.path === '/' }"><i class="ri-server-line"></i>{{ t('statusHome') }}</el-dropdown-item>
+              <el-dropdown-item command="route:/service" :class="{ 'is-current': route.path === '/service' }"><i class="ri-heart-pulse-line"></i>{{ t('statusServices') }}</el-dropdown-item>
+              <el-dropdown-item command="route:/network" :class="{ 'is-current': route.path === '/network' }"><i class="ri-line-chart-line"></i>{{ t('statusNetwork') }}</el-dropdown-item>
               <template v-if="allowThemeSwitch">
-                <el-dropdown-item divided command="theme:server-status" :disabled="publicTheme === 'server-status'"><i class="ri-table-view"></i>{{ t('themeServerStatus') }}</el-dropdown-item>
-                <el-dropdown-item command="theme:server-grid" :disabled="publicTheme === 'server-grid'"><i class="ri-layout-grid-line"></i>{{ t('themeServerGrid') }}</el-dropdown-item>
-                <el-dropdown-item command="theme:nazhua" :disabled="publicTheme === 'nazhua'"><i class="ri-gallery-view-2"></i>{{ t('themeNazhua') }}</el-dropdown-item>
+                <el-dropdown-item divided command="theme:server-status" :disabled="publicTheme === 'server-status'" :class="{ 'is-current': publicTheme === 'server-status' }"><i class="ri-table-view"></i>{{ t('themeServerStatus') }}</el-dropdown-item>
+                <el-dropdown-item command="theme:server-grid" :disabled="publicTheme === 'server-grid'" :class="{ 'is-current': publicTheme === 'server-grid' }"><i class="ri-layout-grid-line"></i>{{ t('themeServerGrid') }}</el-dropdown-item>
+                <el-dropdown-item command="theme:nazhua" :disabled="publicTheme === 'nazhua'" :class="{ 'is-current': publicTheme === 'nazhua' }"><i class="ri-gallery-view-2"></i>{{ t('themeNazhua') }}</el-dropdown-item>
               </template>
-              <el-dropdown-item divided command="locale:zh-CN"><i class="ri-translate-2"></i>简体中文</el-dropdown-item>
-              <el-dropdown-item command="locale:zh-TW"><i class="ri-translate-2"></i>繁體中文</el-dropdown-item>
-              <el-dropdown-item command="locale:en-US"><i class="ri-translate-2"></i>English</el-dropdown-item>
-              <el-dropdown-item command="locale:es-ES"><i class="ri-translate-2"></i>Español</el-dropdown-item>
+              <el-dropdown-item divided command="locale:zh-CN" :disabled="locale === 'zh-CN'" :class="{ 'is-current': locale === 'zh-CN' }"><i class="ri-translate-2"></i>简体中文</el-dropdown-item>
+              <el-dropdown-item command="locale:zh-TW" :disabled="locale === 'zh-TW'" :class="{ 'is-current': locale === 'zh-TW' }"><i class="ri-translate-2"></i>繁體中文</el-dropdown-item>
+              <el-dropdown-item command="locale:en-US" :disabled="locale === 'en-US'" :class="{ 'is-current': locale === 'en-US' }"><i class="ri-translate-2"></i>English</el-dropdown-item>
+              <el-dropdown-item command="locale:es-ES" :disabled="locale === 'es-ES'" :class="{ 'is-current': locale === 'es-ES' }"><i class="ri-translate-2"></i>Español</el-dropdown-item>
               <el-dropdown-item v-if="store.bootstrap?.authenticated" divided command="admin"><i class="ri-settings-3-line"></i>{{ t('adminPanel') }}</el-dropdown-item>
             </el-dropdown-menu>
           </template>

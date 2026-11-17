@@ -6,6 +6,7 @@ import { DataZoomComponent, GridComponent, LegendComponent, TooltipComponent } f
 import { CanvasRenderer } from 'echarts/renderers'
 import { useInView } from '../composables/useInView'
 import type { NetworkSeries } from '../composables/useNetworkMonitor'
+import { readServiceToken } from '../domain/themeToken'
 
 echarts.use([LineChart, DataZoomComponent, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 
@@ -28,7 +29,7 @@ function onResize() {
 }
 
 function token(name: string, fallback: string) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
+  return readServiceToken(root.value ?? node.value, name, fallback)
 }
 
 function palette() {
@@ -64,8 +65,8 @@ function draw() {
       ? { show: false }
       : { top: 4, textStyle: { color: colors.muted, fontSize: 12 } },
     grid: props.compact
-      ? { left: 44, right: 12, top: 16, bottom: 40 }
-      : { left: narrow ? 36 : 48, right: narrow ? 12 : 16, top: 40, bottom: 48 },
+      ? { left: 8, right: 12, top: 24, bottom: 30, containLabel: true }
+      : { left: 8, right: narrow ? 12 : 16, top: 40, bottom: 32, containLabel: true },
     dataZoom: [
       { type: 'inside' },
       { type: 'slider', height: 18, bottom: 8, borderColor: colors.border, textStyle: { color: colors.muted } },

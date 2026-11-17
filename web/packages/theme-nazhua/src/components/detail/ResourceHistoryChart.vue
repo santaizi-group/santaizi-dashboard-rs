@@ -69,7 +69,7 @@ function draw() {
       ...chartTooltipStyle(palette),
     },
     legend: { show: false },
-    grid: { left: 44, right: 12, top: 16, bottom: 28 },
+    grid: { left: 8, right: 12, top: 24, bottom: 6, containLabel: true },
     xAxis: { type: 'time', ...axis },
     yAxis: {
       type: 'value',

@@ -6,6 +6,7 @@ export { mergeServerSnapshot, normalizeServer } from '@santaizi/status-core'
 
 const bootstrap = ref<SiteBootstrap | null>(null)
 const servers = ref<ServerRecord[]>([])
+const bootstrapped = ref(false)
 const loading = ref(false)
 const connected = ref(false)
 const loadError = ref(false)
@@ -14,6 +15,8 @@ let socket: WebSocket | undefined
 let retry = 0
 let timer: number | undefined
 let stopped = true
+let wakeupBound = false
+let initialLoadPromise: Promise<void> | null = null
 /// 连接代际：每次 `connect()` 自增。
 ///
 /// 没有代际时，重复调用 `connect()` 会让**旧** socket 的 `onclose`/`onerror`
@@ -51,21 +54,72 @@ function apply(message: unknown) {
 async function load() {
   loading.value = true
   try {
-    bootstrap.value = await getBootstrap()
+    const boot = await getBootstrap()
+    bootstrap.value = boot
+    // 站点开启查看密码且尚未验证时，跳过必报 403 的公开服务器列表请求
+    if (boot.requires_view_password && !boot.view_password_verified) {
+      servers.value = []
+      loadError.value = false
+      return
+    }
     const result = await listPublicServers()
     servers.value = result.data.map((v) => normalizeServer(v as unknown as Record<string, unknown>))
     loadError.value = false
   } catch {
     loadError.value = true
   } finally {
+    bootstrapped.value = true
     loading.value = false
+  }
+}
+
+function ensureLoaded() {
+  if (bootstrapped.value) return Promise.resolve()
+  if (!initialLoadPromise) {
+    initialLoadPromise = load().finally(() => {
+      initialLoadPromise = null
+    })
+  }
+  return initialLoadPromise
+}
+
+function onWakeup() {
+  if (stopped || connected.value) return
+  if (typeof document !== 'undefined' && document.hidden) return
+  if (socket && 'readyState' in socket && (socket as { readyState?: number }).readyState === 0) return
+  retry = 0
+  window.clearTimeout(timer)
+  connect()
+}
+
+function bindWakeupListeners() {
+  if (wakeupBound) return
+  wakeupBound = true
+  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+    document.addEventListener('visibilitychange', onWakeup)
+  }
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('online', onWakeup)
+  }
+}
+
+function unbindWakeupListeners() {
+  if (!wakeupBound) return
+  wakeupBound = false
+  if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+    document.removeEventListener('visibilitychange', onWakeup)
+  }
+  if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+    window.removeEventListener('online', onWakeup)
   }
 }
 
 function connect() {
   stopped = false
+  bindWakeupListeners()
   generation += 1
   const current = generation
+  window.clearTimeout(timer)
   // 只关自己这条：旧 socket 的 onerror 里不能去 close 新 socket。
   socket?.close()
   const next = new WebSocket(websocketURL('/ws/v2/public/runtime'))
@@ -99,6 +153,7 @@ function connect() {
 
 function stop() {
   stopped = true
+  unbindWakeupListeners()
   generation += 1
   window.clearTimeout(timer)
   socket?.close()
@@ -121,10 +176,12 @@ const statusStore: StatusStoreState = reactive({
   bootstrap,
   servers,
   groups,
+  bootstrapped,
   loading,
   connected,
   loadError,
   load,
+  ensureLoaded,
   connect,
   stop,
 })

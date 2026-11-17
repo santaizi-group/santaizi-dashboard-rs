@@ -29,12 +29,17 @@ onMounted(load)
 <template>
   <div class="status-container">
     <section class="status-panel service-panel">
-      <header class="group-title"><span>{{ t('statusServices') }}</span></header>
+      <header class="group-title">
+        <span>{{ t('statusServices') }}</span>
+        <el-button size="small" :loading="loading" @click="load">
+          <i v-if="!loading" class="ri-refresh-line"></i>{{ t('refresh') }}
+        </el-button>
+      </header>
       <div v-if="cards.length" class="service-list">
         <article v-for="card in cards" :key="card.id" class="svc-card">
           <div class="svc-card__head">
             <div class="svc-card__name">
-              <i class="live-dot" :class="card.live ? 'online' : 'offline'"></i>
+              <i class="live-dot" :class="card.tone"></i>
               <strong>{{ card.name }}</strong>
             </div>
             <b class="svc-card__rate">{{ card.uptimeLabel }}</b>
@@ -45,7 +50,7 @@ onMounted(load)
               :key="index"
               class="svc-days__bar"
               :class="day.tone"
-              :title="`${day.percent.toFixed(2)}%`"
+              :title="day.percent === null ? '—' : `${day.percent.toFixed(2)}%`"
             />
           </div>
           <div class="svc-card__latency">
@@ -62,8 +67,8 @@ onMounted(load)
           :title="failed ? t('loadFailed') : ''"
           :description="t(failed ? 'requestFailed' : loading ? 'loading' : 'noData')"
         />
-        <el-button v-if="failed" type="primary" @click="load">
-          <i class="ri-refresh-line"></i>{{ t('refresh') }}
+        <el-button v-if="failed" type="primary" :loading="loading" @click="load">
+          <i v-if="!loading" class="ri-refresh-line"></i>{{ t('refresh') }}
         </el-button>
       </div>
     </section>

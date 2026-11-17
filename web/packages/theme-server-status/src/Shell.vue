@@ -6,10 +6,11 @@ import { AppDrawer } from '@santaizi/ui'
 import { useInjectedStatusStore } from '@santaizi/status-core'
 import { formatProductVersion, PRODUCT_REPO_URL } from './domain/productVersion'
 
-defineProps<{
+const props = defineProps<{
   publicTheme: 'server-status' | 'server-grid' | 'nazhua'
   allowThemeSwitch: boolean
   actualColorMode: string
+  colorMode?: 'light' | 'dark' | 'system'
 }>()
 
 const emit = defineEmits<{
@@ -18,13 +19,23 @@ const emit = defineEmits<{
   toggleColor: []
 }>()
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const route = useRoute()
 const store = useInjectedStatusStore()
 const mobileOpen = ref(false)
 const footerText = computed(() => store.bootstrap?.footer_text?.trim() || '')
 const versionLine = computed(() => formatProductVersion(store.bootstrap?.version))
 const brandName = computed(() => store.bootstrap?.brand || t('appName'))
+const colorModeIcon = computed(() => {
+  const mode = props.colorMode || props.actualColorMode
+  if (mode === 'system') return 'ri-contrast-2-line'
+  return mode === 'dark' ? 'ri-moon-line' : 'ri-sun-line'
+})
+const colorModeLabel = computed(() => {
+  const mode = props.colorMode || props.actualColorMode
+  if (mode === 'system') return t('system')
+  return mode === 'dark' ? t('dark') : t('light')
+})
 
 watch(() => route.fullPath, () => {
   mobileOpen.value = false
@@ -63,15 +74,15 @@ function closeMenu() {
           <button type="button" class="status-icon-btn" :aria-label="t('language')"><i class="ri-translate-2"></i></button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="zh-CN">简体中文</el-dropdown-item>
-              <el-dropdown-item command="zh-TW">繁體中文</el-dropdown-item>
-              <el-dropdown-item command="en-US">English</el-dropdown-item>
-              <el-dropdown-item command="es-ES">Español</el-dropdown-item>
+              <el-dropdown-item command="zh-CN" :disabled="locale === 'zh-CN'">简体中文</el-dropdown-item>
+              <el-dropdown-item command="zh-TW" :disabled="locale === 'zh-TW'">繁體中文</el-dropdown-item>
+              <el-dropdown-item command="en-US" :disabled="locale === 'en-US'">English</el-dropdown-item>
+              <el-dropdown-item command="es-ES" :disabled="locale === 'es-ES'">Español</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
-        <button type="button" class="status-icon-btn" :aria-label="t(actualColorMode === 'dark' ? 'light' : 'dark')" @click="emit('toggleColor')">
-          <i :class="actualColorMode === 'dark' ? 'ri-sun-line' : 'ri-moon-line'"></i>
+        <button type="button" class="status-icon-btn" :aria-label="colorModeLabel" :title="colorModeLabel" @click="emit('toggleColor')">
+          <i :class="colorModeIcon"></i>
         </button>
         <a v-if="store.bootstrap?.authenticated" class="status-icon-btn" href="/admin/" :aria-label="t('adminPanel')"><i class="ri-settings-3-line"></i></a>
         <button type="button" class="status-icon-btn status-menu-btn" :aria-label="t('openNavigation')" @click="mobileOpen = true">

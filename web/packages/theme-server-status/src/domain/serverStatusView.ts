@@ -187,6 +187,16 @@ function metric(used: number, total: number, usedIsPercent = false): MetricView 
   }
 }
 
+function unknownPercentMetric(): MetricView {
+  return {
+    percent: null,
+    used: 0,
+    total: 0,
+    usedLabel: formatTransfer(0),
+    totalLabel: formatTransfer(0),
+  }
+}
+
 function textList(value: unknown) {
   if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean)
   if (typeof value === 'string' && value.trim()) return [value.trim()]
@@ -257,7 +267,8 @@ export function formatTimestamp(value: unknown, locale = 'zh-CN') {
   return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'medium' }).format(date)
 }
 
-function resolveUptimeSeconds(state: ServerState | undefined, bootTime: number, nowMs: number) {
+function resolveUptimeSeconds(online: boolean, state: ServerState | undefined, bootTime: number, nowMs: number) {
+  if (!online) return 0
   const uptime = pickNumber(state, 'Uptime')
   if (uptime > 0) return uptime
   if (!bootTime) return 0
@@ -308,6 +319,7 @@ export function toServerStatusView(
   nowMs = Date.now(),
   locale = 'zh-CN',
 ): ServerStatusView {
+  const online = isHostOnline(server)
   const state = server.state || {}
   const host = server.host || {}
   const publicNote = buildPublicNoteView(server.public_note, nowMs)
@@ -317,17 +329,19 @@ export function toServerStatusView(
   const diskTotal = pickNumber(host, 'DiskTotal')
   const swapUsed = pickNumber(state, 'SwapUsed')
   const swapTotal = pickNumber(host, 'SwapTotal')
-  const gpuPercent = pickNumber(state, 'GPU')
+  const rawCpu = online ? pickOptionalNumber(state, 'CPU') : null
+  const gpuPercent = online ? pickNumber(state, 'GPU') : 0
   const gpuNames = textList(pick(host, 'GPU'))
   const cpuRaw = pick(host, 'CPU')
   const cpuModels = textList(cpuRaw).filter((item) => Number.isNaN(Number(item)) || item.includes(' '))
-  const load1 = pickNumber(state, 'Load1')
-  const load5 = pickNumber(state, 'Load5')
-  const load15 = pickNumber(state, 'Load15')
-  const tcp = pickOptionalNumber(state, 'TcpConnCount')
-  const udp = pickOptionalNumber(state, 'UdpConnCount')
-  const processes = pickOptionalNumber(state, 'ProcessCount')
-  const temps = temperatures(pick(state, 'Temperatures'))
+  const load1 = online ? pickNumber(state, 'Load1') : 0
+  const load5 = online ? pickNumber(state, 'Load5') : 0
+  const load15 = online ? pickNumber(state, 'Load15') : 0
+  const hasLoad = online && pick(state, 'Load1', 'Load5', 'Load15') !== undefined
+  const tcp = online ? pickOptionalNumber(state, 'TcpConnCount') : null
+  const udp = online ? pickOptionalNumber(state, 'UdpConnCount') : null
+  const processes = online ? pickOptionalNumber(state, 'ProcessCount') : null
+  const temps = online ? temperatures(pick(state, 'Temperatures')) : []
   const agentVersion = pickText(host, 'Version')
   const bootTime = pickNumber(host, 'BootTime')
   const lastActive = String(server.last_active || '')
@@ -336,13 +350,13 @@ export function toServerStatusView(
   const gpu = gpuPercent > 0 ? metric(gpuPercent, 0, true) : null
   const transferIn = pickNumber(state, 'NetInTransfer')
   const transferOut = pickNumber(state, 'NetOutTransfer')
-  const speedIn = pickNumber(state, 'NetInSpeed')
-  const speedOut = pickNumber(state, 'NetOutSpeed')
+  const speedIn = online ? pickNumber(state, 'NetInSpeed') : 0
+  const speedOut = online ? pickNumber(state, 'NetOutSpeed') : 0
   const country = pickText(host, 'CountryCode')
   const platform = pickText(host, 'Platform')
   const cycleRows = cycles?.get(server.id) || []
   const cycleSummary = pickCycleSummary(cycleRows)
-  const uptimeSeconds = resolveUptimeSeconds(state, bootTime, nowMs)
+  const uptimeSeconds = resolveUptimeSeconds(online, state, bootTime, nowMs)
   const hasSpecs = Boolean(
     cpuModels.length
     || gpuNames.length
@@ -360,13 +374,13 @@ export function toServerStatusView(
     source: server,
     name: server.name,
     group: server.tag || 'default',
-    online: isHostOnline(server),
+    online,
     flagCode: flagCode(server.public_note, country),
     location: publicLocation(server.public_note, country, locale),
     slogan: publicNote.presentation.slogan,
     publicNote,
     orderLink: publicNote.presentation.orderLink,
-    cpu: metric(pickNumber(state, 'CPU'), 0, true),
+    cpu: rawCpu === null ? unknownPercentMetric() : metric(rawCpu, 0, true),
     memory: metric(memUsed, memTotal),
     disk: metric(diskUsed, diskTotal),
     gpu,
@@ -377,8 +391,8 @@ export function toServerStatusView(
     platformLabel: osLabel(platform),
     speedIn,
     speedOut,
-    speedInLabel: formatTransfer(speedIn) + '/s',
-    speedOutLabel: formatTransfer(speedOut) + '/s',
+    speedInLabel: online ? formatTransfer(speedIn) + '/s' : '—',
+    speedOutLabel: online ? formatTransfer(speedOut) + '/s' : '—',
     transferIn,
     transferOut,
     transferInLabel: formatTransfer(transferIn),
@@ -402,7 +416,7 @@ export function toServerStatusView(
     load1,
     load5,
     load15,
-    hasLoad: pick(state, 'Load1', 'Load5', 'Load15') !== undefined,
+    hasLoad,
     platform,
     platformVersion: pickText(host, 'PlatformVersion'),
     arch: pickText(host, 'Arch'),

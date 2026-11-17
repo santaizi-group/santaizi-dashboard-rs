@@ -16,7 +16,7 @@ const props = defineProps<{
 const emit = defineEmits<{ select: [] }>()
 const { t } = useI18n()
 const root = ref<HTMLElement>()
-const { load, keep } = useInView(root)
+const { inView, keep } = useInView(root)
 const rows = ref<MonitorHistory[] | null>(peekNetworkHistory(props.server.id) ?? null)
 const failed = ref(false)
 let requestSeq = 0
@@ -30,8 +30,9 @@ const placeholder = computed(() => {
   return t('noData')
 })
 
-watch(load, async (shouldLoad) => {
-  if (!shouldLoad || rows.value) return
+watch(inView, async (visible) => {
+  if (!visible || rows.value) return
+  failed.value = false
   const seq = ++requestSeq
   try {
     const data = await loadNetworkHistory(props.server.id)

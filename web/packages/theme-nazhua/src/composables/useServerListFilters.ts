@@ -12,6 +12,14 @@ import {
   type ServerSortOrder,
   type ServerSortProp,
 } from '@santaizi/status-core'
+import {
+  canonicalIata,
+  cityLabel,
+  getPresentation,
+  osLabel,
+  regionDisplayName,
+  resolveIso2,
+} from '@santaizi/theme-server-status'
 import { resolveServerLocation, count2size } from '../utils/worldMap'
 
 export type ListMode = 'card' | 'server-status'
@@ -55,22 +63,43 @@ function text(source: Record<string, unknown>, ...keys: string[]) {
   return ''
 }
 
+export function matchesServerSearch(server: ServerRecord, query: string): boolean {
+  const q = query.trim().toLowerCase()
+  if (!q) return true
+  const host = asRecord(server.host)
+  const platform = text(host, 'Platform', 'platform')
+  const countryCode = text(host, 'CountryCode', 'country_code')
+  const presentation = getPresentation(server.public_note)
+  const iso2 = resolveIso2(presentation.location)
+    || resolveIso2(presentation.flag)
+    || resolveIso2(countryCode)
+  const iata = canonicalIata(presentation.location) || canonicalIata(countryCode)
+  const hay = [
+    server.name,
+    server.tag,
+    platform,
+    osLabel(platform),
+    text(host, 'PlatformVersion', 'platform_version'),
+    countryCode,
+    presentation.location,
+    presentation.locationLabel,
+    presentation.flag,
+    presentation.slogan,
+    iso2 ? regionDisplayName(iso2, 'zh-CN') : '',
+    iso2 ? regionDisplayName(iso2, 'en-US') : '',
+    iata ? cityLabel(iata, 'zh-CN') : '',
+    iata ? cityLabel(iata, 'en-US') : '',
+  ].filter(Boolean).join(' ').toLowerCase()
+  return hay.includes(q)
+}
+
 export function filterAndSortServers(source: ServerRecord[], query: ServerListQuery) {
   const q = query.search.trim().toLowerCase()
   const list = source.filter((server) => {
     if (query.tag && (server.tag || 'default') !== query.tag) return false
     if (query.online === 'online' && !isHostOnline(server)) return false
     if (query.online === 'offline' && isHostOnline(server)) return false
-    if (q) {
-      const host = asRecord(server.host)
-      const hay = [
-        server.name,
-        server.tag,
-        text(host, 'Platform', 'platform'),
-        text(host, 'CountryCode', 'country_code'),
-      ].join(' ').toLowerCase()
-      if (!hay.includes(q)) return false
-    }
+    if (q && !matchesServerSearch(server, q)) return false
     return true
   })
   return sortServers(list, query.sort, query.order)

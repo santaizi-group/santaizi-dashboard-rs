@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { verifyViewPassword } from '@santaizi/api'
+import { safeRedirectTarget } from '../router'
 import { useStatusStore } from '../stores/status'
 
 const { t } = useI18n()
+const route = useRoute()
 const router = useRouter()
 const store = useStatusStore()
 const password = ref('')
@@ -18,7 +20,7 @@ async function submit() {
     await verifyViewPassword(password.value)
     await store.load()
     store.connect()
-    await router.replace('/')
+    await router.replace(safeRedirectTarget(route.query.redirect))
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : t('loadFailed'))
   } finally {
@@ -36,7 +38,9 @@ async function submit() {
         <el-form-item :label="t('password')">
           <el-input v-model="password" type="password" show-password autocomplete="current-password" autofocus />
         </el-form-item>
-        <el-button type="primary" native-type="submit" :loading="loading"><i class="ri-lock-unlock-line"></i>{{ t('verify') }}</el-button>
+        <el-button type="primary" native-type="submit" :loading="loading">
+          <i v-if="!loading" class="ri-lock-unlock-line"></i><span>{{ t('verify') }}</span>
+        </el-button>
       </el-form>
     </section>
   </div>

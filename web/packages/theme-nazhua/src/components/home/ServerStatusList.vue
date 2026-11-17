@@ -15,7 +15,8 @@ function billingOf(server: NazhuaServerView) {
 }
 
 function uptimeOf(server: NazhuaServerView) {
-  const dayUnit = locale.value.startsWith('zh') ? t('day') : 'd'
+  if (!server.online) return '—'
+  const dayUnit = locale.value.toLowerCase().startsWith('zh') ? t('day') : 'd'
   return formatUptime(server.uptimeSeconds, dayUnit)
 }
 
@@ -34,7 +35,8 @@ function platformOf(server: NazhuaServerView) {
 
 function usageClass(percent: number | null, withTrack = false) {
   // 未知（null）时既不上色也不画填充：不知道用了几成，谈不上告警。
-  const n = percent === null ? 0 : Math.min(100, Math.max(0, Number.isFinite(percent) ? percent : 0))
+  if (percent === null) return ['nazhua-status-table__usage']
+  const n = Math.min(100, Math.max(0, Number.isFinite(percent) ? percent : 0))
   const tone = usageTone(n)
   return [
     'nazhua-status-table__usage',
@@ -100,7 +102,7 @@ function usageStyle(percent: number | null): CSSProperties {
         class="nazhua-status-table__speed is-metric"
         :class="usageClass(server.cpuPercent, true)"
         :style="usageStyle(server.cpuPercent)"
-      >{{ server.cpuPercent.toFixed(1) }}%</span>
+      >{{ server.cpuPercent === null ? '—' : `${server.cpuPercent.toFixed(1)}%` }}</span>
       <span
         role="cell"
         class="nazhua-status-table__speed is-metric"
@@ -115,7 +117,7 @@ function usageStyle(percent: number | null): CSSProperties {
         :style="usageStyle(server.diskPercent)"
         :title="server.diskCaption"
       >{{ server.diskValue }}</span>
-      <span role="cell" class="nazhua-status-table__speed">{{ formatSpeed(server.speedIn) }} / {{ formatSpeed(server.speedOut) }}</span>
+      <span role="cell" class="nazhua-status-table__speed">{{ server.online ? `${formatSpeed(server.speedIn)} / ${formatSpeed(server.speedOut)}` : '—' }}</span>
       <span
         role="cell"
         class="nazhua-status-table__speed is-cycle"
@@ -123,8 +125,8 @@ function usageStyle(percent: number | null): CSSProperties {
         :style="server.cycle ? usageStyle(server.cycle.usagePercent) : undefined"
         :title="cycleTitle(server)"
       >{{ formatCompactBytes(server.trafficBytes, 1) }}</span>
-      <span role="cell" class="is-load">{{ server.load1.toFixed(2) }}</span>
-      <span role="cell" class="nazhua-status-table__speed is-conn">{{ formatConnPair(server.tcpConnCount, server.udpConnCount) }}</span>
+      <span role="cell" class="is-load">{{ server.online ? server.load1.toFixed(2) : '—' }}</span>
+      <span role="cell" class="nazhua-status-table__speed is-conn">{{ server.online ? formatConnPair(server.tcpConnCount, server.udpConnCount) : '—' }}</span>
       <span role="cell" class="is-billing" :title="billingOf(server)">{{ billingOf(server) }}</span>
     </div>
   </div>

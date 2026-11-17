@@ -10,10 +10,12 @@ export interface StatusStoreState {
   bootstrap: SiteBootstrap | null
   servers: ServerRecord[]
   groups: StatusServerGroup[]
+  bootstrapped: boolean
   loading: boolean
   connected: boolean
   loadError: boolean
   load: () => Promise<void>
+  ensureLoaded: () => Promise<void>
   connect: () => void
   stop: () => void
 }

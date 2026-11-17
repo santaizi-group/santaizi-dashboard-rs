@@ -15,6 +15,14 @@ const codeMaps = {
     name: '上海',
     country: '中国',
   },
+  CAN: {
+    x: 1034,
+    y: 260,
+    lon: 113.2644,
+    lat: 23.1291,
+    name: '广州',
+    country: '中国',
+  },
   CKG: {
     x: 1010,
     y: 235,
@@ -427,7 +435,6 @@ export const aliasMapping = {
   MOW: 'SVO',
   CHI: 'ORD',
   SHA: 'PVG',
-  CAN: 'CKG',
   CTU: 'TFU',
   BJS: 'PEK',
   HK: 'HKG',

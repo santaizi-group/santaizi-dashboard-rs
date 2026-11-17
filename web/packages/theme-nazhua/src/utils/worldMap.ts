@@ -1,4 +1,11 @@
 import type { ServerHost } from '@santaizi/api'
+import {
+  iso2FromLocation,
+  parseLocation,
+  publicNoteCustom,
+  regionDisplayName,
+  resolveLocation,
+} from '@santaizi/theme-server-status'
 import CODE_MAPS, { aliasMapping, countryCodeMapping, regionGeoPresets } from '../data/code-maps'
 
 type CodeInfo = { x?: number; y?: number; lon?: number; lat?: number; name?: string; country?: string }
@@ -90,21 +97,63 @@ export interface ServerLocation {
   countryCode: string
 }
 
+/** 将经纬度投射到 1280×621 点阵世界地图画布坐标。 */
+function projectMapXY(lon: number, lat: number): { x: number; y: number } {
+  const x = Math.round(Math.max(8, Math.min(1272, 571.5 + lon * 3.96)))
+  const y = Math.round(Math.max(8, Math.min(613, 360 - lat * 4.54)))
+  return { x, y }
+}
+
+function cleanText(value: unknown): string {
+  return value === undefined || value === null ? '' : String(value).trim()
+}
+
 export function resolveServerLocation(
   server: { host?: ServerHost; public_note?: Record<string, unknown> },
 ): ServerLocation | null {
+  const custom = publicNoteCustom(server.public_note)
+  const rawLocation = cleanText(custom.location)
+  const rawLocationLabel = cleanText(custom.locationLabel)
+  const hostCountry = cleanText(server.host?.CountryCode)
+  const resolvedIso = (
+    iso2FromLocation(rawLocation)
+    || iso2FromLocation(cleanText(custom.flag))
+    || iso2FromLocation(hostCountry)
+  ).toLowerCase()
+
+  // 1. 公开备注显式经纬度优先（latlng 或 lat + lng）
+  const customLat = cleanText(custom.lat)
+  const customLng = cleanText(custom.lng)
+  const explicitPoint = parseLocation(cleanText(custom.latlng))
+    || (customLat && customLng ? parseLocation(`${customLat},${customLng}`) : null)
+  if (explicitPoint) {
+    const projected = projectMapXY(explicitPoint.lon, explicitPoint.lat)
+    const codeKey = rawLocation.toUpperCase() || hostCountry.toUpperCase() || `${explicitPoint.lat.toFixed(2)},${explicitPoint.lon.toFixed(2)}`
+    const presetInfo = codeKey ? (locationCode2Info(codeKey) || locationCode2GeoInfo(codeKey)) : undefined
+    return {
+      code: codeKey,
+      name: rawLocationLabel || String(presetInfo?.name || '') || regionDisplayName(resolvedIso, 'zh-CN'),
+      x: typeof presetInfo?.x === 'number' ? presetInfo.x : projected.x,
+      y: typeof presetInfo?.y === 'number' ? presetInfo.y : projected.y,
+      lon: explicitPoint.lon,
+      lat: explicitPoint.lat,
+      countryCode: resolvedIso,
+    }
+  }
+
   let aliasCode: string | undefined
   let locationCode: string | undefined
-  const custom = server.public_note?.customData as Record<string, unknown> | undefined
-  if (custom?.location) {
-    aliasCode = String(custom.location)
-    locationCode = String(custom.location)
-  } else if (server.host?.CountryCode) {
-    aliasCode = server.host.CountryCode.toUpperCase()
+  if (rawLocation) {
+    aliasCode = rawLocation
+    locationCode = rawLocation
+  } else if (hostCountry) {
+    aliasCode = hostCountry.toUpperCase()
   }
   const normalizedAliasCode = typeof aliasCode === 'string' ? aliasCode.toUpperCase() : aliasCode
   const code = alias2code(normalizedAliasCode) || locationCode || normalizedAliasCode
   if (!code) return null
+
+  // 2. 命中内置点阵城市表 / 地区预设
   const locationInfo = locationCode2Info(code) || {}
   const geoInfo = locationCode2GeoInfo(code) || locationCode2GeoInfo(normalizedAliasCode) || {}
   const merged = { ...geoInfo, ...locationInfo } as Record<string, unknown>
@@ -114,14 +163,33 @@ export function resolveServerLocation(
   const lat = merged.lat as number | undefined
   const hasMapCoord = typeof x === 'number' && typeof y === 'number'
   const hasGeoCoord = typeof lon === 'number' && typeof lat === 'number'
-  if (!hasMapCoord && !hasGeoCoord) return null
+  if (hasMapCoord || hasGeoCoord) {
+    const finalLon = hasGeoCoord ? lon! : (x! / 1280) * 360 - 180
+    const finalLat = hasGeoCoord ? lat! : 90 - (y! / 621) * 180
+    const projected = hasMapCoord ? { x: x!, y: y! } : projectMapXY(finalLon, finalLat)
+    return {
+      code: String(code).toUpperCase(),
+      name: rawLocationLabel || String(merged.name || ''),
+      x: projected.x,
+      y: projected.y,
+      lon: finalLon,
+      lat: finalLat,
+      countryCode: resolvedIso || iso2FromLocation(String(code)).toLowerCase(),
+    }
+  }
+
+  // 3. 回退 @santaizi/geo（覆盖 110+ 国家/地区与坐标串）
+  const fallback = resolveLocation(rawLocation || hostCountry, 'zh-CN')
+  if (!fallback) return null
+  const projected = projectMapXY(fallback.point.lon, fallback.point.lat)
+  const fallbackIso = (fallback.iso2 || resolvedIso).toLowerCase()
   return {
-    code,
-    name: String(merged.name || ''),
-    x,
-    y,
-    lon: hasGeoCoord ? lon! : (x! / 1280) * 360 - 180,
-    lat: hasGeoCoord ? lat! : 90 - (y! / 621) * 180,
-    countryCode: (server.host?.CountryCode || '').toLowerCase(),
+    code: (fallback.iso2 || String(code)).toUpperCase(),
+    name: rawLocationLabel || regionDisplayName(fallbackIso, 'zh-CN') || fallback.label,
+    x: projected.x,
+    y: projected.y,
+    lon: fallback.point.lon,
+    lat: fallback.point.lat,
+    countryCode: fallbackIso,
   }
 }

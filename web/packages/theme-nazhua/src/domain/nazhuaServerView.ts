@@ -51,7 +51,7 @@ export interface NazhuaServerView {
   slogan: string
   spec: string
   tableSpec: string
-  cpuPercent: number
+  cpuPercent: number | null
   /// 总量未上报时为 null（见 percentOf），模板据此显示「—」。
   memoryPercent: number | null
   diskPercent: number | null
@@ -239,11 +239,27 @@ export function formatNazhuaBilling(
   return cycle ? `${bill.amountValue}/${cycle}` : bill.amountValue
 }
 
+/**
+ * 流量统计标签：有周期配额（展示剩余字节）时优先显示「剩余流量」，
+ * 无周期配额时按公开备注 `trafficType` 区分单向出 / 单向取最大 / 双向。
+ */
+export function resolveNazhuaTrafficLabel(
+  view: Pick<NazhuaServerView, 'cycle' | 'publicNote'>,
+  t: (key: string) => string,
+) {
+  if (view.cycle && view.cycle.quotaBytes > 0) return t('nazhua.remainingTraffic')
+  if (view.cycle?.direction === 'out' || view.cycle?.direction === 'outbound') return t('nazhua.outboundTraffic')
+  if (view.publicNote.bill.trafficType === '1') return t('trafficOneWayOut')
+  if (view.publicNote.bill.trafficType === '3') return t('trafficOneWayMax')
+  return t('trafficBidirectionalQuota')
+}
+
 export function toNazhuaServerView(
   server: ServerRecord,
   cycles?: NazhuaCycleTransferMap,
   nowMs = Date.now(),
 ): NazhuaServerView {
+  const online = isHostOnline(server)
   const state = server.state
   const host = server.host
   const memoryUsed = finite(state?.MemUsed)
@@ -266,20 +282,22 @@ export function toNazhuaServerView(
   const cpuCores = parseCpuCores(host?.CPU)
   const spec = formatSpec(cpuCores, memoryTotal, diskTotal)
   const cycle = cycles?.get(server.id) || null
-  const memDonut = formatDonutMem(memoryUsed, memoryTotal)
-  const diskDonut = formatDonutDisk(diskUsed, diskTotal)
-  const swapDonut = formatDonutMem(swapUsed, swapTotal)
-  // CPU 上报的本身就是百分比，不是 used/total 的比值，直接钳位。
-  const cpuPercent = clampPercent(finite(state?.CPU))
+  const memDonut = memoryTotal > 0 ? formatDonutMem(memoryUsed, memoryTotal) : { value: '—', totalLabel: '' }
+  const diskDonut = diskTotal > 0 ? formatDonutDisk(diskUsed, diskTotal) : { value: '—', totalLabel: '' }
+  const swapDonut = swapTotal > 0 ? formatDonutMem(swapUsed, swapTotal) : { value: '—', totalLabel: '' }
+  // 离线或尚未收到 CPU 上报时置 null，模板据此显示「—」而非残留死前 95% 或假 0%。
+  const hasCpuSample = online && state?.CPU !== undefined && state?.CPU !== null
+  const cpuPercent = hasCpuSample ? clampPercent(finite(state?.CPU)) : null
   const memoryPercent = percentOf(memoryUsed, memoryTotal || undefined)
   const diskPercent = percentOf(diskUsed, diskTotal || undefined)
   const swapPercent = percentOf(swapUsed, swapTotal || undefined)
+  const uptimeSeconds = online ? finite(state?.Uptime) : 0
   return {
     id: server.id,
     source: server,
     name: server.name,
     group: server.tag || 'default',
-    online: isHostOnline(server),
+    online,
     platform: text(host?.Platform),
     platformLabel: osLabel(host?.Platform),
     platformVersion: text(host?.PlatformVersion),
@@ -289,7 +307,7 @@ export function toNazhuaServerView(
     cpuModels,
     cpuCores,
     gpuNames: textList(host?.GPU),
-    gpuPercent: finite(state?.GPU),
+    gpuPercent: online ? finite(state?.GPU) : 0,
     flagCode,
     flagClass: flagCode ? `fi fi-${flagCode}` : '',
     location,
@@ -313,31 +331,31 @@ export function toNazhuaServerView(
     memoryTotalLabel: memDonut.totalLabel,
     diskTotalLabel: diskDonut.totalLabel,
     swapTotalLabel: swapDonut.totalLabel,
-    memoryText: usageText(memoryUsed, memoryTotal, 'mem'),
-    diskText: usageText(diskUsed, diskTotal, 'disk'),
-    swapText: usageText(swapUsed, swapTotal, 'mem'),
-    memoryCaption: usageCaption(memoryUsed, memoryTotal, memoryPercent, 'mem'),
-    diskCaption: usageCaption(diskUsed, diskTotal, diskPercent, 'disk'),
-    swapCaption: usageCaption(swapUsed, swapTotal, swapPercent, 'mem'),
+    memoryText: memoryTotal > 0 ? usageText(memoryUsed, memoryTotal, 'mem') : '—',
+    diskText: diskTotal > 0 ? usageText(diskUsed, diskTotal, 'disk') : '—',
+    swapText: swapTotal > 0 ? usageText(swapUsed, swapTotal, 'mem') : '—',
+    memoryCaption: memoryTotal > 0 ? usageCaption(memoryUsed, memoryTotal, memoryPercent, 'mem') : '',
+    diskCaption: diskTotal > 0 ? usageCaption(diskUsed, diskTotal, diskPercent, 'disk') : '',
+    swapCaption: swapTotal > 0 ? usageCaption(swapUsed, swapTotal, swapPercent, 'mem') : '',
     cpuCaption: cpuCores > 0 ? `${cpuCores}C` : '',
-    uptimeSeconds: finite(state?.Uptime),
-    uptime: formatUptime(finite(state?.Uptime)),
+    uptimeSeconds,
+    uptime: online ? formatUptime(uptimeSeconds) : '—',
     bootTime: finite(host?.BootTime),
     lastActive: server.last_active || '',
-    speedIn: finite(state?.NetInSpeed),
-    speedOut: finite(state?.NetOutSpeed),
+    speedIn: online ? finite(state?.NetInSpeed) : 0,
+    speedOut: online ? finite(state?.NetOutSpeed) : 0,
     transferIn,
     transferOut,
     trafficBytes: cycle && cycle.quotaBytes > 0
       ? Math.max(cycle.quotaBytes - cycle.usedBytes, 0)
       : planTrafficBytes(transferIn, transferOut, publicNote.bill.trafficType),
-    load1: finite(state?.Load1),
-    load5: finite(state?.Load5),
-    load15: finite(state?.Load15),
-    tcpConnCount: finite(state?.TcpConnCount),
-    udpConnCount: finite(state?.UdpConnCount),
-    processCount: finite(state?.ProcessCount),
-    temperatures: temperatures(state?.Temperatures),
+    load1: online ? finite(state?.Load1) : 0,
+    load5: online ? finite(state?.Load5) : 0,
+    load15: online ? finite(state?.Load15) : 0,
+    tcpConnCount: online ? finite(state?.TcpConnCount) : 0,
+    udpConnCount: online ? finite(state?.UdpConnCount) : 0,
+    processCount: online ? finite(state?.ProcessCount) : 0,
+    temperatures: online ? temperatures(state?.Temperatures) : [],
     cycle,
     billing: billingLabel(publicNote),
     orderLink: publicNote.presentation.orderLink,

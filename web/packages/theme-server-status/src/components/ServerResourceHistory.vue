@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { PublicMetricPoint } from '@santaizi/api'
 import { AppEmpty } from '@santaizi/ui'
 import { MAX_RANGE_MS, useResourceHistory } from '../composables/useResourceHistory'
+import { readServiceToken } from '../domain/themeToken'
 import { formatSpeed } from '../domain/transfer'
 import type { ServerStatusView } from '../domain/serverStatusView'
 import ResourceHistoryChart, { type HistorySeries, type HistoryUnit } from './ResourceHistoryChart.vue'
@@ -34,10 +35,14 @@ const {
   disabledHistoryDate,
 } = useResourceHistory(computed(() => props.server.id))
 
+const rootRef = ref<HTMLElement>()
+const themeVersion = ref(0)
+const appliedPresetHours = ref<number | null>(24)
 const presetHours = ref<number | null>(24)
 const customOpen = ref(false)
 const draftStart = ref<Date | null>(null)
 const draftEnd = ref<Date | null>(null)
+let themeObserver: MutationObserver | undefined
 
 const customValid = computed(() => {
   if (!draftStart.value || !draftEnd.value) return false
@@ -46,7 +51,14 @@ const customValid = computed(() => {
   return end > start && end - start <= MAX_RANGE_MS
 })
 
+watch(() => props.server.id, () => {
+  appliedPresetHours.value = 24
+  presetHours.value = 24
+  customOpen.value = false
+})
+
 function onPreset(hours: number) {
+  appliedPresetHours.value = hours
   presetHours.value = hours
   customOpen.value = false
   setPreset(hours)
@@ -59,19 +71,36 @@ function toggleCustom() {
     draftStart.value = new Date(start)
     draftEnd.value = new Date(end)
     presetHours.value = null
+  } else {
+    presetHours.value = appliedPresetHours.value
   }
 }
 
 function applyCustom() {
   if (!customValid.value || !draftStart.value || !draftEnd.value) return
+  appliedPresetHours.value = null
+  presetHours.value = null
   range.value = [new Date(draftStart.value), new Date(draftEnd.value)]
   customOpen.value = false
   void load()
 }
 
 function token(name: string, fallback: string) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
+  return readServiceToken(rootRef.value, name, fallback)
 }
+
+onMounted(() => {
+  if (typeof MutationObserver !== 'undefined') {
+    themeObserver = new MutationObserver(() => {
+      themeVersion.value += 1
+    })
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] })
+  }
+})
+
+onBeforeUnmount(() => {
+  themeObserver?.disconnect()
+})
 
 function colors() {
   return {
@@ -100,6 +129,7 @@ function seriesOf(rows: PublicMetricPoint[], name: string, color: string, pick: 
 }
 
 const cards = computed<HistoryCard[]>(() => {
+  void themeVersion.value
   const rows = points.value
   const current = props.server
   const palette = colors()
@@ -169,7 +199,7 @@ const cards = computed<HistoryCard[]>(() => {
 </script>
 
 <template>
-  <section class="ss-detail__section ss-history">
+  <section ref="rootRef" class="ss-detail__section ss-history">
     <header class="ss-history__head">
       <h3>{{ t('nazhua.resourceHistory') }}</h3>
       <div class="ss-history__controls">
@@ -212,7 +242,7 @@ const cards = computed<HistoryCard[]>(() => {
         </button>
       </div>
     <div class="ss-history__body" v-loading="loading && hasCharts">
-      <div v-if="!hasCharts && (loading || failed || empty)" class="ss-latency__empty">
+      <div v-if="failed || (!hasCharts && (loading || empty))" class="ss-latency__empty">
         <AppEmpty
           :tone="failed ? 'danger' : 'default'"
           :icon="failed ? 'ri-error-warning-line' : loading ? 'ri-loader-4-line' : 'ri-line-chart-line'"
