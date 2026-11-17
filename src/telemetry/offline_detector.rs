@@ -91,6 +91,18 @@ impl OfflineDetector {
         threshold_nanos: i64,
         policy: OfflineHistoryPolicy,
     ) -> anyhow::Result<(Vec<OfflineNotice>, Vec<RecoveryNotice>)> {
+        self.detect_with_grace(now_nanos, threshold_nanos, policy, true)
+    }
+
+    /// 带启动宽限控制的离线扫描：`allow_new_offline = false` 时仅结算已离线主机的恢复，
+    /// 不将重启前在线的主机抢判为新离线（留给探针重连一个完整离线阈值窗口）。
+    pub fn detect_with_grace(
+        &self,
+        now_nanos: i64,
+        threshold_nanos: i64,
+        policy: OfflineHistoryPolicy,
+        allow_new_offline: bool,
+    ) -> anyhow::Result<(Vec<OfflineNotice>, Vec<RecoveryNotice>)> {
         let threshold_seconds = ((threshold_nanos / 1_000_000_000).max(1)) as u64;
         let runtimes = self.db.read(load_runtimes)?;
         let mut notices = Vec::new();
@@ -104,12 +116,30 @@ impl OfflineDetector {
                 episodes.remove(&runtime.server_id);
                 continue;
             }
-            if let Some(episode) = episodes.get(&runtime.server_id) {
-                // 只有收到比离线前更新的上报才算恢复；阈值上调不应把仍在停报的机器判回在线。
+            if let Some(episode) = episodes.get_mut(&runtime.server_id) {
+                // 只有收到比离线前更新、且距离当前未超过离线阈值的鲜活上报才算真正恢复；
+                // 迟到的历史复制帧（仍超出离线阈值）只推进基准点，不得触发假恢复再二次离线。
                 if runtime.last_seen_nanos > episode.last_seen_nanos {
+                    if now_nanos.saturating_sub(runtime.last_seen_nanos) >= threshold_nanos {
+                        episode.last_seen_nanos = runtime.last_seen_nanos;
+                        continue;
+                    }
                     let episode = episodes.remove(&runtime.server_id).expect("episode exists");
                     if policy.enabled && runtime.current_offline_id > 0 {
                         self.close_history(runtime.server_id, runtime.last_seen_nanos, policy)?;
+                    } else if !policy.enabled {
+                        let _ = self.db.write(|tx| {
+                            tx.execute(
+                                "UPDATE server_runtimes SET status = ?1, last_online_at = ?2, \
+                                 updated_at = CURRENT_TIMESTAMP WHERE server_id = ?3",
+                                params![
+                                    STATUS_ONLINE,
+                                    unix_nanos_to_sqlite(runtime.last_seen_nanos),
+                                    runtime.server_id
+                                ],
+                            )?;
+                            Ok(())
+                        });
                     }
                     let reason = offline::detect_offline_reason(
                         episode.last_boot_time,
@@ -130,7 +160,9 @@ impl OfflineDetector {
                 }
                 continue;
             }
-            if now_nanos.saturating_sub(runtime.last_seen_nanos) < threshold_nanos {
+            if !allow_new_offline
+                || now_nanos.saturating_sub(runtime.last_seen_nanos) < threshold_nanos
+            {
                 continue;
             }
             let started_at_nanos = runtime
@@ -328,33 +360,32 @@ impl OfflineDetector {
     }
 
     /// 检测循环：配置里的间隔/阈值/开关每轮重读，改设置不需要重启面板。
+    /// 即使离线历史与通知开关均关闭，仍维护 `server_runtimes.status`；
+    /// 启动宽限期取 `max(offline_threshold, check_interval * 2)`，防止面板升级/重启后把尚在重连退避中的探针误报离线。
     pub async fn run(self: Arc<Self>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         if let Err(err) = self.seed_episodes() {
             tracing::warn!("离线检测回填失败: {err:#}");
         }
         loop {
-            let (interval_seconds, threshold_seconds, enabled) = {
+            let (interval_seconds, threshold_seconds) = {
                 let conf = self.conf.read().expect("config lock");
                 (
                     conf.offline_check_interval_seconds
                         .max(MIN_INTERVAL_SECONDS),
                     conf.offline_threshold_seconds.max(MIN_THRESHOLD_SECONDS),
-                    conf.enable_offline_history
-                        || conf.enable_offline_notification
-                        || conf.enable_recovery_notification,
                 )
             };
             let interval = Duration::from_secs(interval_seconds);
+            let startup_grace =
+                Duration::from_secs(threshold_seconds.max(interval_seconds.saturating_mul(2)));
             tokio::select! {
                 _ = tokio::time::sleep(interval) => {
-                    if !enabled || self.started_at.elapsed() <= interval * 2 {
-                        continue;
-                    }
+                    let allow_new_offline = self.started_at.elapsed() > startup_grace;
                     let policy = OfflineHistoryPolicy::from_conf(&self.conf.read().expect("config lock"));
                     let threshold_nanos = threshold_seconds as i64 * 1_000_000_000;
                     let detector = Arc::clone(&self);
                     let outcome = tokio::task::spawn_blocking(move || {
-                        detector.detect(now_nanos(), threshold_nanos, policy)
+                        detector.detect_with_grace(now_nanos(), threshold_nanos, policy, allow_new_offline)
                     })
                     .await;
                     match outcome {
@@ -736,6 +767,53 @@ mod tests {
             .unwrap();
         assert_eq!(recoveries.len(), 1);
         assert_eq!(recoveries[0].reason, offline::OFFLINE_REASON_MACHINE_REBOOT);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn startup_grace_suppresses_new_offline_but_allows_seeded_recovery() {
+        let (detector, path) = detector("grace");
+        let now = 1_700_000_000_000_000_000i64;
+        seed_runtime(&detector, now, 90_000_000_000);
+        // 宽限期内：重启前在线但尚未连回的探针不得抢判离线。
+        let (notices, recoveries) = detector
+            .detect_with_grace(now, THRESHOLD, policy(), false)
+            .unwrap();
+        assert!(notices.is_empty() && recoveries.is_empty());
+
+        // 宽限结束后仍未连回：正常判离线。
+        let (notices, _) = detector
+            .detect_with_grace(now, THRESHOLD, policy(), true)
+            .unwrap();
+        assert_eq!(notices.len(), 1);
+
+        // 重启后回填了离线态，若在宽限期内连回，应立即结算恢复而非拖满宽限期。
+        detector.episodes.lock().unwrap().clear();
+        detector.seed_episodes().unwrap();
+        bump_last_seen(&detector, now + 5_000_000_000);
+        let (notices, recoveries) = detector
+            .detect_with_grace(now + 10_000_000_000, THRESHOLD, policy(), false)
+            .unwrap();
+        assert!(notices.is_empty());
+        assert_eq!(recoveries.len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn stale_replicated_last_seen_does_not_trigger_phantom_recovery() {
+        let (detector, path) = detector("stale-repl");
+        let now = 1_700_000_000_000_000_000i64;
+        // 主机最后上报在 now - 90s，已判离线。
+        seed_runtime(&detector, now, 90_000_000_000);
+        let (notices, _) = detector.detect(now, THRESHOLD, policy()).unwrap();
+        assert_eq!(notices.len(), 1);
+
+        // 从端迟到了 1 秒的断前尾巴（now - 89s，距当前 99s >= 60s 阈值），不得引发假恢复。
+        bump_last_seen(&detector, now - 89_000_000_000);
+        let (notices, recoveries) = detector
+            .detect(now + 10_000_000_000, THRESHOLD, policy())
+            .unwrap();
+        assert!(notices.is_empty() && recoveries.is_empty());
         let _ = std::fs::remove_file(&path);
     }
 }

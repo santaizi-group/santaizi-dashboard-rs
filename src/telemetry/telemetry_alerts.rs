@@ -70,12 +70,22 @@ pub fn scan(
     policy: &AlertPolicy,
     now_nanos: i64,
 ) -> anyhow::Result<Vec<PendingNotice>> {
+    let (pending, _) = scan_with_unmutes(conn, policy, now_nanos)?;
+    Ok(pending)
+}
+
+fn scan_with_unmutes(
+    conn: &Connection,
+    policy: &AlertPolicy,
+    now_nanos: i64,
+) -> anyhow::Result<(Vec<PendingNotice>, Vec<String>)> {
     let mut pending = Vec::new();
-    scan_incidents(conn, policy, now_nanos, &mut pending)?;
-    scan_collectors(conn, policy, now_nanos, &mut pending)?;
+    let mut unmutes = Vec::new();
+    scan_incidents(conn, policy, now_nanos, &mut pending, &mut unmutes)?;
+    scan_collectors(conn, policy, now_nanos, &mut pending, &mut unmutes)?;
     scan_data_loss(conn, policy, &mut pending)?;
     scan_event_data_loss(conn, policy, &mut pending)?;
-    Ok(pending)
+    Ok((pending, unmutes))
 }
 
 pub fn format_burst(notices: &[PendingNotice]) -> Vec<(String, String)> {
@@ -115,6 +125,7 @@ fn scan_incidents(
     policy: &AlertPolicy,
     now_nanos: i64,
     pending: &mut Vec<PendingNotice>,
+    unmutes: &mut Vec<String>,
 ) -> anyhow::Result<()> {
     let cutoff = now_nanos.saturating_sub(3_600_000_000_000);
     let mut stmt = conn.prepare(
@@ -142,7 +153,14 @@ fn scan_incidents(
     }
     drop(stmt);
     let bucket = policy.availability_bucket_nanos;
+    let mut open_nodes: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    let mut ended_nodes: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
     for incident in incidents.iter() {
+        if incident.ended_at == 0 {
+            open_nodes.insert(incident.node_uuid.clone());
+        } else {
+            ended_nodes.insert(incident.node_uuid.clone());
+        }
         let mut notify = match incident.current.as_str() {
             CONNECTIVITY_DEGRADED => policy.notify_connectivity,
             _ => false,
@@ -181,6 +199,14 @@ fn scan_incidents(
             });
         }
     }
+    for node_uuid in ended_nodes {
+        if !open_nodes.contains(&node_uuid) {
+            unmutes.push(format!(
+                "bf::tho-{CONNECTIVITY_DEGRADED}-{}",
+                hex(&node_uuid)
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -189,6 +215,7 @@ fn scan_collectors(
     policy: &AlertPolicy,
     now_nanos: i64,
     pending: &mut Vec<PendingNotice>,
+    unmutes: &mut Vec<String>,
 ) -> anyhow::Result<()> {
     let mut stmt = conn.prepare(
         "SELECT c.collector_uuid, COALESCE(c.name, ''), COALESCE(r.last_seen, 0), \
@@ -270,14 +297,18 @@ fn scan_collectors(
             now_nanos,
             &message,
             policy.notify_collector_online,
-        )? && policy.notify_collector_online
-        {
-            pending.push(PendingNotice {
-                alert_type: COLLECTOR_ONLINE.into(),
-                title: title(COLLECTOR_ONLINE).into(),
-                name: display,
-                mute_key: format!("bf::tcu-{uuid}"),
-            });
+        )? {
+            // 即使从端上线通知未开启，恢复时也必须先解除该从端的离线静音，
+            // 否则后续独立发生的再离线会被残留静音吞掉或触发静音时长翻倍。
+            unmutes.push(format!("bf::tco-{uuid}"));
+            if policy.notify_collector_online {
+                pending.push(PendingNotice {
+                    alert_type: COLLECTOR_ONLINE.into(),
+                    title: title(COLLECTOR_ONLINE).into(),
+                    name: display,
+                    mute_key: format!("bf::tcu-{uuid}"),
+                });
+            }
         }
     }
     Ok(())
@@ -680,10 +711,33 @@ pub async fn run(
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(15)) => {
                 let policy = AlertPolicy::from_config(&conf.read().expect("config lock"));
-                match db.read(|conn| scan(conn, &policy, crate::util::time::now_nanos())) {
-                    Ok(notices) => {
-                        for (message, mute) in format_burst(&notices) {
-                            notifier.send("default", &message, Some(mute), None).await;
+                match db.read(|conn| {
+                    scan_with_unmutes(conn, &policy, crate::util::time::now_nanos())
+                }) {
+                    Ok((notices, unmutes)) => {
+                        for key in unmutes {
+                            notifier.unmute("default", &key);
+                        }
+                        // 逐条按各自实体 mute_key 投递（由 Notifier 的 15 秒聚合窗口按告警前缀归并多台），
+                        // 且仅在本次通知未被静音吞掉（sent == true）后才解除反向静音，
+                        // 避免静音吞通知时错误清掉反向键或让独立告警被翻倍静音吞掉。
+                        for notice in notices {
+                            let mute_key = notice.mute_key.clone();
+                            let sent = notifier
+                                .send_checked(
+                                    "default",
+                                    &format!("[{}] {}", notice.title, notice.name),
+                                    Some(notice.mute_key),
+                                    None,
+                                )
+                                .await;
+                            if sent {
+                                if let Some(uuid) = mute_key.strip_prefix("bf::tco-") {
+                                    notifier.unmute("default", &format!("bf::tcu-{uuid}"));
+                                } else if let Some(uuid) = mute_key.strip_prefix("bf::tcu-") {
+                                    notifier.unmute("default", &format!("bf::tco-{uuid}"));
+                                }
+                            }
                         }
                     }
                     Err(err) => tracing::warn!("telemetry alerts: {err:#}"),
@@ -1016,5 +1070,44 @@ mod episode_anchor_tests {
             keys[0].ends_with(&format!("/{head}")),
             "锚点应是链头：{keys:?}"
         );
+    }
+
+    #[test]
+    fn collector_recovery_unmutes_offline_key_even_when_online_notify_is_disabled() {
+        let db = db("unmute-recovery");
+        let now = 1_700_000_000_000_000_000i64;
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO collectors (collector_uuid, name, address, token_hash, token_ciphertext, kind, tcp_ports, revoked, deleted, created_at) \
+                 VALUES ('edge-x', 'edge-x', '10.0.0.8:5556', X'00', X'00', 'observer', '', 0, 0, '2020-01-01 00:00:00')",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO collector_runtimes (collector_uuid, status, last_seen) VALUES ('edge-x', 'offline', ?1)",
+                [now - 120_000_000_000i64],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let p = policy(true); // notify_collector_offline=true, notify_collector_online=false
+        let (notices, unmutes) = db.read(|conn| scan_with_unmutes(conn, &p, now)).unwrap();
+        assert_eq!(notices.len(), 1);
+        assert!(unmutes.is_empty());
+
+        // 从端恢复上报但未开启上线通知时，仍必须产出 bf::tco-edge-x 的 unmute 指令。
+        db.write(|tx| {
+            tx.execute(
+                "UPDATE collector_runtimes SET status = 'online', last_seen = ?1 WHERE collector_uuid = 'edge-x'",
+                [now + 10_000_000_000i64],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let (notices, unmutes) = db
+            .read(|conn| scan_with_unmutes(conn, &p, now + 15_000_000_000i64))
+            .unwrap();
+        assert!(notices.is_empty());
+        assert_eq!(unmutes, vec!["bf::tco-edge-x"]);
     }
 }

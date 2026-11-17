@@ -44,12 +44,13 @@ fn clip_error(raw: &str) -> String {
     out
 }
 
-/// 一次探测告警要发出的通知。调用方在事务提交后交给 `Notifier`。
+/// 一次探测告警要发出的通知或静默解除指令。调用方在事务提交后交给 `Notifier`。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProbeNotice {
     pub tag: String,
     pub message: String,
     pub mute_label: String,
+    pub unmute_labels: Vec<String>,
     pub server_id: i64,
 }
 
@@ -216,7 +217,12 @@ pub fn ingest_probe_samples(
     Ok(notices)
 }
 
-/// `ListPendingProbeRouteJobs`：先把超时未领取的任务标失败，再按 id 升序返回。
+/// 单次 Sync 帧最多下发的待执行手动路由任务数（适配从端 `QUEUE_CAPACITY = 32`，留足缓冲避免批量追踪触发 `Offer::Full` 造假失败）。
+const MAX_DISPATCH_ROUTE_JOBS: i64 = 16;
+/// 延迟告警恢复解静默所需的连续滞回安全样本数，避免临界值抖动每包互解静音刷屏。
+const LATENCY_RECOVER_STREAK: i64 = 3;
+
+/// `ListPendingProbeRouteJobs`：先把超时未领取的任务标失败，再按 id 升序限量返回。
 pub fn pending_route_jobs(
     conn: &Connection,
     collector_uuid: &str,
@@ -231,9 +237,9 @@ pub fn pending_route_jobs(
     )?;
     let mut stmt = conn.prepare(
         "SELECT id, server_id, protocol, COALESCE(port, 0) FROM probe_route_jobs \
-         WHERE collector_uuid = ?1 AND status = 'pending' ORDER BY id ASC",
+         WHERE collector_uuid = ?1 AND status = 'pending' ORDER BY id ASC LIMIT ?2",
     )?;
-    let rows = stmt.query_map([collector_uuid], |row| {
+    let rows = stmt.query_map(params![collector_uuid, MAX_DISPATCH_ROUTE_JOBS], |row| {
         Ok(proto::ProbeRouteJob {
             job_id: u64::try_from(row.get::<_, i64>(0)?).unwrap_or(0),
             server_id: u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
@@ -655,7 +661,7 @@ fn evaluate_alert(
     last_error: &str,
     now_nanos: i64,
 ) -> anyhow::Result<Vec<ProbeNotice>> {
-    if !collector.is_probe() || !collector.probe_notify {
+    if !collector.is_probe() || (!collector.probe_notify && !collector.latency_notify) {
         return Ok(Vec::new());
     }
     let mut collector = collector.clone();
@@ -710,14 +716,17 @@ fn evaluate_alert(
     let mut notices = Vec::new();
     let tag = collector
         .notification_tag
-        .clone()
-        .unwrap_or_else(|| "default".to_string());
+        .as_deref()
+        .map(crate::notify::normalize_tag)
+        .unwrap_or("default")
+        .to_string();
     if reachable {
-        if down_notified != 0 {
+        if collector.probe_notify && down_notified != 0 {
             notices.push(ProbeNotice {
                 tag: tag.clone(),
                 message: format!("[探测恢复] {} → {server_name}", collector.name),
                 mute_label: format!("bf::pu-{}-{server_id}", collector.collector_uuid),
+                unmute_labels: vec![format!("bf::pd-{}-{server_id}", collector.collector_uuid)],
                 server_id,
             });
         }
@@ -725,39 +734,71 @@ fn evaluate_alert(
         down_notified = 0;
     } else {
         fails += 1;
-        if down_notified == 0 && fails >= collector.fail_threshold {
-            let err_text = if last_error.trim().is_empty() {
-                "unreachable"
-            } else {
-                last_error.trim()
-            };
+        if collector.probe_notify && down_notified == 0 && fails >= collector.fail_threshold {
+            let trimmed_err = last_error.trim();
+            let err_text =
+                if trimmed_err.is_empty() || trimmed_err.eq_ignore_ascii_case("unreachable") {
+                    "目标不可达"
+                } else {
+                    trimmed_err
+                };
             notices.push(ProbeNotice {
                 tag: tag.clone(),
-                message: format!("[探测中断] {} → {server_name} {err_text}", collector.name),
+                message: format!(
+                    "[探测中断] {} → {server_name}\n连续失败 {fails} 次：{err_text}",
+                    collector.name
+                ),
                 mute_label: format!("bf::pd-{}-{server_id}", collector.collector_uuid),
+                unmute_labels: vec![format!("bf::pu-{}-{server_id}", collector.collector_uuid)],
                 server_id,
             });
             down_notified = 1;
         }
     }
     if collector.latency_notify && reachable && rtt_ms > 0.0 {
-        let over = (collector.max_latency_ms > 0.0 && rtt_ms > collector.max_latency_ms)
-            || (collector.min_latency_ms > 0.0 && rtt_ms < collector.min_latency_ms);
-        if over && latency_alert == 0 {
-            notices.push(ProbeNotice {
-                tag,
-                message: format!(
-                    "[延迟异常] {} → {server_name} {rtt:.0}ms",
-                    collector.name,
-                    rtt = rtt_ms
-                ),
-                mute_label: format!("bf::pl-{}-{server_id}", collector.collector_uuid),
-                server_id,
-            });
-            latency_alert = 1;
-        }
-        if !over {
-            latency_alert = 0;
+        let over_max = collector.max_latency_ms > 0.0 && rtt_ms > collector.max_latency_ms;
+        let under_min = collector.min_latency_ms > 0.0 && rtt_ms < collector.min_latency_ms;
+        let over = over_max || under_min;
+        if over {
+            if latency_alert <= 0 {
+                let bound_hint = if over_max {
+                    format!("上限 {:.0}ms", collector.max_latency_ms)
+                } else {
+                    format!("下限 {:.0}ms", collector.min_latency_ms)
+                };
+                notices.push(ProbeNotice {
+                    tag: tag.clone(),
+                    message: format!(
+                        "[延迟异常] {} → {server_name}\n当前延迟：{rtt:.0}ms（{bound_hint}）",
+                        collector.name,
+                        rtt = rtt_ms
+                    ),
+                    mute_label: format!("bf::pl-{}-{server_id}", collector.collector_uuid),
+                    unmute_labels: Vec::new(),
+                    server_id,
+                });
+            }
+            // 用正整数记录待满足的连续安全样本数（默认 3），任何再次越界都重置回满额计数。
+            latency_alert = LATENCY_RECOVER_STREAK;
+        } else if latency_alert > 0 {
+            if latency_clearly_normal(rtt_ms, collector.min_latency_ms, collector.max_latency_ms) {
+                latency_alert -= 1;
+                if latency_alert == 0 {
+                    notices.push(ProbeNotice {
+                        tag,
+                        message: String::new(),
+                        mute_label: String::new(),
+                        unmute_labels: vec![format!(
+                            "bf::pl-{}-{server_id}",
+                            collector.collector_uuid
+                        )],
+                        server_id,
+                    });
+                }
+            } else {
+                // 落在阈值附近 5% 滞回死区内不计入恢复，避免临界值抖动反复解静音刷屏。
+                latency_alert = LATENCY_RECOVER_STREAK;
+            }
         }
     }
     conn.execute(
@@ -776,6 +817,27 @@ fn evaluate_alert(
         ],
     )?;
     Ok(notices)
+}
+
+fn latency_clearly_normal(rtt_ms: f64, min_ms: f64, max_ms: f64) -> bool {
+    let span_cap = if min_ms > 0.0 && max_ms > min_ms {
+        Some((max_ms - min_ms) * 0.25)
+    } else {
+        None
+    };
+    if max_ms > 0.0 {
+        let margin = (max_ms * 0.05).min(span_cap.unwrap_or(f64::INFINITY));
+        if rtt_ms > max_ms - margin {
+            return false;
+        }
+    }
+    if min_ms > 0.0 {
+        let margin = (min_ms * 0.05).min(span_cap.unwrap_or(f64::INFINITY));
+        if rtt_ms < min_ms + margin {
+            return false;
+        }
+    }
+    true
 }
 
 fn ingest_routes(
@@ -920,6 +982,19 @@ fn load_scopes(conn: &Connection, collector_uuid: &str) -> anyhow::Result<Vec<(S
         scopes.push(row?);
     }
     Ok(scopes)
+}
+
+/// 服务器是否落在探测从端的 scope 内。
+/// 与 `build_probe_targets` 同一套判定（空 scope 表 = 不含任何目标，
+/// 对齐 Go `CollectorScopesIncludeServer`），供下发/入队前置校验复用。
+pub fn collector_scope_includes(
+    conn: &Connection,
+    collector_uuid: &str,
+    server_id: i64,
+    tag: &str,
+) -> anyhow::Result<bool> {
+    let scopes = load_scopes(conn, collector_uuid)?;
+    Ok(scopes_include(&scopes, server_id, tag))
 }
 
 fn scopes_include(scopes: &[(String, String)], server_id: i64, tag: &str) -> bool {
@@ -1232,6 +1307,72 @@ mod tests {
                 |row| row.get(0),
             )?;
             assert_eq!(hops, 1);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn route_jobs_cap_at_16_and_latency_notify_works_standalone_with_hysteresis() {
+        let path = temp_db("cap-hysteresis");
+        let db = migrate::open_primary(&path).unwrap();
+        seed(&db);
+        let now = 1_700_000_000_000_000_000i64;
+
+        // 1) 200 条批量路由追踪单帧最多下发 16 条，避免撑满从端 QUEUE_CAPACITY=32。
+        db.write(|tx| {
+            for i in 0..40 {
+                tx.execute(
+                    "INSERT INTO probe_route_jobs (collector_uuid, server_id, protocol, port, status, requested_at, updated_at) \
+                     VALUES ('probe-1', 7, 'icmp', 0, 'pending', ?1, ?2)",
+                    params![now + i, unix_nanos_to_sqlite(now)],
+                )?;
+            }
+            let batch = pending_route_jobs(tx, "probe-1", now + 100)?;
+            assert_eq!(batch.len(), 16, "单次 Sync 下发不得超过 16 条");
+            Ok(())
+        })
+        .unwrap();
+
+        // 2) 关闭 probe_notify、仅开启 latency_notify 时仍能正常发送延迟告警，且临界值抖动不会每包解静音。
+        db.write(|tx| {
+            tx.execute(
+                "UPDATE collectors SET probe_notify = 0, latency_notify = 1, max_latency_ms = 100 WHERE collector_uuid = 'probe-1'",
+                [],
+            )?;
+            let collector = collectors::find_by_uuid_tx(tx, "probe-1")?.unwrap();
+            let send_rtt = |tx: &rusqlite::Transaction<'_>, rtt_ms: f64, step: i64| {
+                let batch = proto::ProbeSampleBatch {
+                    samples: vec![proto::ProbeSample {
+                        server_id: 8,
+                        sampled_at_unix_nano: now + step * 1_000_000_000,
+                        icmp: Some(proto::ProbeIcmpSample {
+                            ok: true,
+                            rtt_ms,
+                            packets_sent: 3,
+                            packets_received: 3,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                };
+                ingest_probe_samples(tx, &collector, &batch, now + step * 1_000_000_000)
+            };
+
+            let spike = send_rtt(tx, 102.0, 1)?;
+            assert_eq!(spike.len(), 1);
+            assert!(spike[0].message.contains("[延迟异常]"));
+
+            // 临界值回落到 98ms（仍在 95~100ms 滞回死区内）：不得产生 unmute。
+            let jitter = send_rtt(tx, 98.0, 2)?;
+            assert!(jitter.is_empty(), "滞回死区内不得立即解静音");
+
+            // 连续 3 次明显回落到 50ms（<= 95ms）后才产生 unmute。
+            assert!(send_rtt(tx, 50.0, 3)?.is_empty());
+            assert!(send_rtt(tx, 50.0, 4)?.is_empty());
+            let recovered = send_rtt(tx, 50.0, 5)?;
+            assert_eq!(recovered.len(), 1);
+            assert_eq!(recovered[0].unmute_labels, vec!["bf::pl-probe-1-8"]);
             Ok(())
         })
         .unwrap();

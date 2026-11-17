@@ -291,14 +291,6 @@ pub fn drain_retention(db: &Db, policy: &RetentionPolicy, now_nanos: i64) -> any
         deadline,
         batch,
         "monitor_histories",
-        "server_id != 0 AND created_at < datetime(?, 'unixepoch')",
-        &[&((now_nanos - 24 * HOUR_NANOS) / 1_000_000_000)],
-    )?;
-    deleted += drain_until(
-        db,
-        deadline,
-        batch,
-        "monitor_histories",
         "created_at < datetime(?, 'unixepoch')",
         &[&((now_nanos - 30 * 24 * HOUR_NANOS) / 1_000_000_000)],
     )?;
@@ -312,6 +304,12 @@ pub fn drain_retention(db: &Db, policy: &RetentionPolicy, now_nanos: i64) -> any
             &[],
         )?;
     }
+    deleted += compact_monitor_histories(
+        db,
+        deadline,
+        batch,
+        (now_nanos - 24 * HOUR_NANOS) / 1_000_000_000,
+    )?;
     deleted += drain_until(
         db,
         deadline,
@@ -752,6 +750,157 @@ fn same_availability_run(span: &AvailabilityBucketRow, row: &AvailabilityBucketR
         && span.expected_observers == row.expected_observers
         && span.healthy_observers == row.healthy_observers
         && span.seen_observers == row.seen_observers
+}
+
+/// 将超过 24h 的服务监控节点明细（`server_id != 0`）按 `(monitor_id, 小时桶)` 聚合归并为
+/// `server_id = 0` 的汇总行后再删除明细。
+///
+/// `/public/network/{id}` 只查 `server_id = :id`（仅需 24h 曲线明细），而 `/public/services`
+/// 汇总 `monitor_histories` 最近 30 天可用率；先归并再删明细即可兼顾库体积与 30 天历史。
+fn compact_monitor_histories(
+    db: &Db,
+    deadline: Instant,
+    batch: i64,
+    cutoff_unix_secs: i64,
+) -> anyhow::Result<i64> {
+    use rusqlite::OptionalExtension as _;
+    if !sqlite_table_exists(db, "monitor_histories") {
+        return Ok(0);
+    }
+    let batch = if batch <= 0 { 5000 } else { batch };
+    let mut total = 0i64;
+    loop {
+        if Instant::now() >= deadline {
+            return Ok(total);
+        }
+        let affected = db.write(|tx| {
+            let mut stmt = tx.prepare(
+                "SELECT id, COALESCE(monitor_id, 0), \
+                 COALESCE(strftime('%Y-%m-%d %H:00:00', created_at), created_at), \
+                 COALESCE(avg_delay, 0.0), COALESCE(up, 0), COALESCE(down, 0), deleted_at \
+                 FROM monitor_histories \
+                 WHERE server_id != 0 AND datetime(created_at) < datetime(?1, 'unixepoch') \
+                 LIMIT ?2",
+            )?;
+            type RawMonitorHistoryRow = (i64, i64, Option<String>, f64, i64, i64, Option<String>);
+            let rows: Vec<RawMonitorHistoryRow> = stmt
+                .query_map(rusqlite::params![cutoff_unix_secs, batch], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                })?
+                .collect::<StdResult<Vec<_>, _>>()?;
+            drop(stmt);
+            if rows.is_empty() {
+                return Ok(0usize);
+            }
+
+            let mut groups: std::collections::BTreeMap<(i64, String), (f64, i64, i64)> =
+                std::collections::BTreeMap::new();
+            let mut ids = Vec::with_capacity(rows.len());
+            for (id, monitor_id, hour_bucket, avg_delay, up, down, deleted_at) in rows {
+                ids.push(id);
+                if deleted_at.is_some() || monitor_id <= 0 {
+                    continue;
+                }
+                let Some(hour_bucket) = hour_bucket.filter(|s| !s.is_empty()) else {
+                    continue;
+                };
+                let delay = if avg_delay.is_finite() {
+                    avg_delay.max(0.0)
+                } else {
+                    0.0
+                };
+                let up = up.max(0);
+                let down = down.max(0);
+                groups
+                    .entry((monitor_id, hour_bucket))
+                    .and_modify(|cur| {
+                        *cur = merge_monitor_summary(cur.0, cur.1, cur.2, delay, up, down);
+                    })
+                    .or_insert((delay, up, down));
+            }
+
+            for ((monitor_id, hour_bucket), (agg_delay, agg_up, agg_down)) in groups {
+                let existing: Option<(i64, f64, i64, i64)> = tx
+                    .query_row(
+                        "SELECT id, COALESCE(avg_delay, 0.0), COALESCE(up, 0), COALESCE(down, 0) \
+                         FROM monitor_histories \
+                         WHERE server_id = 0 AND monitor_id = ?1 AND created_at = ?2 AND deleted_at IS NULL \
+                         LIMIT 1",
+                        rusqlite::params![monitor_id, hour_bucket],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .optional()?;
+                if let Some((existing_id, ex_delay, ex_up, ex_down)) = existing {
+                    let (merged_delay, merged_up, merged_down) = merge_monitor_summary(
+                        ex_delay, ex_up, ex_down, agg_delay, agg_up, agg_down,
+                    );
+                    tx.execute(
+                        "UPDATE monitor_histories SET avg_delay = ?1, up = ?2, down = ?3, \
+                         updated_at = CURRENT_TIMESTAMP WHERE id = ?4",
+                        rusqlite::params![merged_delay, merged_up, merged_down, existing_id],
+                    )?;
+                } else {
+                    tx.execute(
+                        "INSERT INTO monitor_histories (created_at, updated_at, monitor_id, server_id, avg_delay, up, down, data) \
+                         VALUES (?1, CURRENT_TIMESTAMP, ?2, 0, ?3, ?4, ?5, '')",
+                        rusqlite::params![hour_bucket, monitor_id, agg_delay, agg_up, agg_down],
+                    )?;
+                }
+            }
+
+            let mut del_stmt = tx.prepare_cached("DELETE FROM monitor_histories WHERE id = ?1")?;
+            for id in &ids {
+                del_stmt.execute([id])?;
+            }
+            Ok(ids.len())
+        })?;
+        total += affected as i64;
+        if affected == 0 {
+            return Ok(total);
+        }
+    }
+}
+
+fn merge_monitor_summary(
+    a_delay: f64,
+    a_up: i64,
+    a_down: i64,
+    b_delay: f64,
+    b_up: i64,
+    b_down: i64,
+) -> (f64, i64, i64) {
+    let total_up = a_up.saturating_add(b_up);
+    let total_down = a_down.saturating_add(b_down);
+    let (a_weight, b_weight) = if total_up > 0 {
+        (a_up as f64, b_up as f64)
+    } else if total_up + total_down > 0 {
+        ((a_up + a_down) as f64, (b_up + b_down) as f64)
+    } else {
+        (1.0, 1.0)
+    };
+    let weight_sum = a_weight + b_weight;
+    let avg_delay = if weight_sum > 0.0 {
+        (a_delay * a_weight + b_delay * b_weight) / weight_sum
+    } else {
+        0.0
+    };
+    (
+        if avg_delay.is_finite() {
+            avg_delay
+        } else {
+            0.0
+        },
+        total_up,
+        total_down,
+    )
 }
 
 #[cfg(test)]
@@ -1328,5 +1477,78 @@ mod state_raw_retention_tests {
             retained_payloads(&db, proto::TelemetryEventType::Host as i32),
             0
         );
+    }
+
+    /// 超过 24h 的节点级监控明细必须先归并为 `server_id = 0` 小时汇总再删明细，
+    /// 保证 `/public/services` 的 30 天可用率不被 24h 明细清理抹空。
+    #[test]
+    fn monitor_histories_older_than_24h_roll_up_into_30d_summaries() {
+        let (db, _path) = open("monitor-30d");
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO monitors (id, name, type, target, duration) VALUES (1, 'web', 1, 'https://a.example', 30)",
+                [],
+            )?;
+            // 5 天前同一小时桶内的两条不同节点明细：
+            // 节点 7: up=2, down=0, avg_delay=100ms
+            // 节点 8: up=1, down=1, avg_delay=40ms
+            // 样本加权均值 = (100*2 + 40*1) / 3 = 80ms, up=3, down=1
+            tx.execute(
+                "INSERT INTO monitor_histories (created_at, updated_at, monitor_id, server_id, avg_delay, up, down, data) \
+                 VALUES ('2026-10-11 08:12:00', '2026-10-11 08:12:00', 1, 7, 100.0, 2, 0, 'ok'), \
+                        ('2026-10-11 08:45:00', '2026-10-11 08:45:00', 1, 8, 40.0, 1, 1, 'ok')",
+                [],
+            )?;
+            // 2 小时前的新鲜明细（< 24h）：保留节点级明细供 `/public/network/{id}` 使用。
+            tx.execute(
+                "INSERT INTO monitor_histories (created_at, updated_at, monitor_id, server_id, avg_delay, up, down, data) \
+                 VALUES ('2026-10-15 22:10:00', '2026-10-15 22:10:00', 1, 7, 50.0, 2, 0, 'ok')",
+                [],
+            )?;
+            // 35 天前的超期记录（> 30d）：整条删除，不得残留汇总。
+            tx.execute(
+                "INSERT INTO monitor_histories (created_at, updated_at, monitor_id, server_id, avg_delay, up, down, data) \
+                 VALUES ('2026-09-01 08:00:00', '2026-09-01 08:00:00', 1, 7, 30.0, 2, 0, 'old')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let mut small_batch = policy(6);
+        small_batch.batch_size = 1; // 分批为 1，同时验证跨批次同小时归并累加精确无丢数。
+        drain_retention(&db, &small_batch, NOW).unwrap();
+
+        let detail_rows: i64 = db
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM monitor_histories WHERE server_id != 0",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(detail_rows, 1, "仅保留 24h 内的 1 条节点明细");
+
+        let summaries: Vec<(String, f64, i64, i64)> = db
+            .read(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT created_at, avg_delay, up, down FROM monitor_histories WHERE server_id = 0",
+                )?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                    .collect::<StdResult<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .unwrap();
+        assert_eq!(
+            summaries.len(),
+            1,
+            "同一小时跨批次只应归并为 1 条 server_id=0 汇总行"
+        );
+        assert_eq!(summaries[0].0, "2026-10-11 08:00:00");
+        assert!((summaries[0].1 - 80.0).abs() < 1e-6);
+        assert_eq!(summaries[0].2, 3);
+        assert_eq!(summaries[0].3, 1);
     }
 }

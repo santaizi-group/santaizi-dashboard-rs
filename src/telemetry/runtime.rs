@@ -48,7 +48,42 @@ pub fn upsert_agent_runtime(tx: &Transaction<'_>, row: &AgentRuntimeRow) -> anyh
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IpChange {
+    pub server_id: i64,
+    pub old_ip: String,
+    pub new_ip: String,
+}
+
+/// 上报 IP 归一：只接受可解析的单地址（v4/v6）或 `v4/v6` 双栈，
+/// 控制字符与超长串一律拒绝（保留 `last_ip` 旧值）。
+/// 探针报文不可信——脏值会一路带到通知正文、脱敏输出与静音键。
+pub(crate) fn normalize_reported_ip(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 64 {
+        return None;
+    }
+    if trimmed.chars().any(char::is_control) {
+        return None;
+    }
+    match trimmed.split_once('/') {
+        Some((v4, v6)) => {
+            let v4_clean = v4.trim();
+            let v6_clean = v6.trim();
+            (v4_clean.parse::<std::net::IpAddr>().is_ok()
+                && v6_clean.parse::<std::net::IpAddr>().is_ok())
+            .then(|| format!("{v4_clean}/{v6_clean}"))
+        }
+        None => trimmed
+            .parse::<std::net::IpAddr>()
+            .is_ok()
+            .then(|| trimmed.to_string()),
+    }
+}
+
 struct ServerRuntimeRow {
+    status: String,
+    last_seen_nanos: i64,
     last_collected_at: i64,
     last_received_at: i64,
     current_session_id: Vec<u8>,
@@ -65,21 +100,28 @@ fn load_server_runtime(
     server_id: i64,
 ) -> anyhow::Result<Option<ServerRuntimeRow>> {
     tx.query_row(
-        "SELECT last_collected_at, last_received_at, current_session_id, current_sequence, last_ip, \
-         host_payload, current_offline_id, last_boot_time, last_uptime \
+        "SELECT COALESCE(status, ''), last_seen_at, last_collected_at, last_received_at, \
+         current_session_id, current_sequence, last_ip, host_payload, current_offline_id, \
+         last_boot_time, last_uptime \
          FROM server_runtimes WHERE server_id = ?",
         [server_id],
         |row| {
+            let last_seen_text: Option<String> = row.get(1)?;
             Ok(ServerRuntimeRow {
-                last_collected_at: row.get::<_, Option<i64>>(0)?.unwrap_or(0),
-                last_received_at: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                current_session_id: row.get::<_, Option<Vec<u8>>>(2)?.unwrap_or_default(),
-                current_sequence: row.get::<_, Option<i64>>(3)?.unwrap_or(0).max(0) as u64,
-                last_ip: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                host_payload: row.get::<_, Option<Vec<u8>>>(5)?.unwrap_or_default(),
-                current_offline_id: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
-                last_boot_time: row.get::<_, Option<i64>>(7)?.unwrap_or(0).max(0) as u64,
-                last_uptime: row.get::<_, Option<i64>>(8)?.unwrap_or(0).max(0) as u64,
+                status: row.get(0)?,
+                last_seen_nanos: last_seen_text
+                    .as_deref()
+                    .and_then(crate::util::time::sqlite_to_unix_nanos)
+                    .unwrap_or(0),
+                last_collected_at: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                last_received_at: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                current_session_id: row.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default(),
+                current_sequence: row.get::<_, Option<i64>>(5)?.unwrap_or(0).max(0) as u64,
+                last_ip: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                host_payload: row.get::<_, Option<Vec<u8>>>(7)?.unwrap_or_default(),
+                current_offline_id: row.get::<_, Option<i64>>(8)?.unwrap_or(0),
+                last_boot_time: row.get::<_, Option<i64>>(9)?.unwrap_or(0).max(0) as u64,
+                last_uptime: row.get::<_, Option<i64>>(10)?.unwrap_or(0).max(0) as u64,
             })
         },
     )
@@ -87,12 +129,34 @@ fn load_server_runtime(
     .map_err(Into::into)
 }
 
+fn is_stale_v2_frame(
+    runtime: &ServerRuntimeRow,
+    session_id: &[u8],
+    sequence: u64,
+    collected_at_nanos: i64,
+    received_at_nanos: i64,
+) -> bool {
+    if runtime.current_session_id == session_id {
+        // 同一会话内序列号严格单调递增：即使探针经 NTP 回拨了本机时钟，也不得拒收新帧导致假离线。
+        return runtime.current_sequence >= sequence;
+    }
+    if collected_at_nanos >= runtime.last_collected_at {
+        return false;
+    }
+    // 跨会话但采集钟更小：若机器已离线，或距上次接收已超出时钟可信窗，说明是重连/重启后时钟被校准的新会话；
+    // 否则视作多路径下迟到的旧会话尾巴丢弃。
+    let was_offline = runtime.status == "offline" || runtime.current_offline_id > 0;
+    let beyond_skew = received_at_nanos.saturating_sub(runtime.last_received_at)
+        > crate::telemetry::store::CLOCK_SKEW_LIMIT_NANOS;
+    !(was_offline || beyond_skew)
+}
+
 /// `touchV2Runtime`：可信帧刷新运行态。返回是否真正应用（乱序帧返回 false）。
 /// v1 unary 上报无序列号，调 `touch_legacy_runtime`（判旧只看接收钟）。
 ///
 /// 同一事务内、覆盖 LastBootTime/LastUptime/LastIP 之前收口离线历史
 /// （Go `closeV2OfflineHistory` 同序）：原因判定比较「离线前」运行态与
-/// 「本次恢复」上报。恢复通知属 Phase 6。
+/// 「本次恢复」上报。
 #[allow(clippy::too_many_arguments)]
 pub fn touch_server_runtime(
     tx: &Transaction<'_>,
@@ -105,18 +169,50 @@ pub fn touch_server_runtime(
     host: Option<&proto::Host>,
     offline: OfflineHistoryPolicy,
 ) -> anyhow::Result<bool> {
+    touch_server_runtime_with_ip(
+        tx,
+        node_uuid,
+        session_id,
+        sequence,
+        collected_at_nanos,
+        received_at_nanos,
+        state,
+        host,
+        offline,
+    )
+    .map(|(applied, _)| applied)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn touch_server_runtime_with_ip(
+    tx: &Transaction<'_>,
+    node_uuid: &[u8],
+    session_id: &[u8],
+    sequence: u64,
+    collected_at_nanos: i64,
+    received_at_nanos: i64,
+    state: Option<&proto::State>,
+    host: Option<&proto::Host>,
+    offline: OfflineHistoryPolicy,
+) -> anyhow::Result<(bool, Option<IpChange>)> {
     let server_id = bindings::server_id_from_node_uuid(tx, node_uuid)?
         .ok_or_else(|| anyhow::anyhow!("node is not bound to a server"))?;
     let runtime = load_server_runtime(tx, server_id)?;
-    if let Some(runtime) = &runtime {
-        let stale = runtime.last_collected_at > collected_at_nanos
-            || (runtime.last_collected_at == collected_at_nanos
-                && runtime.current_session_id == session_id
-                && runtime.current_sequence >= sequence);
-        if stale {
-            return Ok(false);
-        }
+    if let Some(runtime) = &runtime
+        && is_stale_v2_frame(
+            runtime,
+            session_id,
+            sequence,
+            collected_at_nanos,
+            received_at_nanos,
+        )
+    {
+        return Ok((false, None));
     }
+    let effective_received = runtime
+        .as_ref()
+        .map(|r| received_at_nanos.max(r.last_seen_nanos))
+        .unwrap_or(received_at_nanos);
     touch_server_runtime_row(
         tx,
         server_id,
@@ -125,7 +221,7 @@ pub fn touch_server_runtime(
         session_id,
         sequence,
         collected_at_nanos,
-        received_at_nanos,
+        effective_received,
         state,
         host,
         offline,
@@ -145,6 +241,28 @@ pub fn touch_legacy_runtime(
     host: Option<&proto::Host>,
     offline: OfflineHistoryPolicy,
 ) -> anyhow::Result<bool> {
+    touch_legacy_runtime_with_ip(
+        tx,
+        node_uuid,
+        sequence,
+        received_at_nanos,
+        state,
+        host,
+        offline,
+    )
+    .map(|(applied, _)| applied)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn touch_legacy_runtime_with_ip(
+    tx: &Transaction<'_>,
+    node_uuid: &[u8],
+    sequence: u64,
+    received_at_nanos: i64,
+    state: Option<&proto::State>,
+    host: Option<&proto::Host>,
+    offline: OfflineHistoryPolicy,
+) -> anyhow::Result<(bool, Option<IpChange>)> {
     let server_id = bindings::server_id_from_node_uuid(tx, node_uuid)?
         .ok_or_else(|| anyhow::anyhow!("node is not bound to a server"))?;
     let runtime = load_server_runtime(tx, server_id)?;
@@ -152,7 +270,7 @@ pub fn touch_legacy_runtime(
         // v1 判旧：Go `Server.LastActive` 语义（后到的上报总是覆盖），
         // 同一接收钟按调用序覆盖（sequence 恒 0，不再比对 session）。
         if runtime.last_received_at > received_at_nanos {
-            return Ok(false);
+            return Ok((false, None));
         }
     }
     touch_server_runtime_row(
@@ -184,7 +302,7 @@ fn touch_server_runtime_row(
     state: Option<&proto::State>,
     host: Option<&proto::Host>,
     offline: OfflineHistoryPolicy,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<(bool, Option<IpChange>)> {
     let legacy = session_id.iter().all(|byte| *byte == 0);
 
     let merged_host = host.map(|host| {
@@ -242,10 +360,24 @@ fn touch_server_runtime_row(
     let mut last_ip: Option<String> = None;
     let mut last_agent_version: Option<String> = None;
     let mut last_uptime: Option<u64> = None;
+    let mut ip_change: Option<IpChange> = None;
     if let Some(merged) = &merged_host {
         last_boot_time = Some(merged.boot_time);
-        if !merged.ip.trim().is_empty() {
-            last_ip = Some(merged.ip.clone());
+        let candidate_ip = normalize_reported_ip(&merged.ip);
+        if let Some(candidate_ip) = candidate_ip {
+            if let Some(existing) = &runtime
+                && let Some(prev_clean) = normalize_reported_ip(&existing.last_ip)
+                && prev_clean != candidate_ip
+            {
+                // 新旧值都必须是可解析单栈或双栈地址：探针报文不可信，脏值既会写进
+                // 通知正文，也会被拿来构造静音键（单栈 `parse::<IpAddr>()` 会漏掉双栈主机）。
+                ip_change = Some(IpChange {
+                    server_id,
+                    old_ip: prev_clean,
+                    new_ip: candidate_ip.clone(),
+                });
+            }
+            last_ip = Some(candidate_ip);
         }
         last_agent_version = Some(merged.version.clone());
     }
@@ -291,7 +423,7 @@ fn touch_server_runtime_row(
             protocol,
         ],
     )?;
-    Ok(updated > 0)
+    Ok((updated > 0, if updated > 0 { ip_change } else { None }))
 }
 
 /// 上一帧 Host 的国家码：payload 损坏时按空处理。
@@ -326,6 +458,15 @@ pub fn apply_event_runtime(
     received_at_nanos: i64,
     offline: OfflineHistoryPolicy,
 ) -> anyhow::Result<bool> {
+    apply_event_runtime_with_ip(tx, event, received_at_nanos, offline).map(|(applied, _)| applied)
+}
+
+pub fn apply_event_runtime_with_ip(
+    tx: &Transaction<'_>,
+    event: &proto::TelemetryEvent,
+    received_at_nanos: i64,
+    offline: OfflineHistoryPolicy,
+) -> anyhow::Result<(bool, Option<IpChange>)> {
     let mut state = None;
     let mut host = None;
     match &event.payload {
@@ -333,7 +474,7 @@ pub fn apply_event_runtime(
         Some(proto::telemetry_event::Payload::Host(payload)) => host = Some(payload),
         _ => {}
     }
-    touch_server_runtime(
+    touch_server_runtime_with_ip(
         tx,
         &event.node_uuid,
         &event.session_id,
@@ -344,6 +485,174 @@ pub fn apply_event_runtime(
         host,
         offline,
     )
+}
+
+/// 从端复制批次的运行态刷新：必须以观测方真实接收钟（`observed_at_nanos`）而非主端复制到达时刻判活。
+///
+/// 若事件被观测到的时间距主端当前已超过离线阈值（例如主机早已宕机，从端积压数分钟后才补传），
+/// 只推进序号与最新载荷快照，**绝不关闭离线历史、绝不把已离线主机翻回在线或把 `last_seen_at` 伪造成当前时间**。
+pub fn apply_replicated_event_runtime(
+    tx: &Transaction<'_>,
+    event: &proto::TelemetryEvent,
+    observed_at_nanos: i64,
+    primary_now_nanos: i64,
+    offline_threshold_nanos: i64,
+    offline: OfflineHistoryPolicy,
+) -> anyhow::Result<bool> {
+    apply_replicated_event_runtime_with_ip(
+        tx,
+        event,
+        observed_at_nanos,
+        primary_now_nanos,
+        offline_threshold_nanos,
+        offline,
+    )
+    .map(|(applied, _)| applied)
+}
+
+pub fn apply_replicated_event_runtime_with_ip(
+    tx: &Transaction<'_>,
+    event: &proto::TelemetryEvent,
+    observed_at_nanos: i64,
+    primary_now_nanos: i64,
+    offline_threshold_nanos: i64,
+    offline: OfflineHistoryPolicy,
+) -> anyhow::Result<(bool, Option<IpChange>)> {
+    let effective_seen = if observed_at_nanos > 0 {
+        observed_at_nanos.min(primary_now_nanos)
+    } else {
+        event.collected_at_unix_nano.clamp(0, primary_now_nanos)
+    };
+    if primary_now_nanos.saturating_sub(effective_seen) < offline_threshold_nanos {
+        return apply_event_runtime_with_ip(tx, event, effective_seen, offline);
+    }
+
+    // 迟到的历史复制帧：仅在不乱序时补齐载荷与序列号，保持离线态与离线记录不动。
+    let server_id = bindings::server_id_from_node_uuid(tx, &event.node_uuid)?
+        .ok_or_else(|| anyhow::anyhow!("node is not bound to a server"))?;
+    let runtime = load_server_runtime(tx, server_id)?;
+    if let Some(runtime) = &runtime
+        && is_stale_v2_frame(
+            runtime,
+            &event.session_id,
+            event.sequence,
+            event.collected_at_unix_nano,
+            effective_seen,
+        )
+    {
+        return Ok((false, None));
+    }
+
+    let mut state = None;
+    let mut host = None;
+    match &event.payload {
+        Some(proto::telemetry_event::Payload::State(payload)) => state = Some(payload),
+        Some(proto::telemetry_event::Payload::Host(payload)) => host = Some(payload),
+        _ => {}
+    }
+    let merged_host = host.map(|host| {
+        let mut merged = host.clone();
+        let previous_country = previous_host_country(
+            &runtime
+                .as_ref()
+                .map(|r| r.host_payload.clone())
+                .unwrap_or_default(),
+        );
+        if merged.ip.trim().is_empty()
+            && let Some(runtime) = &runtime
+        {
+            merged.ip = runtime.last_ip.clone();
+        }
+        if merged.country_code.trim().is_empty() && !previous_country.is_empty() {
+            merged.country_code = previous_country;
+        }
+        crate::geoip::enrich_country_code(&mut merged, None);
+        merged
+    });
+    let state_payload = state.map(prost::Message::encode_to_vec);
+    let host_payload = merged_host.as_ref().map(prost::Message::encode_to_vec);
+    let last_boot_time = merged_host.as_ref().map(|h| h.boot_time);
+    let mut last_ip: Option<String> = None;
+    let mut ip_change: Option<IpChange> = None;
+    if let Some(merged) = &merged_host
+        && let Some(candidate_ip) = normalize_reported_ip(&merged.ip)
+    {
+        if let Some(existing) = &runtime
+            && let Some(prev_clean) = normalize_reported_ip(&existing.last_ip)
+            && prev_clean != candidate_ip
+        {
+            ip_change = Some(IpChange {
+                server_id,
+                old_ip: prev_clean,
+                new_ip: candidate_ip.clone(),
+            });
+        }
+        last_ip = Some(candidate_ip);
+    }
+    let last_agent_version = merged_host.as_ref().map(|h| h.version.clone());
+    let last_uptime = state.map(|s| s.uptime);
+    let bumped_seen = runtime
+        .as_ref()
+        .map(|r| effective_seen.max(r.last_seen_nanos))
+        .unwrap_or(effective_seen);
+    let seen_text = crate::util::time::unix_nanos_to_sqlite(bumped_seen);
+
+    if runtime.is_some() {
+        let updated = tx.execute(
+            "UPDATE server_runtimes SET \
+             last_seen_at = ?1, \
+             last_boot_time = COALESCE(?2, server_runtimes.last_boot_time), \
+             last_uptime = COALESCE(?3, server_runtimes.last_uptime), \
+             last_ip = COALESCE(?4, server_runtimes.last_ip), \
+             last_agent_version = COALESCE(?5, server_runtimes.last_agent_version), \
+             current_node_uuid = ?6, current_session_id = ?7, current_sequence = ?8, protocol = 'v2', \
+             last_collected_at = ?9, last_received_at = ?10, \
+             state_payload = COALESCE(?11, server_runtimes.state_payload), \
+             host_payload = COALESCE(?12, server_runtimes.host_payload), \
+             updated_at = CURRENT_TIMESTAMP \
+             WHERE server_id = ?13",
+            rusqlite::params![
+                seen_text,
+                last_boot_time,
+                last_uptime,
+                last_ip,
+                last_agent_version,
+                event.node_uuid,
+                event.session_id,
+                event.sequence,
+                event.collected_at_unix_nano,
+                bumped_seen,
+                state_payload,
+                host_payload,
+                server_id,
+            ],
+        )?;
+        Ok((updated > 0, if updated > 0 { ip_change } else { None }))
+    } else {
+        let inserted = tx.execute(
+            "INSERT INTO server_runtimes (server_id, status, first_seen_at, last_seen_at, \
+             last_boot_time, last_uptime, last_ip, last_agent_version, current_node_uuid, current_session_id, \
+             current_sequence, protocol, host_state, connectivity_state, last_collected_at, last_received_at, \
+             state_payload, host_payload, created_at, updated_at) \
+             VALUES (?1, 'offline', ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'v2', 'offline', 'unavailable', ?10, ?11, ?12, ?13, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            rusqlite::params![
+                server_id,
+                seen_text,
+                last_boot_time,
+                last_uptime,
+                last_ip,
+                last_agent_version,
+                event.node_uuid,
+                event.session_id,
+                event.sequence,
+                event.collected_at_unix_nano,
+                bumped_seen,
+                state_payload,
+                host_payload,
+            ],
+        )?;
+        Ok((inserted > 0, None))
+    }
 }
 
 /// `ApplyRealtimeSnapshot`：超过离线阈值的快照直接丢弃，否则刷新运行态。
@@ -454,6 +763,30 @@ mod tests {
         .unwrap();
     }
 
+    /// 上报 IP 归一：只收可解析地址与 `v4/v6` 双栈；控制字符/超长/域名拒绝。
+    #[test]
+    fn reported_ip_is_validated() {
+        assert_eq!(
+            normalize_reported_ip(" 203.0.113.9 "),
+            Some("203.0.113.9".into())
+        );
+        assert_eq!(
+            normalize_reported_ip("203.0.113.9/2001:db8::1"),
+            Some("203.0.113.9/2001:db8::1".into())
+        );
+        assert_eq!(
+            normalize_reported_ip("2001:db8::1"),
+            Some("2001:db8::1".into())
+        );
+        assert_eq!(normalize_reported_ip(""), None);
+        assert_eq!(normalize_reported_ip("   "), None);
+        assert_eq!(normalize_reported_ip("edge.example"), None);
+        assert_eq!(normalize_reported_ip("203.0.113.9:80"), None);
+        assert_eq!(normalize_reported_ip("203.0.113.9\nX: 1"), None);
+        assert_eq!(normalize_reported_ip(&"9".repeat(65)), None);
+        assert_eq!(normalize_reported_ip("203.0.113.9/not-an-ip"), None);
+    }
+
     #[test]
     fn touch_flips_runtime_online_and_is_idempotent_for_stale_frames() {
         let path = temp_db("touch");
@@ -538,6 +871,115 @@ mod tests {
             })
             .unwrap();
         assert_eq!(status, "online");
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    /// IP 变更只在「新旧值都是可解析地址」时上报：探针报文不可信，
+    /// 脏 IP 既会进通知正文，也会被拿去构造静音键绕过防骚扰。
+    #[test]
+    fn touch_reports_ip_change_only_for_parseable_addresses() {
+        let path = temp_db("ip-change");
+        let db = migrate::open_primary(&path).unwrap();
+        let node = [5u8; 16];
+        let session = [6u8; 16];
+        seed_server(&db, 7, &node);
+        // 上一帧留下不可解析的旧值（历史脏数据 / 外部写入）。
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO server_runtimes (server_id, status, last_ip) VALUES (7, 'online', 'not-an-ip')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let host = |ip: &str| proto::Host {
+            ip: ip.into(),
+            version: "0.1.0".into(),
+            ..Default::default()
+        };
+        // 旧值不可解析：不产生 IP 变更，但仍写回新值。
+        let (applied, change) = db
+            .write(|tx| {
+                touch_server_runtime_with_ip(
+                    tx,
+                    &node,
+                    &session,
+                    10,
+                    1_000,
+                    2_000,
+                    None,
+                    Some(&host("203.0.113.9")),
+                    OfflineHistoryPolicy::disabled(),
+                )
+            })
+            .unwrap();
+        assert!(applied);
+        assert!(change.is_none(), "旧 IP 不可解析时不得上报变更");
+        let stored: String = db
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT last_ip FROM server_runtimes WHERE server_id = 7",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(stored, "203.0.113.9");
+
+        // 新旧都可解析且不同：上报变更。
+        let (_, change) = db
+            .write(|tx| {
+                touch_server_runtime_with_ip(
+                    tx,
+                    &node,
+                    &session,
+                    11,
+                    1_001,
+                    2_001,
+                    None,
+                    Some(&host("198.51.100.2")),
+                    OfflineHistoryPolicy::disabled(),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            change,
+            Some(IpChange {
+                server_id: 7,
+                old_ip: "203.0.113.9".into(),
+                new_ip: "198.51.100.2".into(),
+            })
+        );
+
+        // 新值不可解析：既不写脏值也不上报变更（保留上一帧的可解析地址）。
+        let (_, change) = db
+            .write(|tx| {
+                touch_server_runtime_with_ip(
+                    tx,
+                    &node,
+                    &session,
+                    12,
+                    1_002,
+                    2_002,
+                    None,
+                    Some(&host("edge.example")),
+                    OfflineHistoryPolicy::disabled(),
+                )
+            })
+            .unwrap();
+        assert!(change.is_none());
+        let stored: String = db
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT last_ip FROM server_runtimes WHERE server_id = 7",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(stored, "198.51.100.2", "不可解析的新 IP 不得覆盖旧值");
+
         let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
     }
 
@@ -657,6 +1099,232 @@ mod tests {
             .unwrap();
         assert_eq!(pressure, 2);
         assert_eq!(bytes, 1024);
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    #[test]
+    fn same_session_ntp_clock_step_back_still_advances_runtime() {
+        let path = temp_db("ntp-stepback");
+        let db = migrate::open_primary(&path).unwrap();
+        let node = [9u8; 16];
+        let session = [10u8; 16];
+        seed_server(&db, 9, &node);
+        let t0 = 1_700_000_120_000_000_000i64;
+        assert!(
+            db.write(|tx| {
+                touch_server_runtime(
+                    tx,
+                    &node,
+                    &session,
+                    10,
+                    t0,
+                    t0,
+                    None,
+                    None,
+                    OfflineHistoryPolicy::disabled(),
+                )
+            })
+            .unwrap()
+        );
+        // NTP 将探针本机时间回拨了 90 秒，但同一 session 序列号递增到 11：必须接受并推进 last_seen_at。
+        let stepped_back_collected = t0 - 90_000_000_000;
+        let received = t0 + 2_000_000_000;
+        assert!(
+            db.write(|tx| {
+                touch_server_runtime(
+                    tx,
+                    &node,
+                    &session,
+                    11,
+                    stepped_back_collected,
+                    received,
+                    None,
+                    None,
+                    OfflineHistoryPolicy::disabled(),
+                )
+            })
+            .unwrap()
+        );
+        let seq: i64 = db
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT current_sequence FROM server_runtimes WHERE server_id = 9",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(seq, 11);
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    #[test]
+    fn delayed_replicated_event_preserves_offline_state() {
+        let path = temp_db("delayed-repl");
+        let db = migrate::open_primary(&path).unwrap();
+        let node = [11u8; 16];
+        let session = [12u8; 16];
+        seed_server(&db, 11, &node);
+        let now = 1_700_000_200_000_000_000i64;
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO server_runtimes (server_id, status, last_seen_at, last_collected_at, \
+                 current_session_id, current_sequence, current_offline_id) \
+                 VALUES (11, 'offline', ?1, ?2, ?3, 5, 88)",
+                rusqlite::params![
+                    crate::util::time::unix_nanos_to_sqlite(now - 90_000_000_000),
+                    now - 90_000_000_000,
+                    session.to_vec()
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let event = proto::TelemetryEvent {
+            event_id: vec![1u8; 16],
+            node_uuid: node.to_vec(),
+            session_id: session.to_vec(),
+            sequence: 6,
+            collected_at_unix_nano: now - 88_000_000_000,
+            payload: Some(proto::telemetry_event::Payload::State(proto::State {
+                uptime: 500,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let applied = db
+            .write(|tx| {
+                apply_replicated_event_runtime(
+                    tx,
+                    &event,
+                    now - 88_000_000_000,
+                    now,
+                    30_000_000_000,
+                    OfflineHistoryPolicy {
+                        enabled: true,
+                        merge_gap_seconds: 0,
+                    },
+                )
+            })
+            .unwrap();
+        assert!(applied);
+        let (status, offline_id, seq): (String, Option<i64>, i64) = db
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT status, current_offline_id, current_sequence FROM server_runtimes WHERE server_id = 11",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            status, "offline",
+            "迟到的历史复制帧不得将已离线主机翻回在线"
+        );
+        assert_eq!(offline_id, Some(88), "不得错误关闭正在进行的离线历史");
+        assert_eq!(seq, 6, "序列号与最新载荷正常补齐");
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
+    }
+
+    #[test]
+    fn dual_stack_and_replicated_ip_changes_are_detected() {
+        let path = temp_db("dual-stack-ip");
+        let db = migrate::open_primary(&path).unwrap();
+        let node = [15u8; 16];
+        let session = [16u8; 16];
+        seed_server(&db, 15, &node);
+        let now = 1_700_000_500_000_000_000i64;
+
+        let host_v1 = proto::Host {
+            ip: "1.2.3.4/2001:db8::1".into(),
+            version: "0.2.0".into(),
+            ..Default::default()
+        };
+        let (applied, first_change) = db
+            .write(|tx| {
+                touch_server_runtime_with_ip(
+                    tx,
+                    &node,
+                    &session,
+                    1,
+                    now,
+                    now,
+                    None,
+                    Some(&host_v1),
+                    OfflineHistoryPolicy::disabled(),
+                )
+            })
+            .unwrap();
+        assert!(applied);
+        assert!(first_change.is_none());
+
+        // 双栈主机换 IP（旧版用 `prev_ip.parse::<IpAddr>()` 会把 `v4/v6` 判为无效而永远漏报）。
+        let host_v2 = proto::Host {
+            ip: "5.6.7.8/2001:db8::2".into(),
+            version: "0.2.0".into(),
+            ..Default::default()
+        };
+        let (_, change) = db
+            .write(|tx| {
+                touch_server_runtime_with_ip(
+                    tx,
+                    &node,
+                    &session,
+                    2,
+                    now + 1_000_000_000,
+                    now + 1_000_000_000,
+                    None,
+                    Some(&host_v2),
+                    OfflineHistoryPolicy::disabled(),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            change,
+            Some(IpChange {
+                server_id: 15,
+                old_ip: "1.2.3.4/2001:db8::1".into(),
+                new_ip: "5.6.7.8/2001:db8::2".into(),
+            })
+        );
+
+        // 从端复制路径（含迟到历史帧）同样清洗并检测 IP 变更，拒绝脏 IP。
+        let repl_event = proto::TelemetryEvent {
+            event_id: vec![2u8; 16],
+            node_uuid: node.to_vec(),
+            session_id: session.to_vec(),
+            sequence: 3,
+            collected_at_unix_nano: now + 2_000_000_000,
+            payload: Some(proto::telemetry_event::Payload::Host(proto::Host {
+                ip: "9.9.9.9/2001:db8::9".into(),
+                version: "0.2.0".into(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let (applied, repl_change) = db
+            .write(|tx| {
+                apply_replicated_event_runtime_with_ip(
+                    tx,
+                    &repl_event,
+                    now + 2_000_000_000,
+                    now + 120_000_000_000,
+                    30_000_000_000,
+                    OfflineHistoryPolicy::disabled(),
+                )
+            })
+            .unwrap();
+        assert!(applied);
+        assert_eq!(
+            repl_change,
+            Some(IpChange {
+                server_id: 15,
+                old_ip: "5.6.7.8/2001:db8::2".into(),
+                new_ip: "9.9.9.9/2001:db8::9".into(),
+            })
+        );
+
         let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
     }
 }
