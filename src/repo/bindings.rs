@@ -286,12 +286,29 @@ fn sync_collector_assignments_for_server(
     Ok(())
 }
 
-fn scopes_include_server(scopes: &[(String, String)], server_id: &str, server_tag: &str) -> bool {
+pub(crate) fn scopes_include_server(
+    scopes: &[(String, String)],
+    server_id: &str,
+    server_tag: &str,
+) -> bool {
+    let trimmed_tag = server_tag.trim();
     for (scope_type, scope_value) in scopes {
+        let trimmed_value = scope_value.trim();
         match scope_type.as_str() {
             "all" => return true,
-            "server" if scope_value == server_id => return true,
-            "group" | "tag" if scope_value == server_tag => return true,
+            "server" if scope_value == server_id || trimmed_value == server_id => return true,
+            "group" | "tag" => {
+                if scope_value == server_tag || trimmed_value == trimmed_tag {
+                    return true;
+                }
+                if trimmed_value == "default"
+                    && (server_tag == "default"
+                        || trimmed_tag == "default"
+                        || trimmed_tag.is_empty())
+                {
+                    return true;
+                }
+            }
             _ => {}
         }
     }
@@ -666,5 +683,17 @@ mod tests {
             "别的观测点看不到这些节点"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn default_group_scope_matches_ungrouped_and_default_servers() {
+        let scopes = vec![("group".to_string(), "default".to_string())];
+        assert!(scopes_include_server(&scopes, "1", ""));
+        assert!(scopes_include_server(&scopes, "1", "   "));
+        assert!(scopes_include_server(&scopes, "1", "default"));
+        assert!(!scopes_include_server(&scopes, "1", "prod"));
+
+        let tag_scopes = vec![("tag".to_string(), "default".to_string())];
+        assert!(scopes_include_server(&tag_scopes, "2", ""));
     }
 }

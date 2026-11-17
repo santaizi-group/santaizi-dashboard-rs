@@ -96,33 +96,62 @@ pub struct OauthProfile {
     pub super_admin: bool,
 }
 
-/// OAuth2 登录落地：按 `login` upsert 会话令牌，返回用户 ID。
-///
-/// Go 用 `DB.Save(&user)`：provider 映射器带上外部数字 ID，GORM 据此定位行
-/// （无行则插入）。本仓用户表无外部 ID 列，以 `login` 为自然键——同一登录名
-/// 再次登录即刷新令牌，语义与 Go 对已登录用户等价。
+/// 会话令牌剩余寿命超过 24h 时多端登录复用原令牌并顺延过期时间，避免多设备互踢掉线。
+const REUSE_TOKEN_MIN_REMAINING_NANOS: i64 = 86_400 * 1_000_000_000;
+
+/// OAuth2 登录落地：按 `login` upsert 会话令牌，返回用户 ID（兼容旧签名）。
 pub fn upsert_oauth_user(
     tx: &rusqlite::Transaction<'_>,
     profile: &OauthProfile,
     token: &str,
     token_expired_nanos: i64,
 ) -> anyhow::Result<i64> {
-    let now = util_time::unix_nanos_to_sqlite(util_time::now_nanos());
-    let expired = util_time::unix_nanos_to_sqlite(token_expired_nanos);
-    let existing: Option<i64> = tx
+    upsert_oauth_user_token(tx, profile, token, token_expired_nanos).map(|(id, _)| id)
+}
+
+/// OAuth2 登录落地并返回实际生效的 `(user_id, effective_token)`：
+/// 若该管理员已有未过期有效 `token`（`token_expired > now + 86400s`），复用原 `token`
+/// 并顺延 `token_expired`，避免电脑与手机登录同一账号互踢掉线。
+pub fn upsert_oauth_user_token(
+    tx: &rusqlite::Transaction<'_>,
+    profile: &OauthProfile,
+    token: &str,
+    token_expired_nanos: i64,
+) -> anyhow::Result<(i64, String)> {
+    let now_nanos = util_time::now_nanos();
+    let now = util_time::unix_nanos_to_sqlite(now_nanos);
+    let existing: Option<(i64, String, Option<String>)> = tx
         .query_row(
-            "SELECT id FROM users WHERE login = ?1 AND deleted_at IS NULL",
+            "SELECT id, COALESCE(token, ''), token_expired \
+             FROM users WHERE LOWER(login) = LOWER(?1) AND deleted_at IS NULL",
             [profile.login.as_str()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    if let Some(id) = existing {
+    if let Some((id, old_token, old_expired_raw)) = existing {
+        let old_expired_nanos = old_expired_raw
+            .as_deref()
+            .and_then(util_time::sqlite_to_unix_nanos)
+            .unwrap_or(0);
+        let reuse_old = !old_token.trim().is_empty()
+            && old_expired_nanos > now_nanos.saturating_add(REUSE_TOKEN_MIN_REMAINING_NANOS);
+        let effective_token = if reuse_old {
+            old_token
+        } else {
+            token.to_string()
+        };
+        let effective_expired_nanos = if reuse_old {
+            token_expired_nanos.max(old_expired_nanos)
+        } else {
+            token_expired_nanos
+        };
+        let expired = util_time::unix_nanos_to_sqlite(effective_expired_nanos);
         tx.execute(
             "UPDATE users SET token = ?1, token_expired = ?2, name = ?3, avatar_url = ?4, \
              blog = ?5, email = ?6, bio = ?7, hireable = ?8, super_admin = ?9, updated_at = ?10 \
              WHERE id = ?11",
             rusqlite::params![
-                token,
+                effective_token,
                 expired,
                 profile.name,
                 profile.avatar_url,
@@ -135,8 +164,9 @@ pub fn upsert_oauth_user(
                 id
             ],
         )?;
-        return Ok(id);
+        return Ok((id, effective_token));
     }
+    let expired = util_time::unix_nanos_to_sqlite(token_expired_nanos);
     tx.execute(
         "INSERT INTO users (login, name, avatar_url, blog, email, bio, hireable, token, \
          token_expired, super_admin, created_at, updated_at) \
@@ -155,7 +185,7 @@ pub fn upsert_oauth_user(
             now
         ],
     )?;
-    Ok(tx.last_insert_rowid())
+    Ok((tx.last_insert_rowid(), token.to_string()))
 }
 
 #[cfg(test)]
@@ -180,28 +210,32 @@ mod tests {
     }
 
     #[test]
-    fn upsert_oauth_user_inserts_then_refreshes_by_login() {
+    fn upsert_oauth_user_reuses_valid_token_and_rotates_expiring_token() {
         let db = migrate::open_primary(&temp_db("oauth-upsert")).expect("open db");
-        let expired = util_time::now_nanos() + 60 * 24 * 3600 * 1_000_000_000;
+        let now = util_time::now_nanos();
+        let expired = now + 60 * 24 * 3600 * 1_000_000_000;
 
-        let id = db
-            .write(|tx| upsert_oauth_user(tx, &profile("dev"), "token-1", expired))
+        let (id, tok1) = db
+            .write(|tx| upsert_oauth_user_token(tx, &profile("dev"), "token-1", expired))
             .expect("insert");
         assert!(id > 0);
+        assert_eq!(tok1, "token-1");
 
-        // 同一 login 再登录：不新增行，令牌与资料被刷新。
+        // 同一 login 且原 token 距过期远超 24h：复用原 token-1 并顺延过期时间，避免多端互踢。
         let mut second = profile("dev");
         second.avatar_url = "https://example.test/a.png".into();
         second.email = "dev@example.test".into();
-        let id_again = db
-            .write(|tx| upsert_oauth_user(tx, &second, "token-2", expired))
-            .expect("update");
+        let later_expired = expired + 7 * 24 * 3600 * 1_000_000_000;
+        let (id_again, tok_reused) = db
+            .write(|tx| upsert_oauth_user_token(tx, &second, "token-2", later_expired))
+            .expect("update reuse");
         assert_eq!(id, id_again);
+        assert_eq!(tok_reused, "token-1");
 
-        let (login, name, token, email) = db
+        let (login, name, token, email, exp_text) = db
             .read(|conn| {
                 Ok(conn.query_row(
-                    "SELECT login, name, token, email FROM users WHERE id = ?1",
+                    "SELECT login, name, token, email, token_expired FROM users WHERE id = ?1",
                     [id],
                     |row| {
                         Ok((
@@ -209,6 +243,7 @@ mod tests {
                             row.get::<_, String>(1)?,
                             row.get::<_, String>(2)?,
                             row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
                         ))
                     },
                 )?)
@@ -216,8 +251,27 @@ mod tests {
             .expect("read back");
         assert_eq!(login, "dev");
         assert_eq!(name, "dev");
-        assert_eq!(token, "token-2");
+        assert_eq!(token, "token-1");
         assert_eq!(email, "dev@example.test");
+        assert_eq!(
+            util_time::sqlite_to_unix_nanos(&exp_text),
+            Some(later_expired)
+        );
+
+        // 当现有 token 剩余寿命不足 24h 时再登录：切换为新 token-3。
+        let soon = util_time::unix_nanos_to_sqlite(now + 3600 * 1_000_000_000);
+        db.write(|tx| {
+            tx.execute(
+                "UPDATE users SET token_expired = ?1 WHERE id = ?2",
+                rusqlite::params![soon, id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let (_, tok_rotated) = db
+            .write(|tx| upsert_oauth_user_token(tx, &second, "token-3", later_expired))
+            .expect("rotate expiring");
+        assert_eq!(tok_rotated, "token-3");
 
         let count: i64 = db
             .read(|conn| {
@@ -226,11 +280,10 @@ mod tests {
             .expect("count");
         assert_eq!(count, 1);
 
-        // 新令牌可经会话查询路径解析出用户。
         let found = db
-            .read(|conn| find_by_token(conn, "token-2", util_time::now_nanos()))
+            .read(|conn| find_by_token(conn, "token-3", util_time::now_nanos()))
             .expect("find")
-            .expect("user by new token");
+            .expect("user by rotated token");
         assert_eq!(found.login, "dev");
         assert!(found.super_admin);
     }

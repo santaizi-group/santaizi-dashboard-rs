@@ -388,10 +388,30 @@ pub fn replace_scopes(
             ],
         )?;
     }
-    if collector.is_probe() {
+    sync_assignments_for_scopes(
+        tx,
+        &collector.collector_uuid,
+        collector.is_probe(),
+        collector.config_version,
+        collector.generation,
+        scopes,
+        now_nanos,
+    )
+}
+
+fn sync_assignments_for_scopes(
+    tx: &Transaction<'_>,
+    collector_uuid: &str,
+    is_probe: bool,
+    config_version: u64,
+    generation: u64,
+    scopes: &[ScopeWrite],
+    now_nanos: i64,
+) -> anyhow::Result<()> {
+    if is_probe {
         tx.execute(
             "UPDATE observer_assignments SET valid_to = ?1 WHERE observer_id = ?2 AND valid_to = 0",
-            rusqlite::params![now_nanos, collector.collector_uuid],
+            rusqlite::params![now_nanos, collector_uuid],
         )?;
         return Ok(());
     }
@@ -409,7 +429,7 @@ pub fn replace_scopes(
         let open: Option<i64> = tx
             .query_row(
                 "SELECT id FROM observer_assignments WHERE node_uuid = ?1 AND observer_id = ?2 AND valid_to = 0",
-                rusqlite::params![node_uuid, collector.collector_uuid],
+                rusqlite::params![node_uuid, collector_uuid],
                 |row| row.get(0),
             )
             .optional()?;
@@ -419,16 +439,16 @@ pub fn replace_scopes(
                  VALUES (?1, ?2, ?3, 0, ?4, ?5, CURRENT_TIMESTAMP)",
                 rusqlite::params![
                     node_uuid,
-                    collector.collector_uuid,
+                    collector_uuid,
                     now_nanos,
-                    collector.config_version as i64,
-                    collector.generation as i64,
+                    config_version as i64,
+                    generation as i64,
                 ],
             )?;
         } else if !selected && open.is_some() {
             tx.execute(
                 "UPDATE observer_assignments SET valid_to = ?1 WHERE node_uuid = ?2 AND observer_id = ?3 AND valid_to = 0",
-                rusqlite::params![now_nanos, node_uuid, collector.collector_uuid],
+                rusqlite::params![now_nanos, node_uuid, collector_uuid],
             )?;
         }
     }
@@ -436,12 +456,11 @@ pub fn replace_scopes(
 }
 
 fn scopes_match(scopes: &[ScopeWrite], server_id: i64, tag: &str) -> bool {
-    scopes.iter().any(|scope| match scope.scope_type.as_str() {
-        "all" => true,
-        "server" => scope.scope_value == server_id.to_string(),
-        "group" | "tag" => scope.scope_value == tag,
-        _ => false,
-    })
+    let pairs: Vec<(String, String)> = scopes
+        .iter()
+        .map(|s| (s.scope_type.clone(), s.scope_value.clone()))
+        .collect();
+    crate::repo::bindings::scopes_include_server(&pairs, &server_id.to_string(), tag)
 }
 
 pub struct NewCollector {
@@ -580,24 +599,63 @@ pub fn rotate_registration_token(
     hash: &[u8],
     ciphertext: &[u8],
 ) -> anyhow::Result<u64> {
-    let current: Option<i64> = tx
+    let current: Option<(i64, i64, i64, String)> = tx
         .query_row(
-            "SELECT config_version FROM collectors WHERE collector_uuid = ? AND deleted = 0",
+            "SELECT generation, config_version, revoked, COALESCE(kind, 'observer') \
+             FROM collectors WHERE collector_uuid = ? AND deleted = 0",
             [collector_uuid],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()?;
-    let Some(version) = current else {
+    let Some((generation, version, was_revoked, kind)) = current else {
         anyhow::bail!("collector not found");
     };
-    let next = version + 1;
+    let next_generation = generation.max(0) + 1;
+    let next_version = version.max(0) + 1;
     tx.execute(
-        "UPDATE collectors SET token_hash = ?1, token_ciphertext = ?2, revoked = 0, config_version = ?3, \
-         updated_at = CURRENT_TIMESTAMP WHERE collector_uuid = ?4",
-        rusqlite::params![hash, ciphertext, next, collector_uuid],
+        "UPDATE collectors SET token_hash = ?1, token_ciphertext = ?2, revoked = 0, \
+         generation = ?3, config_version = ?4, updated_at = CURRENT_TIMESTAMP \
+         WHERE collector_uuid = ?5",
+        rusqlite::params![
+            hash,
+            ciphertext,
+            next_generation,
+            next_version,
+            collector_uuid
+        ],
     )?;
+    tx.execute(
+        "UPDATE observer_assignments SET generation = ?1, config_version = ?2 \
+         WHERE observer_id = ?3 AND valid_to = 0",
+        rusqlite::params![next_generation, next_version, collector_uuid],
+    )?;
+    if was_revoked != 0 {
+        let scopes: Vec<ScopeWrite> = {
+            let mut stmt = tx.prepare(
+                "SELECT scope_type, scope_value FROM collector_scopes WHERE collector_uuid = ? ORDER BY id ASC",
+            )?;
+            stmt.query_map([collector_uuid], |row| {
+                Ok(ScopeWrite {
+                    scope_type: row.get(0)?,
+                    scope_value: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        let is_probe = kind.eq_ignore_ascii_case(crate::telemetry::probes::COLLECTOR_KIND_PROBE);
+        let now_nanos = crate::util::time::now_nanos();
+        sync_assignments_for_scopes(
+            tx,
+            collector_uuid,
+            is_probe,
+            next_version as u64,
+            next_generation as u64,
+            &scopes,
+            now_nanos,
+        )?;
+    }
     let _ = plain;
-    Ok(next as u64)
+    Ok(next_version as u64)
 }
 
 pub fn next_config_version(tx: &Transaction<'_>) -> anyhow::Result<u64> {
@@ -682,6 +740,105 @@ mod tests {
         let bumped = db.write(|tx| bump_config_version(tx, "c1")).unwrap();
         assert_eq!(bumped, 2);
         assert!(db.write(|tx| bump_config_version(tx, "nope")).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rotate_token_increments_generation_and_restores_assignments_after_revoke() {
+        let path = temp_db("rotate-unrevoke");
+        let db = migrate::open_primary(&path).unwrap();
+        let (tok1, hash1) = credential::new_registration_token().unwrap();
+        let (tok2, hash2) = credential::new_registration_token().unwrap();
+        let node = [0x44u8; 16];
+        db.write(|tx| {
+            // 未分组主机（tag=''），从端配置 group=default 应命中该主机。
+            tx.execute(
+                "INSERT INTO servers (id, name, tag, secret_ciphertext, display_index, hide_for_guest) \
+                 VALUES (1, 'ungrouped-1', '', X'11', 1, 0)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO server_node_bindings (server_id, node_uuid, valid_from, valid_to, current, reason, created_at) \
+                 VALUES (1, ?1, 0, NULL, 1, 'r', CURRENT_TIMESTAMP)",
+                [&node.to_vec()],
+            )?;
+            let row = CollectorRow {
+                collector_uuid: "col-rot".into(),
+                name: "obs-1".into(),
+                address: "1.2.3.4:5555".into(),
+                token_hash: hash1.to_vec(),
+                generation: 1,
+                config_version: 1,
+                tls: false,
+                insecure_tls: false,
+                kind: "observer".into(),
+                listen_port: 5555,
+                location: None,
+                probe_interval_sec: 30,
+                mtr_interval_sec: 300,
+                mtr_probes: 10,
+                tcp_ports: "22,443".into(),
+                enable_icmp: true,
+                enable_tcp: true,
+                enable_mtr: true,
+                enable_ipv4: true,
+                enable_ipv6: true,
+                probe_notify: false,
+                notification_tag: None,
+                latency_notify: false,
+                min_latency_ms: 0.0,
+                max_latency_ms: 0.0,
+                fail_threshold: 3,
+                route_interval_sec: 86400,
+                route_keep: 10,
+                revoked: false,
+            };
+            let draft = NewCollector {
+                row,
+                token_plain: tok1.clone(),
+                token_ciphertext: vec![1],
+                scopes: vec![ScopeWrite {
+                    scope_type: "group".into(),
+                    scope_value: "default".into(),
+                }],
+            };
+            insert_collector(tx, &draft, 100)?;
+            let open_before: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM observer_assignments WHERE observer_id = 'col-rot' AND valid_to = 0",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(open_before, 1, "group=default 应命中空 tag 主机");
+
+            // 吊销后开放指派清零。
+            disable_collector(tx, "col-rot", false, 200)?;
+            let open_revoked: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM observer_assignments WHERE observer_id = 'col-rot' AND valid_to = 0",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(open_revoked, 0);
+
+            // 轮换 token 解封：generation 自增为 2，且重新恢复开放指派。
+            rotate_registration_token(tx, "col-rot", &tok2, &hash2, &[2])?;
+            let (generation, revoked): (i64, i64) = tx.query_row(
+                "SELECT generation, revoked FROM collectors WHERE collector_uuid = 'col-rot'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            assert_eq!(generation, 2);
+            assert_eq!(revoked, 0);
+            let (open_after, assign_gen): (i64, i64) = tx.query_row(
+                "SELECT COUNT(*), COALESCE(MAX(generation), 0) FROM observer_assignments \
+                 WHERE observer_id = 'col-rot' AND valid_to = 0",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            assert_eq!(open_after, 1);
+            assert_eq!(assign_gen, 2);
+            Ok(())
+        })
+        .unwrap();
         let _ = std::fs::remove_file(&path);
     }
 }

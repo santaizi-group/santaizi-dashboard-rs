@@ -40,10 +40,22 @@ fn row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApiTokenRow> {
     })
 }
 
+/// 站点全部未删除 Token（后台管理员统一审计与吊销，含已被移出管理员名单的协管员遗留 Token）。
+pub fn list_all(conn: &Connection) -> anyhow::Result<Vec<ApiTokenRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, COALESCE(user_id, 0), token_ciphertext, note, permission, expires_at, enabled, created_at \
+         FROM api_tokens WHERE deleted_at IS NULL ORDER BY created_at DESC, id DESC",
+    )?;
+    let rows = stmt
+        .query_map([], row_from)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 /// 用户的全部 Token（Go `Order("created_at DESC")`；软删排除）。
 pub fn list_by_user(conn: &Connection, user_id: i64) -> anyhow::Result<Vec<ApiTokenRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, user_id, token_ciphertext, note, permission, expires_at, enabled, created_at \
+        "SELECT id, COALESCE(user_id, 0), token_ciphertext, note, permission, expires_at, enabled, created_at \
          FROM api_tokens WHERE user_id = ?1 AND deleted_at IS NULL ORDER BY created_at DESC",
     )?;
     let rows = stmt
@@ -52,10 +64,22 @@ pub fn list_by_user(conn: &Connection, user_id: i64) -> anyhow::Result<Vec<ApiTo
     Ok(rows)
 }
 
+/// 按 ID 单查（不限归属用户，供管理员查看/启停/吊销任意 Token）。
+pub fn find_by_id(conn: &Connection, id: i64) -> anyhow::Result<Option<ApiTokenRow>> {
+    conn.query_row(
+        "SELECT id, COALESCE(user_id, 0), token_ciphertext, note, permission, expires_at, enabled, created_at \
+         FROM api_tokens WHERE id = ?1 AND deleted_at IS NULL",
+        [id],
+        row_from,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 /// 单查（归属校验在 SQL：user_id + id 双条件）。
 pub fn get_by_id(conn: &Connection, user_id: i64, id: i64) -> anyhow::Result<Option<ApiTokenRow>> {
     conn.query_row(
-        "SELECT id, user_id, token_ciphertext, note, permission, expires_at, enabled, created_at \
+        "SELECT id, COALESCE(user_id, 0), token_ciphertext, note, permission, expires_at, enabled, created_at \
          FROM api_tokens WHERE user_id = ?1 AND id = ?2 AND deleted_at IS NULL",
         [user_id, id],
         row_from,
@@ -93,11 +117,28 @@ pub fn insert(
     Ok(tx.last_insert_rowid())
 }
 
+/// 硬删（不限归属用户，供管理员吊销任意 Token），返回是否命中。
+pub fn delete_by_id(tx: &rusqlite::Transaction<'_>, id: i64) -> anyhow::Result<bool> {
+    Ok(tx.execute("DELETE FROM api_tokens WHERE id = ?1", [id])? > 0)
+}
+
 /// 硬删（Go `Unscoped().Delete`），返回是否命中。
 pub fn delete(tx: &rusqlite::Transaction<'_>, user_id: i64, id: i64) -> anyhow::Result<bool> {
     Ok(tx.execute(
         "DELETE FROM api_tokens WHERE user_id = ?1 AND id = ?2",
         [user_id, id],
+    )? > 0)
+}
+
+/// 启停（不限归属用户），返回是否命中。
+pub fn set_enabled_by_id(
+    tx: &rusqlite::Transaction<'_>,
+    id: i64,
+    enabled: bool,
+) -> anyhow::Result<bool> {
+    Ok(tx.execute(
+        "UPDATE api_tokens SET enabled = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+        rusqlite::params![id, enabled as i64],
     )? > 0)
 }
 

@@ -288,6 +288,22 @@ fn admin_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<AdminServerRow> {
     })
 }
 
+/// admin 服务器列表分组过滤条件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminGroupFilter {
+    /// 未分组（`COALESCE(s.tag, '') = ''`）。
+    Ungrouped,
+    /// 指定分组名（精确匹配 `COALESCE(s.tag, '')`）。
+    Named(String),
+}
+
+/// admin 服务器列表在线状态过滤条件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminStatusFilter {
+    Online,
+    Offline,
+}
+
 /// admin 服务器列表（Go `v2AdminServers`）：q 模糊匹配 name/tag/note，
 /// 排序白名单 `id|name|tag|display_index|last_active`（其余回落 display_index
 /// DESC），同序键以 `id ASC` 收尾。返回整行 + 总数。
@@ -300,10 +316,30 @@ pub fn list_admin(
     limit: i64,
     now_nanos: i64,
 ) -> anyhow::Result<(Vec<AdminServerRow>, i64)> {
+    list_admin_filtered(
+        conn, q, None, None, 0, sort, ascending, offset, limit, now_nanos,
+    )
+}
+
+/// 支持可选分组与在线状态筛选的 admin 服务器列表查询。
+#[allow(clippy::too_many_arguments)]
+pub fn list_admin_filtered(
+    conn: &Connection,
+    q: &str,
+    group: Option<&AdminGroupFilter>,
+    status: Option<AdminStatusFilter>,
+    offline_threshold_seconds: u64,
+    sort: &str,
+    ascending: bool,
+    offset: i64,
+    limit: i64,
+    now_nanos: i64,
+) -> anyhow::Result<(Vec<AdminServerRow>, i64)> {
     let sort_column = match sort {
         "id" => "s.id",
         "name" => "s.name",
         "tag" => "s.tag",
+        "display_index" => "COALESCE(s.display_index, 0)",
         "last_active" => "COALESCE(r.last_received_at, 0)",
         _ => "COALESCE(s.display_index, 0)",
     };
@@ -311,21 +347,62 @@ pub fn list_admin(
     // `q` 是用户输入：`%`/`_` 必须转义，否则「100%」会匹配所有行。
     // COUNT 与 SELECT 用同一个转义值，避免计数与行数不一致。
     let like = format!("%{}%", crate::util::text::like_contains(q));
+    let (group_mode, group_name): (i64, &str) = match group {
+        None => (0, ""),
+        Some(AdminGroupFilter::Ungrouped) => (1, ""),
+        Some(AdminGroupFilter::Named(name)) => (2, name.as_str()),
+    };
+    let status_mode: i64 = match status {
+        None => 0,
+        Some(AdminStatusFilter::Online) => 1,
+        Some(AdminStatusFilter::Offline) => 2,
+    };
+    let threshold_nanos = (offline_threshold_seconds as i128) * 1_000_000_000;
+    let online_cutoff: i64 =
+        (now_nanos as i128 - threshold_nanos).clamp(0, i64::MAX as i128) as i64;
+
+    let filter_clause = "s.deleted_at IS NULL \
+        AND (?2 = '' OR s.name LIKE ?3 ESCAPE '\\' OR s.tag LIKE ?3 ESCAPE '\\' OR s.note LIKE ?3 ESCAPE '\\') \
+        AND (?4 = 0 OR (?4 = 1 AND COALESCE(s.tag, '') = '') OR (?4 = 2 AND COALESCE(s.tag, '') = ?5)) \
+        AND (?6 = 0 OR (?6 = 1 AND COALESCE(r.last_received_at, 0) > ?7) OR (?6 = 2 AND COALESCE(r.last_received_at, 0) <= ?7))";
+
+    let count_sql = format!(
+        "SELECT COUNT(*) FROM servers s \
+         LEFT JOIN server_runtimes r ON r.server_id = s.id \
+         WHERE {filter_clause}"
+    );
     let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM servers s WHERE s.deleted_at IS NULL \
-         AND (?1 = '' OR s.name LIKE ?2 ESCAPE '\\' OR s.tag LIKE ?2 ESCAPE '\\' OR s.note LIKE ?2 ESCAPE '\\')",
-        rusqlite::params![q, like],
+        &count_sql,
+        rusqlite::params![
+            now_nanos,
+            q,
+            like,
+            group_mode,
+            group_name,
+            status_mode,
+            online_cutoff
+        ],
         |row| row.get(0),
     )?;
     let sql = format!(
         "SELECT {ADMIN_SELECT} FROM servers s \
          LEFT JOIN server_runtimes r ON r.server_id = s.id \
-         WHERE s.deleted_at IS NULL AND (?2 = '' OR s.name LIKE ?3 ESCAPE '\\' OR s.tag LIKE ?3 ESCAPE '\\' OR s.note LIKE ?3 ESCAPE '\\') \
-         ORDER BY {sort_column} {direction}, s.id ASC LIMIT ?4 OFFSET ?5"
+         WHERE {filter_clause} \
+         ORDER BY {sort_column} {direction}, s.id ASC LIMIT ?8 OFFSET ?9"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
-        rusqlite::params![now_nanos, q, like, limit, offset],
+        rusqlite::params![
+            now_nanos,
+            q,
+            like,
+            group_mode,
+            group_name,
+            status_mode,
+            online_cutoff,
+            limit,
+            offset
+        ],
         admin_row_from,
     )?;
     let mut items = Vec::new();
@@ -422,13 +499,39 @@ pub fn update_admin_server(
 /// **不删行**：历史观测与可用性证据必须保持不可变（Go 注释同义）。
 /// `availability_incidents` / `incident_revisions` 同样保留。
 pub fn delete_server(tx: &Transaction<'_>, id: i64) -> anyhow::Result<usize> {
-    tx.execute("DELETE FROM servers WHERE id = ?1", [id])?;
-    let deleted = tx.execute("DELETE FROM monitor_histories WHERE server_id = ?1", [id])?;
+    let deleted = tx.execute("DELETE FROM servers WHERE id = ?1", [id])?;
+    tx.execute("DELETE FROM monitor_histories WHERE server_id = ?1", [id])?;
     tx.execute("DELETE FROM transfers WHERE server_id = ?1", [id])?;
     tx.execute("DELETE FROM server_runtimes WHERE server_id = ?1", [id])?;
     tx.execute(
         "DELETE FROM server_offline_histories WHERE server_id = ?1",
         [id],
+    )?;
+    tx.execute(
+        "DELETE FROM traffic_policy_states WHERE policy_id IN \
+         (SELECT id FROM traffic_policies WHERE server_id = ?1)",
+        [id],
+    )?;
+    tx.execute("DELETE FROM traffic_policies WHERE server_id = ?1", [id])?;
+    tx.execute("DELETE FROM probe_latests WHERE server_id = ?1", [id])?;
+    tx.execute("DELETE FROM probe_traces WHERE server_id = ?1", [id])?;
+    tx.execute("DELETE FROM probe_routes WHERE server_id = ?1", [id])?;
+    tx.execute("DELETE FROM probe_route_jobs WHERE server_id = ?1", [id])?;
+    tx.execute(
+        "DELETE FROM probe_sample_buckets WHERE server_id = ?1",
+        [id],
+    )?;
+    tx.execute("DELETE FROM probe_alert_states WHERE server_id = ?1", [id])?;
+    let id_text = id.to_string();
+    tx.execute(
+        "UPDATE collectors SET config_version = config_version + 1, updated_at = CURRENT_TIMESTAMP \
+         WHERE collector_uuid IN (SELECT collector_uuid FROM collector_scopes \
+         WHERE scope_type = 'server' AND scope_value = ?1)",
+        [&id_text],
+    )?;
+    tx.execute(
+        "DELETE FROM collector_scopes WHERE scope_type = 'server' AND scope_value = ?1",
+        [&id_text],
     )?;
     tx.execute(
         "DELETE FROM observer_assignments WHERE node_uuid IN \
@@ -548,6 +651,178 @@ mod tests {
         let row = db.read(|conn| server_by_id(conn, 1)).unwrap().unwrap();
         assert_eq!(row.name, "a");
         assert_eq!(row.tag, "tag1");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn delete_server_returns_server_row_count_and_purges_orphan_tables() {
+        let path = temp_db("delete-orphans");
+        let db = migrate::open_primary(&path).unwrap();
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO servers (id, name, tag, secret_ciphertext, display_index, hide_for_guest) \
+                 VALUES (42, 'victim', 'prod', X'11', 1, 0)",
+                [],
+            )?;
+            // 3 条 monitor_histories：验证返回值是 servers 受影响行数 (1) 而非 3。
+            for i in 1..=3 {
+                tx.execute(
+                    "INSERT INTO monitor_histories (id, monitor_id, server_id, avg_delay, up, down) \
+                     VALUES (?1, 1, 42, 1.0, 1, 0)",
+                    [i],
+                )?;
+            }
+            tx.execute(
+                "INSERT INTO traffic_policies (id, server_id, name, direction, mode, quota_bytes, warning_percent, enabled) \
+                 VALUES (100, 42, 'p', 'total', 'cumulative', 1024, 80, 1)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO traffic_policy_states (policy_id, window_start, window_end, used_bytes, last_evaluated_at) \
+                 VALUES (100, 1, 2, 10, 2)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO collectors (collector_uuid, name, address, token_hash, token_ciphertext, tcp_ports, revoked, deleted) \
+                 VALUES ('col-1', 'c1', '1.2.3.4:5555', X'01', X'02', '22,443', 0, 0)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO collector_scopes (collector_uuid, scope_type, scope_value) VALUES ('col-1', 'server', '42')",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO probe_latests (collector_uuid, server_id, sampled_at, reachable) VALUES ('col-1', 42, 10, 1)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO probe_traces (collector_uuid, server_id, sampled_at) VALUES ('col-1', 42, 10)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO probe_routes (collector_uuid, server_id, protocol, sampled_at) VALUES ('col-1', 42, 'icmp', 10)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO probe_route_jobs (collector_uuid, server_id, protocol, status, requested_at) VALUES ('col-1', 42, 'icmp', 'pending', 10)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO probe_sample_buckets (collector_uuid, server_id, kind, port, bucket_start, count) VALUES ('col-1', 42, 'icmp', 0, 10, 1)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO probe_alert_states (collector_uuid, server_id, consecutive_fails) VALUES ('col-1', 42, 3)",
+                [],
+            )?;
+
+            let removed = delete_server(tx, 42)?;
+            assert_eq!(removed, 1);
+            assert_eq!(delete_server(tx, 42)?, 0);
+
+            for sql in [
+                "SELECT COUNT(*) FROM traffic_policies WHERE server_id = 42",
+                "SELECT COUNT(*) FROM traffic_policy_states WHERE policy_id = 100",
+                "SELECT COUNT(*) FROM probe_latests WHERE server_id = 42",
+                "SELECT COUNT(*) FROM probe_traces WHERE server_id = 42",
+                "SELECT COUNT(*) FROM probe_routes WHERE server_id = 42",
+                "SELECT COUNT(*) FROM probe_route_jobs WHERE server_id = 42",
+                "SELECT COUNT(*) FROM probe_sample_buckets WHERE server_id = 42",
+                "SELECT COUNT(*) FROM probe_alert_states WHERE server_id = 42",
+                "SELECT COUNT(*) FROM collector_scopes WHERE scope_type = 'server' AND scope_value = '42'",
+            ] {
+                let c: i64 = tx.query_row(sql, [], |r| r.get(0))?;
+                assert_eq!(c, 0, "孤儿清理遗漏: {sql}");
+            }
+            Ok(())
+        })
+        .unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn list_admin_filtered_by_group_status_and_sort() {
+        let path = temp_db("list-filtered");
+        let db = migrate::open_primary(&path).unwrap();
+        let now = 1_800_000_000_000_000_000i64;
+        db.write(|tx| {
+            for (id, name, tag, display_idx, last_recv) in [
+                (1, "beta", "", 10, Some(now - 5_000_000_000)),
+                (2, "alpha", "prod", 30, Some(now - 60_000_000_000)),
+                (3, "gamma", "prod", 20, None),
+            ] {
+                tx.execute(
+                    "INSERT INTO servers (id, name, tag, secret_ciphertext, display_index, hide_for_guest) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                    rusqlite::params![id, name, tag, vec![id as u8], display_idx],
+                )?;
+                if let Some(ts) = last_recv {
+                    tx.execute(
+                        "INSERT INTO server_runtimes (server_id, status, last_received_at) VALUES (?1, 'online', ?2)",
+                        rusqlite::params![id, ts],
+                    )?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        db.read(|conn| {
+            // 未分组过滤
+            let (rows, total) = list_admin_filtered(
+                conn,
+                "",
+                Some(&AdminGroupFilter::Ungrouped),
+                None,
+                30,
+                "id",
+                true,
+                0,
+                20,
+                now,
+            )?;
+            assert_eq!(total, 1);
+            assert_eq!(rows[0].public.id, 1);
+
+            // prod + offline（阈值 30s → id=2 60s 前离线，id=3 从未上报离线）
+            let (rows, total) = list_admin_filtered(
+                conn,
+                "",
+                Some(&AdminGroupFilter::Named("prod".into())),
+                Some(AdminStatusFilter::Offline),
+                30,
+                "name",
+                true,
+                0,
+                20,
+                now,
+            )?;
+            assert_eq!(total, 2);
+            assert_eq!(
+                rows.iter()
+                    .map(|r| r.public.name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["alpha", "gamma"]
+            );
+
+            // online（阈值 30s → 仅 id=1 在线）
+            let (rows, total) = list_admin_filtered(
+                conn,
+                "",
+                None,
+                Some(AdminStatusFilter::Online),
+                30,
+                "last_active",
+                false,
+                0,
+                20,
+                now,
+            )?;
+            assert_eq!(total, 1);
+            assert_eq!(rows[0].public.id, 1);
+            Ok(())
+        })
+        .unwrap();
         let _ = std::fs::remove_file(&path);
     }
 }

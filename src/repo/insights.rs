@@ -15,7 +15,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::proto;
 use crate::telemetry::probe_ingest;
-use crate::util::time as util_time;
+use crate::util::time::{self as util_time, unix_nanos_to_sqlite};
 
 pub const PRIMARY_OBSERVER_ID: &str = "primary";
 /// 从端心跳在线阈值（Go `COLLECTOR_TIMEOUT`：90s）。
@@ -716,29 +716,58 @@ pub fn list_agents(
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let nodes: Vec<Vec<u8>> = rows.iter().map(|(node, ..)| node.clone()).collect();
-    let index = HostIndex::load(conn, &nodes, &[])?;
+    let mut observer_ids: Vec<String> = Vec::new();
+    let decoded_agents: Vec<Option<proto::AgentRuntime>> = rows
+        .iter()
+        .map(|(.., cursors, _, _, _, _)| {
+            let decoded = proto::AgentRuntime::decode(cursors.as_slice()).ok();
+            if let Some(ref agent) = decoded {
+                for sink in &agent.sinks {
+                    if !sink.endpoint_id.is_empty() && !observer_ids.contains(&sink.endpoint_id) {
+                        observer_ids.push(sink.endpoint_id.clone());
+                    }
+                }
+            }
+            decoded
+        })
+        .collect();
+    let index = HostIndex::load(conn, &nodes, &observer_ids)?;
     let mut items = Vec::new();
     for (
-        node,
-        wal_pressure,
-        wal_bytes,
-        pending_events,
-        oldest_pending,
-        cursors,
-        clock_untrusted,
-        protocol_version,
-        agent_version,
-        updated_at,
-    ) in rows
+        (
+            node,
+            wal_pressure,
+            wal_bytes,
+            pending_events,
+            oldest_pending,
+            _cursors,
+            clock_untrusted,
+            protocol_version,
+            agent_version,
+            updated_at,
+        ),
+        decoded_agent,
+    ) in rows.into_iter().zip(decoded_agents)
     {
         let server = index.server(&node);
         let mut sinks = Vec::new();
-        if let Ok(agent) = proto::AgentRuntime::decode(cursors.as_slice()) {
+        if let Some(agent) = decoded_agent {
             for sink in agent.sinks {
+                let (obs_kind, obs_name) = index.observer(&sink.endpoint_id);
+                let observer_kind = if obs_kind.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(obs_kind.to_string())
+                };
+                let observer_name = if obs_name.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(obs_name)
+                };
                 sinks.push(json!({
                     "endpoint_id": sink.endpoint_id,
-                    "observer_kind": Value::Null,
-                    "observer_name": Value::Null,
+                    "observer_kind": observer_kind,
+                    "observer_name": observer_name,
                     "connected": sink.connected,
                     "pending_events": sink.pending_events,
                     "last_error": sink.last_error,
@@ -1159,7 +1188,7 @@ pub fn cleanup_offline_history(
     .map_err(Into::into)
 }
 
-/// `GET /v2/admin/monitors/:id/history`（游标分页：`id < cursor`，id DESC）。
+/// `GET /v2/admin/monitors/:id/history`（及 `/histories`；游标分页：`mh.id < cursor`，id DESC）。
 pub fn list_monitor_history(
     conn: &Connection,
     monitor_id: i64,
@@ -1168,7 +1197,7 @@ pub fn list_monitor_history(
     cursor: Option<i64>,
     limit: i64,
 ) -> anyhow::Result<(Vec<Value>, String)> {
-    let mut conditions = vec!["monitor_id = ?1".to_string()];
+    let mut conditions = vec!["mh.monitor_id = ?1".to_string()];
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(monitor_id)];
     // limit 必须 ≥1：下方 `rows[limit - 1]` 与 `take(limit)` 都以它为准。
     let limit = limit.max(1);
@@ -1178,23 +1207,25 @@ pub fn list_monitor_history(
         params.push(Box::new(util_time::sqlite_to_datetime_text(
             &util_time::unix_nanos_to_sqlite(from),
         )));
-        conditions.push(format!("created_at >= ?{}", params.len()));
+        conditions.push(format!("mh.created_at >= ?{}", params.len()));
     }
     if let Some(to) = to_nanos {
         params.push(Box::new(util_time::sqlite_to_datetime_text(
             &util_time::unix_nanos_to_sqlite(to),
         )));
-        conditions.push(format!("created_at <= ?{}", params.len()));
+        conditions.push(format!("mh.created_at <= ?{}", params.len()));
     }
     if let Some(cursor) = cursor.filter(|value| *value > 0) {
         params.push(Box::new(cursor));
-        conditions.push(format!("id < ?{}", params.len()));
+        conditions.push(format!("mh.id < ?{}", params.len()));
     }
     let where_clause = conditions.join(" AND ");
     let sql = format!(
-        "SELECT id, created_at, updated_at, deleted_at, monitor_id, server_id, \
-         COALESCE(avg_delay, 0), COALESCE(up, 0), COALESCE(down, 0), COALESCE(data, '') \
-         FROM monitor_histories WHERE {where_clause} ORDER BY id DESC LIMIT ?"
+        "SELECT mh.id, mh.created_at, mh.updated_at, mh.deleted_at, mh.monitor_id, mh.server_id, \
+         COALESCE(s.name, ''), COALESCE(mh.avg_delay, 0), COALESCE(mh.up, 0), COALESCE(mh.down, 0), \
+         COALESCE(mh.data, '') \
+         FROM monitor_histories mh LEFT JOIN servers s ON s.id = mh.server_id \
+         WHERE {where_clause} ORDER BY mh.id DESC LIMIT ?"
     );
     let mut stmt = conn.prepare(&sql)?;
     params.push(Box::new(limit + 1));
@@ -1208,10 +1239,11 @@ pub fn list_monitor_history(
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, i64>(4)?,
                 row.get::<_, i64>(5)?,
-                row.get::<_, f64>(6)?,
-                row.get::<_, i64>(7)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, f64>(7)?,
                 row.get::<_, i64>(8)?,
-                row.get::<_, String>(9)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, String>(10)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1234,10 +1266,23 @@ pub fn list_monitor_history(
         .into_iter()
         .take(limit as usize)
         .map(
-            |(id, created, updated, deleted, monitor_id, server_id, avg_delay, up, down, data)| {
+            |(
+                id,
+                created,
+                updated,
+                deleted,
+                monitor_id,
+                server_id,
+                server_name,
+                avg_delay,
+                up,
+                down,
+                data,
+            )| {
                 json!({
                     "id": id, "created_at": dt(created), "updated_at": dt(updated),
                     "deleted_at": dt(deleted), "monitor_id": monitor_id, "server_id": server_id,
+                    "server_name": server_name,
                     "avg_delay": avg_delay, "up": up, "down": down, "data": data,
                 })
             },
@@ -1473,6 +1518,8 @@ pub fn load_probe_summary(conn: &Connection, now_nanos: i64) -> anyhow::Result<V
             scopes_by_collector.entry(uuid).or_default().push(scope);
         }
     }
+    let mut assigned_pairs: std::collections::HashSet<(String, i64)> =
+        std::collections::HashSet::new();
     for (uuid, _, _) in &collectors {
         let (enable_icmp, enable_tcp, enable_mtr, enable_ipv4, enable_ipv6) = capabilities
             .get(uuid)
@@ -1487,6 +1534,7 @@ pub fn load_probe_summary(conn: &Connection, now_nanos: i64) -> anyhow::Result<V
                 continue;
             }
             paths_assigned += 1;
+            assigned_pairs.insert((uuid.clone(), *server_id));
             let probe_target = target_of.get(server_id).map(String::as_str).unwrap_or("");
             let target = probe_ingest::apply_ip_families(
                 probe_ingest::resolve_probe_target(probe_target, last_ip),
@@ -1501,13 +1549,33 @@ pub fn load_probe_summary(conn: &Connection, now_nanos: i64) -> anyhow::Result<V
             }
         }
     }
-    let (reachable, down): (i64, i64) = conn.query_row(
-        "SELECT COALESCE(SUM(CASE WHEN COALESCE(reachable, 0) != 0 THEN 1 ELSE 0 END), 0), \
-         COALESCE(SUM(CASE WHEN COALESCE(reachable, 0) = 0 AND sampled_at > 0 THEN 1 ELSE 0 END), 0) \
-         FROM probe_latests",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
+    let mut reachable = 0i64;
+    let mut down = 0i64;
+    if !assigned_pairs.is_empty() {
+        let mut stmt = conn.prepare(
+            "SELECT collector_uuid, server_id, COALESCE(reachable, 0), COALESCE(sampled_at, 0) \
+             FROM probe_latests",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (uuid, sid, reach_flag, sampled_at) = row?;
+            if !assigned_pairs.contains(&(uuid, sid)) {
+                continue;
+            }
+            if reach_flag != 0 {
+                reachable += 1;
+            } else if sampled_at > 0 {
+                down += 1;
+            }
+        }
+    }
     Ok(json!({
         "collectors_total": total,
         "collectors_online": online,
@@ -1521,15 +1589,7 @@ pub fn load_probe_summary(conn: &Connection, now_nanos: i64) -> anyhow::Result<V
 }
 
 fn scopes_include_server(scopes: &[(String, String)], server_id: &str, tag: &str) -> bool {
-    for (scope_type, scope_value) in scopes {
-        match scope_type.as_str() {
-            "all" => return true,
-            "server" if scope_value == server_id => return true,
-            "group" | "tag" if scope_value == tag => return true,
-            _ => {}
-        }
-    }
-    false
+    crate::repo::bindings::scopes_include_server(scopes, server_id, tag)
 }
 
 struct ProbePathServer {
@@ -2074,6 +2134,103 @@ pub fn get_probe_trace(
     Ok(Some(payload))
 }
 
+/// 跳点读侧装饰：入库只存原始 geo 字段（Go `nexttrace.Hop` 口径），前端要的
+/// `geo` / `private` / 规范 `asn` 在这里补齐（Go `decodeRouteHops` +
+/// `formatRouteHopGeo`）。
+///
+/// ipinfo 数据源会把保留地址的归属写进 `whois`（`RFC1918` 之类），ASN 只在
+/// `asnumber` 有值或为 `AS<数字>` 时出现；这里不做本机 GeoIP 补算——读侧
+/// 凭空发明 ASN 会让同一跳在不同主机上显示不同。
+fn decorate_route_hops(hops: Vec<Value>) -> Vec<Value> {
+    hops.into_iter()
+        .map(|mut hop| {
+            let address = hop
+                .get("address")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let private_ip = is_private_hop(&address);
+            let country = hop_field(&hop, "country");
+            let province = hop_field(&hop, "province");
+            let city = hop_field(&hop, "city");
+            let owner = hop_field(&hop, "owner");
+            let asn = normalize_hop_asn(&hop_field(&hop, "asn"));
+            if let Value::Object(ref mut map) = hop {
+                map.insert("asn".to_string(), Value::String(asn.clone()));
+                map.insert("private".to_string(), Value::Bool(private_ip));
+                map.insert(
+                    "geo".to_string(),
+                    Value::String(format_hop_geo(
+                        private_ip, &country, &province, &city, &owner, &asn,
+                    )),
+                );
+            }
+            hop
+        })
+        .collect()
+}
+
+/// Go `LookupHop` 的私网判定：回环 / 私网 / 链路本地 / 未指定地址。
+/// 地址不可解析时不算私网（可能是主机名）。
+fn is_private_hop(address: &str) -> bool {
+    match address.parse::<std::net::IpAddr>() {
+        Ok(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || match ip {
+                    std::net::IpAddr::V4(v4) => {
+                        v4.is_private() || v4.is_link_local() || v4.is_broadcast()
+                    }
+                    std::net::IpAddr::V6(v6) => v6.is_unique_local() || v6.is_unicast_link_local(),
+                }
+        }
+        Err(_) => false,
+    }
+}
+
+fn hop_field(hop: &Value, key: &str) -> String {
+    hop.get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// Go `FormatASN`：空串 / 非数字 → 空；否则补 `AS` 前缀并大写。
+fn normalize_hop_asn(raw: &str) -> String {
+    let digits = raw
+        .strip_prefix("AS")
+        .or_else(|| raw.strip_prefix("as"))
+        .unwrap_or(raw);
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return String::new();
+    }
+    format!("AS{digits}")
+}
+
+/// Go `formatRouteHopGeo`：国家 · 省 · 市 · 运营商 · ASN。
+/// 私网跳不展示任何归属。
+fn format_hop_geo(
+    private_ip: bool,
+    country: &str,
+    province: &str,
+    city: &str,
+    owner: &str,
+    asn: &str,
+) -> String {
+    if private_ip {
+        return String::new();
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for part in [country, province, city, owner, asn] {
+        if !part.is_empty() {
+            parts.push(part);
+        }
+    }
+    parts.join(" · ")
+}
+
 /// Go `ListProbeRoutes`：每协议按 `sampled_at DESC, id DESC` 取 route_keep 条。
 pub fn list_probe_routes(
     conn: &Connection,
@@ -2131,6 +2288,7 @@ pub fn list_probe_routes(
             } else {
                 serde_json::from_slice(&hops).unwrap_or_default()
             };
+            let hops = decorate_route_hops(hops);
             let mut record = json!({
                 "id": id,
                 "sampled_at": optional_rfc3339(sampled_at),
@@ -2193,15 +2351,16 @@ pub fn list_probe_routes(
 
 /// Go `EnqueueProbeRouteJob`：幂等（同协议已有 pending 直接返回）；返回
 /// `(job_id, protocol, port)`；校验失败返回 Err(文案)。
-pub fn enqueue_probe_route_job(
+///
+/// 探测型从端与协议开关校验：`(icmp_on, tcp_on, tcp_has_port)`。
+/// 单目标与批量入队共用同一口径，避免两条路径的开启条件漂移。
+fn probe_route_protocols(
     conn: &Connection,
     collector_id: &str,
-    server_id: i64,
-    protocol: &str,
-) -> anyhow::Result<Result<(i64, String, i64), String>> {
+) -> anyhow::Result<Result<(bool, bool, bool), String>> {
     let Some((enable_icmp, enable_tcp, tcp_ports)) = conn
         .query_row(
-            "SELECT enable_icmp, enable_tcp, tcp_ports FROM collectors \
+            "SELECT enable_icmp, enable_tcp, COALESCE(tcp_ports, '') FROM collectors \
              WHERE collector_uuid = ?1 AND deleted = 0 AND revoked = 0 AND kind = 'probe'",
             [collector_id],
             |row| {
@@ -2216,14 +2375,84 @@ pub fn enqueue_probe_route_job(
     else {
         return Ok(Err("not_found".into()));
     };
-    let protocol = protocol.to_lowercase();
-    let enabled = match protocol.as_str() {
-        "icmp" => enable_icmp != 0,
-        "tcp" => enable_tcp != 0 && tcp_ports.split(',').any(|port| !port.trim().is_empty()),
-        _ => return Ok(Err("invalid_protocol".into())),
+    let effective_ports = if tcp_ports.trim().is_empty() {
+        crate::telemetry::probes::DEFAULT_PROBE_TCP_PORTS
+    } else {
+        tcp_ports.as_str()
     };
-    if !enabled {
-        return Ok(Err("probe_route_disabled".into()));
+    let tcp_ready = effective_ports
+        .split(',')
+        .any(|port| !port.trim().is_empty());
+    Ok(Ok((enable_icmp != 0, enable_tcp != 0, tcp_ready)))
+}
+
+/// 协议是否可入队；icmp/tcp 之外的值按 invalid_protocol 拒绝。
+fn probe_route_protocol_enabled(
+    protocol: &str,
+    icmp_on: bool,
+    tcp_on: bool,
+    tcp_ready: bool,
+) -> Result<(), String> {
+    let enabled = match protocol {
+        "icmp" => icmp_on,
+        "tcp" => tcp_on && tcp_ready,
+        _ => return Err("invalid_protocol".into()),
+    };
+    if enabled {
+        Ok(())
+    } else {
+        Err("probe_route_disabled".into())
+    }
+}
+
+/// 目标主机是否可入队：存在、未删除，且落在该探测从端的 scope 内。
+/// 单目标与批量两条入队路径共用同一判定——越权或不存在的目标从端从不追踪，
+/// 建了单只会在队列里留一条永久 pending。
+fn probe_route_target_state(
+    conn: &Connection,
+    collector_id: &str,
+    server_id: i64,
+) -> anyhow::Result<Result<(), String>> {
+    let tag: Option<String> = conn
+        .query_row(
+            "SELECT COALESCE(tag, '') FROM servers WHERE id = ?1 AND deleted_at IS NULL",
+            [server_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(tag) = tag else {
+        return Ok(Err("server_not_found".into()));
+    };
+    let scopes: Vec<(String, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT scope_type, scope_value FROM collector_scopes WHERE collector_uuid = ?1",
+        )?;
+        stmt.query_map([collector_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if !scopes_include_server(&scopes, &server_id.to_string(), &tag) {
+        return Ok(Err("server_out_of_scope".into()));
+    }
+    Ok(Ok(()))
+}
+
+pub fn enqueue_probe_route_job(
+    conn: &Connection,
+    collector_id: &str,
+    server_id: i64,
+    protocol: &str,
+) -> anyhow::Result<Result<(i64, String, i64), String>> {
+    let (icmp_on, tcp_on, tcp_ready) = match probe_route_protocols(conn, collector_id)? {
+        Ok(value) => value,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    let protocol = protocol.to_lowercase();
+    if let Err(reason) = probe_route_protocol_enabled(&protocol, icmp_on, tcp_on, tcp_ready) {
+        return Ok(Err(reason));
+    };
+    // 与批量路径同口径：已删除或不在 scope 内的主机没有对应目标，建了单也只会永久 pending。
+    if let Err(reason) = probe_route_target_state(conn, collector_id, server_id)? {
+        return Ok(Err(reason));
     }
     let existing: Option<i64> = conn
         .query_row(
@@ -2243,4 +2472,405 @@ pub fn enqueue_probe_route_job(
         rusqlite::params![collector_id, server_id, protocol, util_time::now_nanos()],
     )?;
     Ok(Ok((conn.last_insert_rowid(), protocol, 0)))
+}
+
+/// Go `EnqueueProbeRouteJob` 的批量形态：同一从端、同一协议、一组服务器。
+/// 已在该协议上排着 pending 的服务器复用原任务（不重复建单），其余插入。
+/// 返回 `(enqueued, reused)`；已删除、越权、无有效探测目标或单机关闭对应协议的服务器自动跳过。
+pub fn enqueue_probe_route_jobs(
+    conn: &Connection,
+    collector_id: &str,
+    server_ids: &[i64],
+    protocol: &str,
+) -> anyhow::Result<Result<(usize, usize), String>> {
+    let (icmp_on, tcp_on, tcp_ready) = match probe_route_protocols(conn, collector_id)? {
+        Ok(value) => value,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    let protocol = protocol.to_lowercase();
+    if let Err(reason) = probe_route_protocol_enabled(&protocol, icmp_on, tcp_on, tcp_ready) {
+        return Ok(Err(reason));
+    };
+    let (enable_ipv4, enable_ipv6): (bool, bool) = conn
+        .query_row(
+            "SELECT COALESCE(enable_ipv4, 1), COALESCE(enable_ipv6, 1) \
+             FROM collectors WHERE collector_uuid = ?1",
+            [collector_id],
+            |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, i64>(1)? != 0)),
+        )
+        .optional()?
+        .unwrap_or((true, true));
+    let now = util_time::now_nanos();
+    let mut enqueued = 0usize;
+    let mut reused = 0usize;
+    for server_id in server_ids {
+        // 与单目标路径同口径：不存在或越权的目标静默跳过。
+        if probe_route_target_state(conn, collector_id, *server_id)?.is_err() {
+            continue;
+        }
+        let server_meta: Option<(String, String, bool, bool)> = conn
+            .query_row(
+                "SELECT COALESCE(s.probe_target, ''), COALESCE(r.last_ip, ''), \
+                 COALESCE(s.probe_enable_icmp, 1), COALESCE(s.probe_enable_tcp, 1) \
+                 FROM servers s LEFT JOIN server_runtimes r ON r.server_id = s.id \
+                 WHERE s.id = ?1 AND s.deleted_at IS NULL",
+                [server_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get::<_, i64>(2)? != 0,
+                        row.get::<_, i64>(3)? != 0,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((probe_target, last_ip, server_icmp, server_tcp)) = server_meta else {
+            continue;
+        };
+        let server_proto_on = match protocol.as_str() {
+            "icmp" => server_icmp,
+            "tcp" => server_tcp,
+            _ => false,
+        };
+        if !server_proto_on {
+            continue;
+        }
+        let resolved = probe_ingest::apply_ip_families(
+            probe_ingest::resolve_probe_target(&probe_target, &last_ip),
+            enable_ipv4,
+            enable_ipv6,
+        );
+        if resolved.source == "none" {
+            continue;
+        }
+        let existing: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM probe_route_jobs \
+                 WHERE collector_uuid = ?1 AND server_id = ?2 AND protocol = ?3 AND status = 'pending' \
+                 ORDER BY id DESC LIMIT 1",
+                rusqlite::params![collector_id, server_id, protocol],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing.is_some() {
+            reused += 1;
+            continue;
+        }
+        conn.execute(
+            "INSERT INTO probe_route_jobs (collector_uuid, server_id, protocol, status, requested_at, updated_at) \
+             VALUES (?1, ?2, ?3, 'pending', ?4, ?5)",
+            rusqlite::params![collector_id, server_id, protocol, now, unix_nanos_to_sqlite(now)],
+        )?;
+        enqueued += 1;
+    }
+    Ok(Ok((enqueued, reused)))
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+    use crate::db::migrate;
+
+    fn temp_db(tag: &str) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "santaizi-insights-route-{tag}-{}-{}",
+            std::process::id(),
+            util_time::now_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("panel.db").to_string_lossy().into_owned()
+    }
+
+    fn seed(db: &crate::db::Db) {
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO servers (id, name, tag, secret_ciphertext, probe_target, probe_tcp_ports) \
+                 VALUES (7, 'edge', 'web', X'00', 'edge.example', '443')",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO servers (id, name, tag, secret_ciphertext) VALUES (8, 'bare', 'web', X'01')",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO collectors (collector_uuid, name, address, token_hash, token_ciphertext, kind, \
+                 tcp_ports, enable_icmp, enable_tcp, probe_notify, fail_threshold, route_keep, revoked, deleted) \
+                 VALUES ('probe-1', 'probe', '10.0.0.1:5556', X'00', X'00', 'probe', '22', 1, 1, 1, 2, 5, 0, 0)",
+                [],
+            )?;
+            // scope：只有 web 组在内——入队校验与 `build_probe_targets` 同一套判定。
+            tx.execute(
+                "INSERT INTO collector_scopes (collector_uuid, scope_type, scope_value, created_at) \
+                 VALUES ('probe-1', 'tag', 'web', CURRENT_TIMESTAMP)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn insert_route(conn: &Connection, hops_json: &str) {
+        conn.execute(
+            "INSERT INTO probe_routes (collector_uuid, server_id, protocol, sampled_at, destination, \
+             port, hops_json, error, updated_at) VALUES ('probe-1', 7, 'icmp', 1700000000000000000, \
+             'edge.example', 0, ?1, '', ?2)",
+            rusqlite::params![hops_json.as_bytes(), unix_nanos_to_sqlite(1700000000000000000)],
+        )
+        .unwrap();
+    }
+
+    /// ipinfo 形态：asnumber 是 ASN，geo 由归属拼出。
+    #[test]
+    fn ipinfo_hops_expose_asn_and_geo() {
+        let path = temp_db("ipinfo");
+        let db = migrate::open_primary(&path).unwrap();
+        seed(&db);
+        db.write(|conn| {
+            insert_route(
+                conn,
+                r#"[{"ttl":1,"address":"10.0.0.6","asn":""},
+                   {"ttl":2,"address":"192.0.2.1","asn":"13335","country":"ANYCAST",
+                    "city":"","owner":"Cloudflare, Inc."},
+                   {"ttl":3,"address":"198.51.100.19","asn":"AS41335"},
+                   {"ttl":4,"address":"203.0.113.118","asn":"4809","country":"中国",
+                    "province":"上海","city":"上海","owner":"电信"}]"#,
+            );
+            let payload = list_probe_routes(conn, "probe-1", 7).unwrap().unwrap();
+            let hops = payload["icmp"][0]["hops"].as_array().unwrap();
+            assert_eq!(hops[0]["private"], json!(true), "内网跳标私网");
+            assert_eq!(hops[0]["geo"], json!(""));
+            assert_eq!(hops[0]["asn"], json!(""));
+            assert_eq!(hops[1]["asn"], json!("AS13335"));
+            assert_eq!(
+                hops[1]["geo"],
+                json!("ANYCAST · Cloudflare, Inc. · AS13335")
+            );
+            assert_eq!(hops[2]["asn"], json!("AS41335"));
+            assert_eq!(hops[3]["geo"], json!("中国 · 上海 · 上海 · 电信 · AS4809"));
+            assert_eq!(hops[3]["private"], json!(false));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    /// 非数字 ASN（如 ipinfo 的 RFC whois 串）不得变成 ASN。
+    #[test]
+    fn non_numeric_asn_is_dropped() {
+        let path = temp_db("asn");
+        let db = migrate::open_primary(&path).unwrap();
+        seed(&db);
+        db.write(|conn| {
+            insert_route(
+                conn,
+                r#"[{"ttl":1,"address":"10.0.0.6","asn":"RFC1918","country":"私网"},
+                   {"ttl":2,"address":"203.0.113.9","asn":"as4134"}]"#,
+            );
+            let payload = list_probe_routes(conn, "probe-1", 7).unwrap().unwrap();
+            let hops = payload["icmp"][0]["hops"].as_array().unwrap();
+            assert_eq!(hops[0]["asn"], json!(""));
+            assert_eq!(hops[0]["geo"], json!(""), "私网不展示归属");
+            assert_eq!(hops[1]["asn"], json!("AS4134"));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    /// 批量入队：新任务插入、已有 pending 复用、已删/无目标/单机关协议的服务器自动跳过。
+    #[test]
+    fn batch_enqueue_reuses_pending_and_skips_dead_servers() {
+        let path = temp_db("batch");
+        let db = migrate::open_primary(&path).unwrap();
+        seed(&db);
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO servers (id, name, tag, secret_ciphertext, deleted_at) \
+                 VALUES (9, 'gone', 'web', X'02', 1700000000000000000)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO servers (id, name, tag, secret_ciphertext, probe_target) \
+                 VALUES (10, 'edge-2', 'web', X'03', 'edge2.example')",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO servers (id, name, tag, secret_ciphertext, probe_target, probe_enable_icmp) \
+                 VALUES (12, 'icmp-off', 'web', X'04', 'icmpoff.example', 0)",
+                [],
+            )?;
+            // 7/10 有探测目标且开 ICMP → 入队；8 无目标、9 已删、12 关闭 ICMP → 自动跳过。
+            let first = enqueue_probe_route_jobs(tx, "probe-1", &[7, 8, 9, 10, 12], "icmp")?;
+            assert_eq!(first, Ok((2, 0)), "仅有效探测目标且启用协议的活服务器入队");
+            let second = enqueue_probe_route_jobs(tx, "probe-1", &[7, 8, 10], "icmp")?;
+            assert_eq!(second, Ok((0, 2)), "再次下发全部复用");
+            let pending: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM probe_route_jobs WHERE status = 'pending'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(pending, 2, "不重复建单");
+
+            // tcp_ports 为空串时按默认 "22,443" 判定可用。
+            tx.execute(
+                "UPDATE collectors SET tcp_ports = '' WHERE collector_uuid = 'probe-1'",
+                [],
+            )?;
+            let tcp_batch = enqueue_probe_route_jobs(tx, "probe-1", &[7, 8], "tcp")?;
+            assert_eq!(tcp_batch, Ok((1, 0)), "空 tcp_ports 应按默认端口判定可用");
+
+            let disabled = enqueue_probe_route_jobs(tx, "probe-1", &[7], "udp")?;
+            assert_eq!(disabled, Err("invalid_protocol".into()));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    /// 非探测型从端与不存在的从端一律拒绝。
+    #[test]
+    fn batch_enqueue_rejects_unknown_collector() {
+        let path = temp_db("reject");
+        let db = migrate::open_primary(&path).unwrap();
+        seed(&db);
+        db.write(|tx| {
+            let missing = enqueue_probe_route_jobs(tx, "nope", &[7], "icmp")?;
+            assert_eq!(missing, Err("not_found".into()));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    /// 单目标与批量同口径：不存在的服务器不得建单（否则任务永久 pending）。
+    #[test]
+    fn single_enqueue_rejects_unknown_server() {
+        let path = temp_db("single");
+        let db = migrate::open_primary(&path).unwrap();
+        seed(&db);
+        db.write(|tx| {
+            let missing = enqueue_probe_route_job(tx, "probe-1", 404, "icmp")?;
+            assert_eq!(missing, Err("server_not_found".into()));
+            let jobs: i64 = tx.query_row("SELECT COUNT(*) FROM probe_route_jobs", [], |row| {
+                row.get(0)
+            })?;
+            assert_eq!(jobs, 0, "不得为不存在的服务器留下任务");
+            assert!(enqueue_probe_route_job(tx, "probe-1", 7, "icmp")?.is_ok());
+            assert!(
+                enqueue_probe_route_job(tx, "probe-1", 7, "icmp")?.is_ok(),
+                "重复下发复用原任务"
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    /// scope 外的目标：单目标报错，批量静默跳过（从端从不追踪它）。
+    #[test]
+    fn enqueue_rejects_servers_outside_collector_scope() {
+        let path = temp_db("scope");
+        let db = migrate::open_primary(&path).unwrap();
+        seed(&db);
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO servers (id, name, tag, secret_ciphertext) VALUES (11, 'db', 'storage', X'03')",
+                [],
+            )?;
+            let out = enqueue_probe_route_job(tx, "probe-1", 11, "icmp")?;
+            assert_eq!(out, Err("server_out_of_scope".into()));
+            let batch = enqueue_probe_route_jobs(tx, "probe-1", &[7, 11], "icmp")?;
+            assert_eq!(batch, Ok((1, 0)), "scope 外目标跳过，scope 内照常入队");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn probe_summary_ignores_orphan_latests_and_agents_history_fill_names() {
+        let path = temp_db("summary-agents");
+        let db = migrate::open_primary(&path).unwrap();
+        seed(&db);
+        let node = [0x99u8; 16];
+        db.write(|tx| {
+            // 合法路径 (probe-1, 7) + 孤儿行 (revoked-probe, 7) + (probe-1, 999 已删服) + (probe-1, 11 越界服)。
+            tx.execute(
+                "INSERT INTO servers (id, name, tag, secret_ciphertext, probe_target) VALUES (11, 'other', 'storage', X'09', 'other.example')",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO probe_latests (collector_uuid, server_id, sampled_at, reachable) VALUES ('probe-1', 7, 100, 1)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO probe_latests (collector_uuid, server_id, sampled_at, reachable) VALUES ('ghost-probe', 7, 100, 1)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO probe_latests (collector_uuid, server_id, sampled_at, reachable) VALUES ('probe-1', 999, 100, 0)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO probe_latests (collector_uuid, server_id, sampled_at, reachable) VALUES ('probe-1', 11, 100, 0)",
+                [],
+            )?;
+
+            // list_agents observer_name / observer_kind
+            tx.execute(
+                "INSERT INTO collectors (collector_uuid, name, address, token_hash, token_ciphertext, kind, tcp_ports, revoked, deleted) \
+                 VALUES ('obs-hk', '香港从端', '10.0.0.2:5555', X'00', X'00', 'observer', '22', 0, 0)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO server_node_bindings (server_id, node_uuid, valid_from, valid_to, current, reason, created_at) \
+                 VALUES (7, ?1, 0, NULL, 1, 'r', CURRENT_TIMESTAMP)",
+                [&node.to_vec()],
+            )?;
+            let runtime = proto::AgentRuntime {
+                sinks: vec![
+                    proto::SinkRuntime {
+                        endpoint_id: "primary".into(),
+                        connected: true,
+                        ..Default::default()
+                    },
+                    proto::SinkRuntime {
+                        endpoint_id: "obs-hk".into(),
+                        connected: true,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }
+            .encode_to_vec();
+            tx.execute(
+                "INSERT INTO agent_telemetry_runtimes (node_uuid, wal_pressure, sink_cursors, updated_at) \
+                 VALUES (?1, 1, ?2, CURRENT_TIMESTAMP)",
+                rusqlite::params![&node.to_vec(), runtime],
+            )?;
+
+            // list_monitor_history server_name
+            tx.execute(
+                "INSERT INTO monitor_histories (id, monitor_id, server_id, created_at, avg_delay, up, down) \
+                 VALUES (1, 5, 7, '2026-10-16 00:00:00', 12.5, 1, 0)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        db.read(|conn| {
+            let summary = load_probe_summary(conn, util_time::now_nanos())?;
+            assert_eq!(summary["paths_assigned"], 2, "web 组含 7 与 8 两台服务器");
+            assert_eq!(summary["paths_reachable"], 1);
+            assert_eq!(summary["paths_down"], 0, "孤儿与越界行不得计入 paths_down");
+
+            let (agents, _) = list_agents(conn, 0, 10)?;
+            let sinks = agents[0]["sinks"].as_array().unwrap();
+            assert_eq!(sinks[0]["observer_kind"], "primary");
+            assert_eq!(sinks[0]["observer_name"], "主面板");
+            assert_eq!(sinks[1]["observer_kind"], "collector");
+            assert_eq!(sinks[1]["observer_name"], "香港从端");
+
+            let (hist, _) = list_monitor_history(conn, 5, None, None, None, 10)?;
+            assert_eq!(hist[0]["server_name"], "edge");
+            Ok(())
+        })
+        .unwrap();
+    }
 }

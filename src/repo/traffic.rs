@@ -37,21 +37,34 @@ pub struct TrafficPolicyRow {
     pub created_at_nanos: i64,
 }
 
-/// `Find(&rows)` + 可选 server_id 过滤（Go `v2PublicCycleTransfer` 的取数）。
-/// gorm 软删除语义对齐：排除 `deleted_at` 非空行。
+/// `Find(&rows)` + 可选 server_id 过滤。
+/// 排除软删除策略及已删除服务器（`s.deleted_at IS NULL`）。
 pub fn list_enabled(
     conn: &Connection,
     server_id: Option<i64>,
 ) -> anyhow::Result<Vec<TrafficPolicyRow>> {
-    let sql = "SELECT id, server_id, name, direction, mode, cycle_start, \
-               COALESCE(cycle_interval, 1), COALESCE(cycle_unit, ''), quota_bytes, \
-               COALESCE(warning_percent, 80), COALESCE(notification_tag, ''), \
-               COALESCE(created_at, '') \
-               FROM traffic_policies WHERE enabled = 1 AND deleted_at IS NULL \
-               AND (?1 IS NULL OR server_id = ?1) ORDER BY server_id ASC, id ASC";
+    list_public_enabled(conn, server_id, true)
+}
+
+/// 面向公开站的启用策略查询：`!include_hidden` 时排除 `hide_for_guest != 0` 的服务器。
+pub fn list_public_enabled(
+    conn: &Connection,
+    server_id: Option<i64>,
+    include_hidden: bool,
+) -> anyhow::Result<Vec<TrafficPolicyRow>> {
+    let sql = "SELECT p.id, p.server_id, p.name, p.direction, p.mode, p.cycle_start, \
+               COALESCE(p.cycle_interval, 1), COALESCE(p.cycle_unit, ''), p.quota_bytes, \
+               COALESCE(p.warning_percent, 80), COALESCE(p.notification_tag, ''), \
+               COALESCE(p.created_at, '') \
+               FROM traffic_policies p \
+               INNER JOIN servers s ON s.id = p.server_id \
+               WHERE p.enabled = 1 AND p.deleted_at IS NULL AND s.deleted_at IS NULL \
+               AND (?1 IS NULL OR p.server_id = ?1) \
+               AND (?2 <> 0 OR COALESCE(s.hide_for_guest, 0) = 0) \
+               ORDER BY p.server_id ASC, p.id ASC";
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt
-        .query_map([server_id], |row| {
+        .query_map(rusqlite::params![server_id, include_hidden as i64], |row| {
             Ok(TrafficPolicyRow {
                 id: row.get(0)?,
                 server_id: row.get(1)?,
@@ -79,10 +92,18 @@ pub fn list_enabled(
     Ok(rows)
 }
 
-/// Go `Window`：返回 `(start, end)`；cumulative 的 `end` 为 `None`。
-/// recurring 参数非法（缺 `cycle_start`、interval 为 0、unit 不支持）时返回
-/// `None`——对应 Go `Calculate` 报错、行不携带 usage 字段。
+/// Go `Window`（UTC 默认入口）：兼容旧调用方，按 `"UTC"` 计算周期窗。
 pub fn policy_window(policy: &TrafficPolicyRow, now_nanos: i64) -> Option<(i64, Option<i64>)> {
+    policy_window_in_location(policy, now_nanos, "UTC")
+}
+
+/// 按面板配置 `location` 计算策略窗口 `(start, end)`；cumulative 的 `end` 为 `None`。
+/// 月/年周期从 `anchor` 按步数 `k * step_months` 直接计算并钳制月末，不累积迭代。
+pub fn policy_window_in_location(
+    policy: &TrafficPolicyRow,
+    now_nanos: i64,
+    location: &str,
+) -> Option<(i64, Option<i64>)> {
     if policy.mode == TRAFFIC_MODE_CUMULATIVE {
         let start = policy
             .cycle_start_nanos
@@ -105,31 +126,45 @@ pub fn policy_window(policy: &TrafficPolicyRow, now_nanos: i64) -> Option<(i64, 
         return None;
     }
     if now_nanos < anchor {
-        return Some((anchor, add_cycle(anchor, interval, unit)));
+        return Some((
+            anchor,
+            add_cycle_in_location(anchor, interval, unit, location),
+        ));
     }
-    let start = match unit {
+    match unit {
         "hour" => {
             // Go 用 Unix 秒差取整再加回 anchor，保留亚秒部分。
             // `checked_mul`：回绕成 0 会让下一行除零 panic。
             let step_secs = interval.checked_mul(3600)?;
             let elapsed = (now_nanos - anchor) / 1_000_000_000;
             let step_nanos = step_secs.checked_mul(1_000_000_000)?;
-            anchor + elapsed / step_secs * step_nanos
+            let start = anchor + elapsed / step_secs * step_nanos;
+            Some((
+                start,
+                add_cycle_in_location(start, interval, unit, location),
+            ))
         }
         "day" => {
             let days = (now_nanos - anchor) / DAY_NANOS;
             let step = days / interval * interval;
-            anchor + step * DAY_NANOS
+            let start = anchor + step * DAY_NANOS;
+            Some((
+                start,
+                add_cycle_in_location(start, interval, unit, location),
+            ))
         }
         "week" => {
             let days = (now_nanos - anchor) / DAY_NANOS;
             let step_days = 7 * interval;
             let step = days / step_days * step_days;
-            anchor + step * DAY_NANOS
+            let start = anchor + step * DAY_NANOS;
+            Some((
+                start,
+                add_cycle_in_location(start, interval, unit, location),
+            ))
         }
-        // 月/年按日历推进：月末与闰年走 AddDate 归一化语义。
+        // 月/年按面板时区日历推进：始终从 anchor 按 k * step_months 直接算，防月末跨 2 月永久退化。
         "month" | "year" => {
-            // 负数步长会让 add_months 永远推不过 now → 死循环。
             let step_months = if unit == "year" {
                 interval.checked_mul(12)?
             } else {
@@ -138,26 +173,41 @@ pub fn policy_window(policy: &TrafficPolicyRow, now_nanos: i64) -> Option<(i64, 
             if step_months <= 0 {
                 return None;
             }
-            let mut start = anchor;
+            let approx_months = (now_nanos - anchor) / (32 * DAY_NANOS);
+            let mut k = (approx_months / step_months).max(0);
+            let mut start =
+                util_time::add_months_in_location(anchor, k.checked_mul(step_months)?, location)?;
+            while start > now_nanos && k > 0 {
+                k -= 1;
+                start = util_time::add_months_in_location(
+                    anchor,
+                    k.checked_mul(step_months)?,
+                    location,
+                )?;
+            }
             loop {
-                let next = util_time::add_months(start, step_months)?;
+                let next_k = k.checked_add(1)?;
+                let next = util_time::add_months_in_location(
+                    anchor,
+                    next_k.checked_mul(step_months)?,
+                    location,
+                )?;
                 if next > now_nanos {
-                    break;
+                    return Some((start, Some(next)));
                 }
+                k = next_k;
                 start = next;
             }
-            start
         }
-        _ => return None,
-    };
-    Some((start, add_cycle(start, interval, unit)))
+        _ => None,
+    }
 }
 
-/// Go `addCycle`：按周期单位推进一个步长。
-fn add_cycle(nanos: i64, interval: i64, unit: &str) -> Option<i64> {
+/// 按给定 `location` 推进一个周期步长。
+fn add_cycle_in_location(nanos: i64, interval: i64, unit: &str, location: &str) -> Option<i64> {
     match unit {
-        "year" => util_time::add_months(nanos, interval.checked_mul(12)?),
-        "month" => util_time::add_months(nanos, interval),
+        "year" => util_time::add_months_in_location(nanos, interval.checked_mul(12)?, location),
+        "month" => util_time::add_months_in_location(nanos, interval, location),
         "week" => nanos.checked_add(interval.checked_mul(7)?.checked_mul(DAY_NANOS)?),
         "day" => nanos.checked_add(interval.checked_mul(DAY_NANOS)?),
         "hour" => nanos.checked_add(interval.checked_mul(HOUR_NANOS)?),
@@ -178,14 +228,23 @@ pub struct TrafficUsage {
     pub status: String,
 }
 
-/// Go `Calculate`：窗口 + 当前节点绑定 + rollup 方向求和。
-/// 无绑定的服务器计 0（Go 同）；recurring 参数非法返回 `Ok(None)`。
+/// Go `Calculate`（UTC 默认入口）：兼容旧调用方。
 pub fn usage(
     conn: &Connection,
     policy: &TrafficPolicyRow,
     now_nanos: i64,
 ) -> anyhow::Result<Option<TrafficUsage>> {
-    let Some((start, end)) = policy_window(policy, now_nanos) else {
+    usage_in_location(conn, policy, now_nanos, "UTC")
+}
+
+/// 按面板配置 `location` 计算策略窗口 + 当前节点绑定 + rollup 方向求和。
+pub fn usage_in_location(
+    conn: &Connection,
+    policy: &TrafficPolicyRow,
+    now_nanos: i64,
+    location: &str,
+) -> anyhow::Result<Option<TrafficUsage>> {
+    let Some((start, end)) = policy_window_in_location(policy, now_nanos, location) else {
         return Ok(None);
     };
     let used = match bindings::current_binding_for_server(conn, policy.server_id)? {
@@ -231,17 +290,28 @@ pub struct TrafficSummary {
     pub status: String,
 }
 
-/// Go `Summaries`：按服务器聚合启用策略的当前用量（附在 admin 列表行上）。
+/// Go `Summaries`（UTC 默认入口）。
 pub fn summaries(
     conn: &Connection,
     server_ids: &[i64],
     now_nanos: i64,
 ) -> anyhow::Result<HashMap<i64, Vec<TrafficSummary>>> {
+    summaries_in_location(conn, server_ids, now_nanos, "UTC")
+}
+
+/// 按面板配置 `location` 聚合启用策略的当前用量（附在 admin 列表/保存响应上）。
+pub fn summaries_in_location(
+    conn: &Connection,
+    server_ids: &[i64],
+    now_nanos: i64,
+    location: &str,
+) -> anyhow::Result<HashMap<i64, Vec<TrafficSummary>>> {
     let mut out: HashMap<i64, Vec<TrafficSummary>> = HashMap::new();
     for server_id in server_ids {
         let mut rows = Vec::new();
         for policy in list_enabled(conn, Some(*server_id))? {
-            let Some(usage) = usage(conn, &policy, now_nanos).unwrap_or(None) else {
+            let Some(usage) = usage_in_location(conn, &policy, now_nanos, location).unwrap_or(None)
+            else {
                 continue;
             };
             rows.push(TrafficSummary {
@@ -483,12 +553,25 @@ pub fn insert_policy(
 }
 
 /// 更新策略（保留 created_at），返回是否命中（Go `Save` + NotFound 404）。
+/// 当新 `quota_bytes` 大于原 `quota_bytes`（配额扩容）时，同步清零该策略在
+/// `traffic_policy_states` 中的 `warning_notified_at` 与 `exceeded_notified_at`，
+/// 使扩容后若再次越线仍可正常触发告警。
 pub fn update_policy(
     tx: &rusqlite::Transaction<'_>,
     server_id: i64,
     policy_id: i64,
     write: &PolicyWrite,
 ) -> anyhow::Result<bool> {
+    let previous_quota: Option<u64> = tx
+        .query_row(
+            "SELECT quota_bytes FROM traffic_policies WHERE id = ?1 AND server_id = ?2 AND deleted_at IS NULL",
+            [policy_id, server_id],
+            |row| Ok(row.get::<_, i64>(0)?.max(0) as u64),
+        )
+        .optional()?;
+    let Some(old_quota) = previous_quota else {
+        return Ok(false);
+    };
     let cycle_start = write
         .cycle_start_nanos
         .filter(|nanos| *nanos != 0)
@@ -513,6 +596,14 @@ pub fn update_policy(
             write.enabled as i64,
         ],
     )?;
+    if changed > 0 && write.quota_bytes > old_quota {
+        tx.execute(
+            "UPDATE traffic_policy_states \
+             SET warning_notified_at = 0, exceeded_notified_at = 0, updated_at = CURRENT_TIMESTAMP \
+             WHERE policy_id = ?1",
+            [policy_id],
+        )?;
+    }
     Ok(changed > 0)
 }
 
@@ -765,21 +856,32 @@ fn daily_series(
     Ok(points)
 }
 
-/// Go `Histories`：服务器全部策略的当前用量 + 小时/日序列。
+/// Go `Histories`（UTC 默认入口）。
 pub fn histories(
     conn: &Connection,
     server_id: i64,
     now_nanos: i64,
 ) -> anyhow::Result<Vec<PolicyHistory>> {
+    histories_in_location(conn, server_id, now_nanos, "UTC")
+}
+
+/// 按面板配置 `location` 计算服务器全部策略的当前用量 + 小时/日序列。
+pub fn histories_in_location(
+    conn: &Connection,
+    server_id: i64,
+    now_nanos: i64,
+    location: &str,
+) -> anyhow::Result<Vec<PolicyHistory>> {
     let policies = list_for_server(conn, server_id)?;
     let binding = bindings::current_binding_for_server(conn, server_id)?;
     let mut items = Vec::new();
     for policy in policies {
-        let usage = usage(conn, &policy.window_row(), now_nanos).unwrap_or(None);
+        let usage =
+            usage_in_location(conn, &policy.window_row(), now_nanos, location).unwrap_or(None);
         // Go：无绑定也返回零值骨架（emptyHourly / emptyDaily），只有有绑定时才填充。
         let (hourly, daily) = match &binding {
             Some(binding) => {
-                let window = policy_window(&policy.window_row(), now_nanos);
+                let window = policy_window_in_location(&policy.window_row(), now_nanos, location);
                 let window_start = window.map_or(now_nanos, |(start, _)| start);
                 (
                     hourly_series(conn, &binding.node_uuid, &policy.direction, now_nanos)?,
@@ -962,9 +1064,9 @@ mod tests {
 
     #[test]
     fn recurring_month_year_windows_advance_calendar() {
-        // month：anchor 2026-01-31（月末），步长 2 个月。Go AddDate 溢出进位：
-        // 链 01-31 → 03-31 → 05-31 → 07-31 → 09-31→10-01（> now 09-15）停。
-        // 终点窗 [07-31, 10-01)，窗末同样落在进位后的 10-01。
+        // month：anchor 2026-01-31（月末），步长 2 个月。月末钳制：
+        // 锚点直推 01-31 → 03-31 → 05-31 → 07-31 → 09-30（> now 09-15）停。
+        // 终点窗 [07-31, 09-30)，不溢出到 10-01。
         let anchor = util_time::days_from_civil(2026, 1, 31).unwrap() * DAY;
         let now = util_time::days_from_civil(2026, 9, 15).unwrap() * DAY;
         assert_eq!(
@@ -974,19 +1076,108 @@ mod tests {
             ),
             Some((
                 util_time::days_from_civil(2026, 7, 31).unwrap() * DAY,
-                Some(util_time::days_from_civil(2026, 10, 1).unwrap() * DAY),
+                Some(util_time::days_from_civil(2026, 9, 30).unwrap() * DAY),
             ))
         );
-        // year：anchor 2024-02-29（闰日），步长 1 年。非闰年 2-29 进位 3-01：
-        // 链 2024-02-29 → 2025-03-01 → 2026-03-01（≤ now）→ 2027-03-01 停。
+        // year：anchor 2024-02-29（闰日），步长 1 年。非闰年钳制为 2-28，闰年恢复 2-29：
+        // 2024-02-29 → 2025-02-28 → 2026-02-28（≤ now）→ 2027-02-28 停。
         let leap = util_time::days_from_civil(2024, 2, 29).unwrap() * DAY;
         let now = util_time::days_from_civil(2026, 6, 1).unwrap() * DAY;
         assert_eq!(
             policy_window(&policy(TRAFFIC_MODE_RECURRING, Some(leap), 1, "year"), now),
             Some((
-                util_time::days_from_civil(2026, 3, 1).unwrap() * DAY,
-                Some(util_time::days_from_civil(2027, 3, 1).unwrap() * DAY),
+                util_time::days_from_civil(2026, 2, 28).unwrap() * DAY,
+                Some(util_time::days_from_civil(2027, 2, 28).unwrap() * DAY),
             ))
+        );
+        let now_2028 = util_time::days_from_civil(2028, 6, 1).unwrap() * DAY;
+        assert_eq!(
+            policy_window(
+                &policy(TRAFFIC_MODE_RECURRING, Some(leap), 1, "year"),
+                now_2028
+            ),
+            Some((
+                util_time::days_from_civil(2028, 2, 29).unwrap() * DAY,
+                Some(util_time::days_from_civil(2029, 2, 28).unwrap() * DAY),
+            ))
+        );
+    }
+
+    #[test]
+    fn recurring_month_windows_in_shanghai_keep_first_and_month_end_anchors() {
+        // 东八区 2026-02-01T00:00:00+08:00（UTC 为 2026-01-31T16:00:00Z）连续推进：
+        // 必须始终对齐每月 1 日 00:00:00+08:00，不得因 UTC 1 月 31 日被钳到 28 日。
+        let anchor_feb1 = util_time::sqlite_to_unix_nanos("2026-02-01 00:00:00+08:00").unwrap();
+        let row_feb1 = policy(TRAFFIC_MODE_RECURRING, Some(anchor_feb1), 1, "month");
+        for (probe, exp_start, exp_end) in [
+            (
+                "2026-02-15 12:00:00+08:00",
+                "2026-02-01 00:00:00+08:00",
+                "2026-03-01 00:00:00+08:00",
+            ),
+            (
+                "2026-03-01 00:00:00+08:00",
+                "2026-03-01 00:00:00+08:00",
+                "2026-04-01 00:00:00+08:00",
+            ),
+            (
+                "2026-04-10 08:30:00+08:00",
+                "2026-04-01 00:00:00+08:00",
+                "2026-05-01 00:00:00+08:00",
+            ),
+        ] {
+            let now = util_time::sqlite_to_unix_nanos(probe).unwrap();
+            let (s, e) = policy_window_in_location(&row_feb1, now, "Asia/Shanghai").unwrap();
+            assert_eq!(s, util_time::sqlite_to_unix_nanos(exp_start).unwrap());
+            assert_eq!(e, util_time::sqlite_to_unix_nanos(exp_end));
+        }
+
+        // 东八区 1 月 31 日 → 2 月 28 日 → 3 月 31 日（跨过 2 月后回到 31 号，不退化为 28 号或 3 号）。
+        let anchor_jan31 = util_time::sqlite_to_unix_nanos("2026-01-31 00:00:00+08:00").unwrap();
+        let row_jan31 = policy(TRAFFIC_MODE_RECURRING, Some(anchor_jan31), 1, "month");
+        let (s1, e1) = policy_window_in_location(
+            &row_jan31,
+            util_time::sqlite_to_unix_nanos("2026-02-10 00:00:00+08:00").unwrap(),
+            "Asia/Shanghai",
+        )
+        .unwrap();
+        assert_eq!(
+            s1,
+            util_time::sqlite_to_unix_nanos("2026-01-31 00:00:00+08:00").unwrap()
+        );
+        assert_eq!(
+            e1,
+            util_time::sqlite_to_unix_nanos("2026-02-28 00:00:00+08:00")
+        );
+
+        let (s2, e2) = policy_window_in_location(
+            &row_jan31,
+            util_time::sqlite_to_unix_nanos("2026-03-10 00:00:00+08:00").unwrap(),
+            "Asia/Shanghai",
+        )
+        .unwrap();
+        assert_eq!(
+            s2,
+            util_time::sqlite_to_unix_nanos("2026-02-28 00:00:00+08:00").unwrap()
+        );
+        assert_eq!(
+            e2,
+            util_time::sqlite_to_unix_nanos("2026-03-31 00:00:00+08:00")
+        );
+
+        let (s3, e3) = policy_window_in_location(
+            &row_jan31,
+            util_time::sqlite_to_unix_nanos("2026-04-01 00:00:00+08:00").unwrap(),
+            "Asia/Shanghai",
+        )
+        .unwrap();
+        assert_eq!(
+            s3,
+            util_time::sqlite_to_unix_nanos("2026-03-31 00:00:00+08:00").unwrap()
+        );
+        assert_eq!(
+            e3,
+            util_time::sqlite_to_unix_nanos("2026-04-30 00:00:00+08:00")
         );
     }
 
@@ -1119,11 +1310,30 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let db = migrate::open_primary(&path.to_string_lossy()).unwrap();
         db.write(|tx| {
+            for (server_id, hide, deleted) in [
+                (1, 0, None),
+                (2, 1, None),                                 // guest hidden
+                (3, 0, Some("2026-01-01 00:00:00+00:00")),    // soft-deleted server
+            ] {
+                tx.execute(
+                    "INSERT INTO servers (id, name, tag, secret_ciphertext, display_index, hide_for_guest, deleted_at) \
+                     VALUES (?1, ?2, 't', ?3, 1, ?4, ?5)",
+                    rusqlite::params![
+                        server_id,
+                        format!("s{server_id}"),
+                        vec![server_id as u8],
+                        hide,
+                        deleted
+                    ],
+                )?;
+            }
             for (id, server, enabled, deleted) in [
                 (1, 2, 1, None),
                 (2, 1, 1, None),
-                (3, 1, 0, None),   // disabled
-                (4, 1, 1, Some("2026-01-01 00:00:00+00:00")), // soft deleted
+                (3, 1, 0, None),                              // disabled
+                (4, 1, 1, Some("2026-01-01 00:00:00+00:00")), // soft deleted policy
+                (5, 3, 1, None),                              // deleted server
+                (6, 999, 1, None),                            // orphan server_id
             ] {
                 tx.execute(
                     "INSERT INTO traffic_policies (id, created_at, updated_at, deleted_at, server_id, name, direction, mode, cycle_start, cycle_interval, cycle_unit, quota_bytes, warning_percent, enabled) \
@@ -1144,6 +1354,69 @@ mod tests {
             filtered.iter().map(|row| row.id).collect::<Vec<_>>(),
             vec![1]
         );
+        let guest = db
+            .read(|conn| list_public_enabled(conn, None, false))
+            .unwrap();
+        assert_eq!(
+            guest.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![2],
+            "匿名访客不得读取 hide_for_guest 服务器的流量策略"
+        );
+        let member = db
+            .read(|conn| list_public_enabled(conn, None, true))
+            .unwrap();
+        assert_eq!(
+            member.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn quota_expansion_resets_notified_cursors() {
+        let path = std::env::temp_dir().join(format!(
+            "santaizi-repo-traffic-quota-expand-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let db = migrate::open_primary(&path.to_string_lossy()).unwrap();
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO servers (id, name, tag, secret_ciphertext, display_index, hide_for_guest) \
+                 VALUES (1, 's1', 't', X'11', 1, 0)",
+                [],
+            )?;
+            let pid = insert_policy(tx, 1, &write("p1"))?;
+            tx.execute(
+                "INSERT INTO traffic_policy_states (policy_id, window_start, window_end, used_bytes, warning_notified_at, exceeded_notified_at, last_evaluated_at, updated_at) \
+                 VALUES (?1, 10, 20, 100, 12345, 67890, 67890, CURRENT_TIMESTAMP)",
+                [pid],
+            )?;
+
+            // 同配额修改名称：不应清除告警游标。
+            let mut same_quota = write("p1-renamed");
+            same_quota.quota_bytes = 100;
+            update_policy(tx, 1, pid, &same_quota)?;
+            let cursors: (i64, i64) = tx.query_row(
+                "SELECT warning_notified_at, exceeded_notified_at FROM traffic_policy_states WHERE policy_id = ?1",
+                [pid],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(cursors, (12345, 67890));
+
+            // 扩容 quota_bytes：应清零 warning_notified_at 与 exceeded_notified_at。
+            let mut expanded = write("p1-expanded");
+            expanded.quota_bytes = 200;
+            replace_policies(tx, 1, vec![(pid, expanded)])?;
+            let cursors_after: (i64, i64) = tx.query_row(
+                "SELECT warning_notified_at, exceeded_notified_at FROM traffic_policy_states WHERE policy_id = ?1",
+                [pid],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(cursors_after, (0, 0));
+            Ok(())
+        })
+        .unwrap();
         let _ = std::fs::remove_file(&path);
     }
 }
