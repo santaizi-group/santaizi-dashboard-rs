@@ -38,6 +38,13 @@ pub const OAUTH2_MOCK: &str = "mock";
 pub const COVER_ALL: u8 = 0;
 pub const COVER_IGNORE_ALL: u8 = 1;
 
+/// 离线阈值/检测间隔上限：阈值要乘 `1_000_000_000` 转纳秒并 `as i64`，
+/// 超大值会溢出成负数，宽限与离线判定随即失效。1 天对心跳语义已无意义。
+pub const MAX_OFFLINE_THRESHOLD_SECONDS: u64 = 86_400;
+pub const MAX_OFFLINE_CHECK_INTERVAL_SECONDS: u64 = 86_400;
+/// 离线历史保留上限：清理按 `days * 86400e9` 换算，留十年足够。
+pub const MAX_OFFLINE_RETENTION_DAYS: u64 = 3_650;
+
 /// 运行时可变配置句柄：读多写少，读侧拿当前 `Arc<Config>` 快照
 /// （Go `*singleton.Conf` 的进程内可变等价物）。
 pub type ConfigHandle = std::sync::Arc<std::sync::RwLock<std::sync::Arc<Config>>>;
@@ -218,6 +225,17 @@ pub struct Oauth2Config {
     pub oidcautologin: bool,
 }
 
+fn default_offline_merge_gap_seconds() -> u64 {
+    10
+}
+
+fn deserialize_offline_merge_gap_seconds<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or_else(default_offline_merge_gap_seconds))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -284,7 +302,11 @@ pub struct Config {
     pub offline_threshold_seconds: u64,
     #[serde(rename = "offlinecheckintervalseconds")]
     pub offline_check_interval_seconds: u64,
-    #[serde(rename = "offlinemergegapseconds")]
+    #[serde(
+        rename = "offlinemergegapseconds",
+        default = "default_offline_merge_gap_seconds",
+        deserialize_with = "deserialize_offline_merge_gap_seconds"
+    )]
     pub offline_merge_gap_seconds: u64,
     #[serde(rename = "offlinehistoryretentiondays")]
     pub offline_history_retention_days: u64,
@@ -297,6 +319,9 @@ pub struct Config {
 
     #[serde(skip)]
     pub(crate) file_path: String,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub baseline_snapshot: Option<serde_json::Value>,
 }
 
 impl Default for Config {
@@ -339,12 +364,13 @@ impl Default for Config {
             enable_offline_history: false,
             offline_threshold_seconds: 0,
             offline_check_interval_seconds: 0,
-            offline_merge_gap_seconds: 0,
+            offline_merge_gap_seconds: default_offline_merge_gap_seconds(),
             offline_history_retention_days: 0,
             enable_offline_notification: false,
             enable_recovery_notification: false,
             show_availability_to_guest: false,
             file_path: String::new(),
+            baseline_snapshot: None,
         };
         conf.apply_defaults();
         conf
@@ -372,6 +398,9 @@ impl Config {
         conf.file_path = path.to_string();
         conf.apply_defaults();
         conf.validate()?;
+        if let Ok(snapshot) = serde_json::to_value(&conf) {
+            conf.baseline_snapshot = Some(lowercase_keys(snapshot));
+        }
         Ok(conf)
     }
 
@@ -526,7 +555,7 @@ impl Config {
             self.install_script.linux = "https://raw.githubusercontent.com/santaizi-group/santanzi-dashboard/main/script/install_agent.sh".into();
         }
         if self.install_script.linux_rust.is_empty() {
-            self.install_script.linux_rust = "https://raw.githubusercontent.com/santaizi-group/santanzi-dashboard/main/script/install_agent_rs.sh".into();
+            self.install_script.linux_rust = "https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/install_agent_rs.sh".into();
         }
         if self.install_script.linuxen.is_empty() {
             self.install_script.linuxen = "https://raw.githubusercontent.com/santaizi-group/santanzi-dashboard/main/script/install_agent_en.sh".into();
@@ -551,10 +580,10 @@ impl Config {
             self.install_script.upgradecollector = "https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/install_collector.sh".into();
         }
         if self.install_script.upgrade_linux.is_empty() {
-            self.install_script.upgrade_linux = "https://raw.githubusercontent.com/santaizi-group/santanzi-dashboard/main/script/upgrade_agent.sh".into();
+            self.install_script.upgrade_linux = "https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/upgrade_agent.sh".into();
         }
         if self.install_script.upgrade_linux_en.is_empty() {
-            self.install_script.upgrade_linux_en = "https://raw.githubusercontent.com/santaizi-group/santanzi-dashboard/main/script/upgrade_agent_en.sh".into();
+            self.install_script.upgrade_linux_en = "https://raw.githubusercontent.com/santaizi-group/santaizi-dashboard-rs/main/script/upgrade_agent_en.sh".into();
         }
         if self.install_script.upgrade_windows.is_empty() {
             self.install_script.upgrade_windows = "https://raw.githubusercontent.com/santaizi-group/santanzi-dashboard/main/script/upgrade.ps1".into();
@@ -579,30 +608,29 @@ impl Config {
         if self.offline_threshold_seconds == 0 {
             self.offline_threshold_seconds = 30;
         }
-        if self.offline_threshold_seconds < 10 {
-            self.offline_threshold_seconds = 10;
-        }
+        // 上限不能省：阈值要乘 1_000_000_000 转 i64 纳秒，超大值会溢出成负数。
+        self.offline_threshold_seconds = self
+            .offline_threshold_seconds
+            .clamp(10, MAX_OFFLINE_THRESHOLD_SECONDS);
         if self.offline_check_interval_seconds == 0 {
             self.offline_check_interval_seconds = 10;
         }
-        if self.offline_check_interval_seconds < 5 {
-            self.offline_check_interval_seconds = 5;
-        }
+        self.offline_check_interval_seconds = self
+            .offline_check_interval_seconds
+            .clamp(5, MAX_OFFLINE_CHECK_INTERVAL_SECONDS);
         if self.offline_check_interval_seconds > self.offline_threshold_seconds {
             self.offline_check_interval_seconds = self.offline_threshold_seconds;
         }
-        if self.offline_merge_gap_seconds == 0 {
-            self.offline_merge_gap_seconds = 10;
-        }
+        // `offline_merge_gap_seconds = 0` 是合法值（禁用相邻闪断合并），仅缺省时默认 10。
         if self.offline_merge_gap_seconds > 3600 {
             self.offline_merge_gap_seconds = 3600;
         }
         if self.offline_history_retention_days == 0 {
             self.offline_history_retention_days = 365;
         }
-        if self.offline_history_retention_days < 1 {
-            self.offline_history_retention_days = 1;
-        }
+        self.offline_history_retention_days = self
+            .offline_history_retention_days
+            .clamp(1, MAX_OFFLINE_RETENTION_DAYS);
 
         self.update_ignored_ip_notification_ids();
     }
@@ -677,13 +705,142 @@ impl Config {
         self.file_path = path.to_string();
     }
 
-    /// 全量写回 yaml 配置文件（Go `Conf.Save`：0600）。
+    /// 写回 yaml 配置文件（0600）。
+    /// 若目标文件已存在且可解析为 YAML Mapping，优先读取原文件并增量更新已有键与实际变更项，
+    /// 避免在管理后台保存一次设置就把未改动的 `SANTAIZI_*` 环境变量全部固化进 YAML。
     pub fn save(&self) -> anyhow::Result<()> {
         if self.file_path.is_empty() {
             anyhow::bail!("config file path is empty");
         }
-        let text = serde_yaml::to_string(self)?;
-        save_bytes(std::path::Path::new(&self.file_path), text.as_bytes())
+        let target_path = std::path::Path::new(&self.file_path);
+        let text = if target_path.exists()
+            && let Ok(existing_raw) = std::fs::read_to_string(target_path)
+            && let Ok(parsed) = serde_yaml::from_str::<serde_yaml::Value>(&existing_raw)
+        {
+            match parsed {
+                serde_yaml::Value::Mapping(mut target_map) => {
+                    let current_yaml = serde_yaml::to_value(self)?;
+                    let baseline_json = self.baseline_snapshot.clone().or_else(|| {
+                        serde_json::to_value(Config::default())
+                            .ok()
+                            .map(lowercase_keys)
+                    });
+                    let baseline_yaml = baseline_json.and_then(|v| serde_yaml::to_value(v).ok());
+                    if let serde_yaml::Value::Mapping(cur_map) = current_yaml {
+                        update_yaml_mapping(
+                            &mut target_map,
+                            &cur_map,
+                            baseline_yaml
+                                .as_ref()
+                                .and_then(serde_yaml::Value::as_mapping),
+                        );
+                        serde_yaml::to_string(&serde_yaml::Value::Mapping(target_map))?
+                    } else {
+                        serde_yaml::to_string(self)?
+                    }
+                }
+                serde_yaml::Value::Null if existing_raw.trim().is_empty() => {
+                    let mut target_map = serde_yaml::Mapping::new();
+                    let current_yaml = serde_yaml::to_value(self)?;
+                    let baseline_json = self.baseline_snapshot.clone().or_else(|| {
+                        serde_json::to_value(Config::default())
+                            .ok()
+                            .map(lowercase_keys)
+                    });
+                    let baseline_yaml = baseline_json.and_then(|v| serde_yaml::to_value(v).ok());
+                    if let serde_yaml::Value::Mapping(cur_map) = current_yaml {
+                        update_yaml_mapping(
+                            &mut target_map,
+                            &cur_map,
+                            baseline_yaml
+                                .as_ref()
+                                .and_then(serde_yaml::Value::as_mapping),
+                        );
+                        serde_yaml::to_string(&serde_yaml::Value::Mapping(target_map))?
+                    } else {
+                        serde_yaml::to_string(self)?
+                    }
+                }
+                _ => serde_yaml::to_string(self)?,
+            }
+        } else {
+            serde_yaml::to_string(self)?
+        };
+        save_bytes(target_path, text.as_bytes())
+    }
+}
+
+fn find_yaml_key_ci(
+    map: &serde_yaml::Mapping,
+    needle: &serde_yaml::Value,
+) -> Option<serde_yaml::Value> {
+    let needle_str = needle.as_str()?;
+    for (k, _) in map {
+        if k.as_str()
+            .is_some_and(|s| s.eq_ignore_ascii_case(needle_str))
+        {
+            return Some(k.clone());
+        }
+    }
+    None
+}
+
+fn find_yaml_val_ci<'a>(
+    map: &'a serde_yaml::Mapping,
+    needle: &serde_yaml::Value,
+) -> Option<&'a serde_yaml::Value> {
+    let needle_str = needle.as_str()?;
+    for (k, v) in map {
+        if k.as_str()
+            .is_some_and(|s| s.eq_ignore_ascii_case(needle_str))
+        {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn update_yaml_mapping(
+    target: &mut serde_yaml::Mapping,
+    current: &serde_yaml::Mapping,
+    baseline: Option<&serde_yaml::Mapping>,
+) {
+    for (key, cur_val) in current {
+        let base_val = baseline.and_then(|b| find_yaml_val_ci(b, key));
+        match cur_val {
+            serde_yaml::Value::Mapping(cur_sub) => {
+                if let Some(existing_key) = find_yaml_key_ci(target, key) {
+                    if let Some(serde_yaml::Value::Mapping(target_sub)) =
+                        target.get_mut(&existing_key)
+                    {
+                        update_yaml_mapping(
+                            target_sub,
+                            cur_sub,
+                            base_val.and_then(serde_yaml::Value::as_mapping),
+                        );
+                    } else {
+                        target.insert(existing_key, cur_val.clone());
+                    }
+                } else {
+                    let mut sub_target = serde_yaml::Mapping::new();
+                    update_yaml_mapping(
+                        &mut sub_target,
+                        cur_sub,
+                        base_val.and_then(serde_yaml::Value::as_mapping),
+                    );
+                    if !sub_target.is_empty() {
+                        target.insert(key.clone(), serde_yaml::Value::Mapping(sub_target));
+                    }
+                }
+            }
+            _ => {
+                if let Some(existing_key) = find_yaml_key_ci(target, key) {
+                    target.insert(existing_key, cur_val.clone());
+                } else if base_val != Some(cur_val) {
+                    target.insert(key.clone(), cur_val.clone());
+                }
+            }
+        }
     }
 }
 
@@ -709,17 +866,19 @@ fn replace_blocked(err: &anyhow::Error) -> bool {
 }
 
 fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let parent = path.parent().filter(|dir| !dir.as_os_str().is_empty());
     let temp = match parent {
         Some(dir) => dir.join(format!(
-            ".{}.tmp.{}",
+            ".{}.tmp.{}.{seq}",
             path.file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("config"),
             std::process::id()
         )),
         None => std::path::PathBuf::from(format!(
-            ".{}.tmp.{}",
+            ".{}.tmp.{}.{seq}",
             path.file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("config"),
@@ -1364,6 +1523,82 @@ mod tests {
         );
         let reloaded = load_locked(path.to_str().unwrap()).unwrap();
         assert_eq!(reloaded.site.brand, "三太子监控");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_gap_zero_persists_and_incremental_save_avoids_baking_untouched_env() {
+        let dir = std::env::temp_dir().join(format!(
+            "santaizi-cfg-inc-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dashboard.yaml");
+        std::fs::write(
+            &path,
+            "mode: primary\ndebug: true\noauth2:\n  type: mock\n  admin: dev\n",
+        )
+        .unwrap();
+
+        let guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let prev_port = std::env::var("SANTAIZI_HTTPPORT").ok();
+        unsafe { std::env::set_var("SANTAIZI_HTTPPORT", "18080") };
+        let mut conf = Config::load(path.to_str().unwrap()).unwrap();
+        assert_eq!(conf.http_port, 18080);
+        assert_eq!(conf.offline_merge_gap_seconds, 10, "缺省时默认 10");
+
+        // 校验默认脚本源指向。
+        assert!(
+            conf.install_script
+                .linux_rust
+                .contains("santaizi-group/santaizi-dashboard-rs/main/script/install_agent_rs.sh")
+        );
+        assert!(
+            conf.install_script
+                .upgrade_linux
+                .contains("santaizi-group/santaizi-dashboard-rs/main/script/upgrade_agent.sh")
+        );
+        assert!(
+            conf.install_script
+                .upgrade_linux_en
+                .contains("santaizi-group/santaizi-dashboard-rs/main/script/upgrade_agent_en.sh")
+        );
+        assert!(
+            conf.install_script
+                .linux
+                .contains("santanzi-dashboard/main/script/install_agent.sh")
+        );
+
+        // 后台修改 merge_gap=0 与品牌名，未触碰 httpport。
+        conf.offline_merge_gap_seconds = 0;
+        conf.apply_defaults();
+        assert_eq!(conf.offline_merge_gap_seconds, 0);
+        conf.site.brand = "增量保存测试".into();
+        conf.save().unwrap();
+
+        let raw_after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw_after.contains("18080"),
+            "未改动的 SANTAIZI_HTTPPORT 不得被固化进 YAML:\n{raw_after}"
+        );
+        assert!(
+            raw_after.contains("offlinemergegapseconds: 0"),
+            "merge_gap=0 应写入 YAML:\n{raw_after}"
+        );
+
+        match prev_port {
+            Some(v) => unsafe { std::env::set_var("SANTAIZI_HTTPPORT", v) },
+            None => unsafe { std::env::remove_var("SANTAIZI_HTTPPORT") },
+        }
+        let reloaded = Config::load(path.to_str().unwrap()).unwrap();
+        drop(guard);
+        assert_eq!(reloaded.offline_merge_gap_seconds, 0, "重启加载后保持 0");
+        assert_eq!(reloaded.site.brand, "增量保存测试");
+        assert_eq!(reloaded.http_port, 80, "移除 env 后恢复默认端口 80");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
