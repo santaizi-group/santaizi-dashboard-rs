@@ -269,8 +269,27 @@ apply_compose_image_flags() {
         artifact_docker_load_tar "$ARTIFACT_IMAGE_TAR"
     fi
     if [ -n "$ARTIFACT_IMAGE_REF" ]; then
-        as_root compose_set_image_ref "$compose_file" "$ARTIFACT_IMAGE_REF"
+        compose_set_image_ref "$compose_file" "$ARTIFACT_IMAGE_REF"
     fi
+}
+
+extract_origin_host() {
+    origin=$1
+    rest=${origin#*://}
+    rest=${rest%%/*}
+    case "$rest" in
+        \[*\]*)
+            host=${rest#\[}
+            host=${host%%\]*}
+            printf '%s\n' "$host"
+            ;;
+        *:*)
+            printf '%s\n' "${rest%%:*}"
+            ;;
+        *)
+            printf '%s\n' "$rest"
+            ;;
+    esac
 }
 
 write_owned_file() {
@@ -289,11 +308,27 @@ write_config() {
     oauth2_clientsecret=$(yaml_escape "$OAUTH2_CLIENTSECRET")
     oauth2_endpoint=$(yaml_escape "$OAUTH2_ENDPOINT")
     site_brand=$(yaml_escape "$SITE_BRAND")
+    extra_grpc_yaml=""
+    if [ -n "$PUBLIC_ORIGIN" ]; then
+        origin_host=$(extract_origin_host "$PUBLIC_ORIGIN")
+        if [ -n "$origin_host" ]; then
+            escaped_grpchost=$(yaml_escape "$origin_host")
+            extra_grpc_yaml="grpchost: '${escaped_grpchost}'"
+        fi
+    fi
     if [ "$INSTALL_MODE" = "docker" ]; then
         # 配置挂进容器使用，端口固定容器内 80/5555，宿主端口靠 compose 映射；
-        # data_dir 写容器内路径（compose 把宿主 ./data 挂到 /var/lib/santaizi-dashboard）。
+        # 若宿主机对外 gRPC 端口非 5555，写入 proxygrpcport 供后台生成正确探针/从端连接命令。
         cfg_http_port=80
         cfg_grpc_port=5555
+        if [ -n "$GRPC_PORT" ] && [ "$GRPC_PORT" != "5555" ]; then
+            if [ -n "$extra_grpc_yaml" ]; then
+                extra_grpc_yaml="${extra_grpc_yaml}
+proxygrpcport: ${GRPC_PORT}"
+            else
+                extra_grpc_yaml="proxygrpcport: ${GRPC_PORT}"
+            fi
+        fi
         escaped_data=$(yaml_escape "/var/lib/santaizi-dashboard")
     else
         cfg_http_port=$WEB_PORT
@@ -302,12 +337,23 @@ write_config() {
     fi
     # 数据目录与配置放一块；docker 形态它就是 compose 的 ./data 挂载源。
     as_root mkdir -p "$SANTAIZI_DASHBOARD_DATA"
+    if as_root test -f "$SANTAIZI_DASHBOARD_YAML"; then
+        info "备份现有配置文件到 ${SANTAIZI_DASHBOARD_YAML}.bak"
+        as_root cp "$SANTAIZI_DASHBOARD_YAML" "${SANTAIZI_DASHBOARD_YAML}.bak"
+        as_root chmod 0600 "${SANTAIZI_DASHBOARD_YAML}.bak"
+    fi
     tmp=$(mktemp)
-    cat > "$tmp" <<EOF
+    {
+        cat <<EOF
 mode: primary
 debug: false
 httpport: ${cfg_http_port}
 grpcport: ${cfg_grpc_port}
+EOF
+        if [ -n "$extra_grpc_yaml" ]; then
+            printf '%s\n' "$extra_grpc_yaml"
+        fi
+        cat <<EOF
 language: zh-CN
 # 回调路径固定 /oauth2/callback，须与浏览器地址栏的协议和域名一致，不要只填首页。
 # 反向代理须转发 /oauth2，并带上 Host 与 X-Forwarded-Proto，否则回调会被拼成 http。
@@ -325,6 +371,7 @@ web:
 telemetry:
   data_dir: '${escaped_data}'
 EOF
+    } > "$tmp"
     write_owned_file "$SANTAIZI_DASHBOARD_YAML" "$tmp" 0600
 }
 

@@ -91,6 +91,23 @@ sudo() {
     fi
 }
 
+as_root() {
+    if [ "$PARSE_ONLY" = 1 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+write_owned_file() {
+    dest=$1
+    src=$2
+    mode=$3
+    as_root mkdir -p "$(dirname "$dest")"
+    as_root mv "$src" "$dest"
+    as_root chmod "$mode" "$dest"
+}
+
 yaml_escape() {
     printf "%s" "$1" | sed "s/'/''/g"
 }
@@ -346,7 +363,7 @@ run_compose() {
 find_compose_file() {
     dir=$1
     for name in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
-        if [ -f "${dir}/${name}" ]; then
+        if as_root test -f "${dir}/${name}"; then
             printf "%s\n" "${dir}/${name}"
             return 0
         fi
@@ -355,11 +372,11 @@ find_compose_file() {
 }
 
 is_collector_config() {
-    grep -Eq '^[[:space:]]*mode:[[:space:]]*collector[[:space:]]*$' "$1"
+    as_root grep -Eq '^[[:space:]]*mode:[[:space:]]*collector[[:space:]]*$' "$1"
 }
 
 compose_image() {
-    grep -E '^[[:space:]]*image:' "$1" | head -n 1 | awk '{print $2}' | tr -d "\"'"
+    as_root grep -E '^[[:space:]]*image:' "$1" | head -n 1 | awk '{print $2}' | tr -d "\"'"
 }
 
 image_impl_from_string() {
@@ -374,7 +391,7 @@ compose_impl_if_collector() {
     dir=$1
     compose=$(find_compose_file "$dir") || return 1
     config="${dir}/config/dashboard.yaml"
-    if [ ! -f "$config" ]; then
+    if ! as_root test -f "$config"; then
         return 1
     fi
     if ! is_collector_config "$config"; then
@@ -398,7 +415,7 @@ refuse_go_tree_in_work_dir() {
 guard_before_install_or_upgrade() {
     refuse_go_tree_in_work_dir
     config="${WORK_DIR}/config/dashboard.yaml"
-    if [ -f "$config" ]; then
+    if as_root test -f "$config"; then
         return 0
     fi
     if [ -z "$REGISTRATION_TOKEN" ]; then
@@ -517,14 +534,15 @@ pull_and_recreate() {
 }
 
 write_compose() {
-    mkdir -p "$1"
+    as_root mkdir -p "$1"
     detect_host_nexttrace
     nexttrace_volume=""
     nexttrace_env=""
     if [ -n "$NT_HOST_BIN" ]; then
         nexttrace_volume="      - ${NT_HOST_BIN}:/opt/nexttrace/nexttrace:ro"
     fi
-    cat > "$1/docker-compose.yml" <<EOF
+    tmp=$(mktemp) || exit 1
+    cat > "$tmp" <<EOF
 services:
   ${CONTAINER_NAME}:
     image: $(collector_image_ref)
@@ -544,10 +562,11 @@ ${nexttrace_env}
     cap_add:
       - NET_RAW
 EOF
+    write_owned_file "$1/docker-compose.yml" "$tmp" 0644
 }
 
 write_config() {
-    mkdir -p "$1/data/pki" "$1/config"
+    as_root mkdir -p "$1/data/pki" "$1/config"
     endpoint=$(yaml_escape "$PRIMARY_ENDPOINT")
     token=$(yaml_escape "$REGISTRATION_TOKEN")
     detect_host_nexttrace
@@ -555,7 +574,8 @@ write_config() {
     if [ -n "$NT_HOST_BIN" ]; then
         nexttrace_yaml="  nexttrace_path: /opt/nexttrace/nexttrace"
     fi
-    cat > "$1/config/dashboard.yaml" <<EOF
+    tmp=$(mktemp) || exit 1
+    cat > "$tmp" <<EOF
 mode: collector
 debug: false
 language: zh-CN
@@ -577,7 +597,7 @@ grpc_tls:
   require_agent_mtls: false
   require_collector_mtls: false
 EOF
-    chmod 600 "$1/config/dashboard.yaml"
+    write_owned_file "$1/config/dashboard.yaml" "$tmp" 0600
 }
 
 main() {
@@ -604,7 +624,7 @@ main() {
             exit 1
         fi
         guard_before_install_or_upgrade
-        if ! mkdir -p "$WORK_DIR"; then
+        if ! as_root mkdir -p "$WORK_DIR"; then
             err "创建工作目录失败: $WORK_DIR"
             exit 1
         fi
@@ -625,7 +645,7 @@ main() {
 
     guard_before_install_or_upgrade
 
-    if ! mkdir -p "$WORK_DIR"; then
+    if ! as_root mkdir -p "$WORK_DIR"; then
         err "创建工作目录失败: $WORK_DIR"
         exit 1
     fi
@@ -636,7 +656,7 @@ main() {
 
     config="${WORK_DIR}/config/dashboard.yaml"
 
-    if [ -f "$config" ]; then
+    if as_root test -f "$config"; then
         if ! is_collector_config "$config"; then
             err "已有配置不是从端（mode: collector），拒绝继续。"
             exit 1
@@ -653,8 +673,8 @@ main() {
                 exit 1
             fi
             info "检测到已安装从端，将备份并重写配置后升级镜像。"
-            cp "$config" "${config}.bak"
-            chmod 600 "${config}.bak"
+            as_root cp "$config" "${config}.bak"
+            as_root chmod 0600 "${config}.bak"
             write_compose "$WORK_DIR"
             write_config "$WORK_DIR"
             compose="${WORK_DIR}/docker-compose.yml"

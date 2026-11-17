@@ -336,11 +336,19 @@ artifact_verify_agent_rs() {
     exit 1
 }
 
+_artifact_as_root() {
+    if [ "${PARSE_ONLY:-0}" = 1 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
 compose_set_image_tag() {
     file=$1
     tag=$2
-    tmp="${file}.tmp.$$"
-    if ! sed -e "s|^\\([[:space:]]*image:[[:space:]]*.*\\):[^:[:space:]]*[[:space:]]*$|\\1:${tag}|" "$file" > "$tmp"; then
+    tmp=$(mktemp) || return 1
+    if ! _artifact_as_root cat "$file" | sed -e "s|^\\([[:space:]]*image:[[:space:]]*.*\\):[^:[:space:]]*[[:space:]]*$|\\1:${tag}|" > "$tmp"; then
         rm -f "$tmp"
         err "更新 compose 镜像标签失败。"
         return 1
@@ -350,16 +358,20 @@ compose_set_image_tag() {
         err "未能在 compose 中写入镜像标签: ${tag}"
         return 1
     fi
-    mv "$tmp" "$file"
+    if ! _artifact_as_root mv "$tmp" "$file" || ! _artifact_as_root chmod 0644 "$file"; then
+        rm -f "$tmp"
+        err "写入 compose 文件失败: ${file}"
+        return 1
+    fi
     return 0
 }
 
 compose_set_image_ref() {
     file=$1
     ref=$2
-    tmp="${file}.tmp.$$"
+    tmp=$(mktemp) || return 1
     escaped=$(printf '%s' "$ref" | sed 's/[&/\]/\\&/g')
-    if ! sed -e "s|^[[:space:]]*image:.*|    image: ${escaped}|" "$file" > "$tmp"; then
+    if ! _artifact_as_root cat "$file" | sed -e "s|^[[:space:]]*image:.*|    image: ${escaped}|" > "$tmp"; then
         rm -f "$tmp"
         err "更新 compose 镜像引用失败。"
         return 1
@@ -369,7 +381,11 @@ compose_set_image_ref() {
         err "未能在 compose 中写入镜像: ${ref}"
         return 1
     fi
-    mv "$tmp" "$file"
+    if ! _artifact_as_root mv "$tmp" "$file" || ! _artifact_as_root chmod 0644 "$file"; then
+        rm -f "$tmp"
+        err "写入 compose 文件失败: ${file}"
+        return 1
+    fi
     return 0
 }
 
@@ -380,7 +396,7 @@ artifact_docker_load_tar() {
         return 1
     fi
     info "正在加载镜像: ${tarpath} ..."
-    if ! docker load -i "$tarpath"; then
+    if ! _artifact_as_root docker load -i "$tarpath"; then
         err "docker load 失败。"
         return 1
     fi
