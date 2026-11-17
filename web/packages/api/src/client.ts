@@ -5,7 +5,7 @@ import type {
   CollectorInstallPreview, CollectorInstallPreviewWriteBody, CollectorScopeWriteBody, CollectorToken, CollectorWriteBody, ConnectionLatencyBucket, ConnectionPath, ConnectionSummary, DDNSProfile, DDNSProfileWriteBody, DDNSProvider,
   GetProbeTraceParams, GetProbeRouteParams, IncidentRecord, IncidentRevisionRecord, InstallPreview, InstallPreviewWriteBody, ListConnectionLatencyParams, ListProbePathsParams, ListProbeSamplesParams, Monitor, MonitorWriteBody, NATTunnel,
   NATTunnelWriteBody, NotificationChannel, NotificationChannelWriteBody, ObserverAssignmentRecord,
-  ProbeCapabilities, ProbePath, ProbeRouteHistory, ProbeRouteJob, ProbeRouteWrite, ProbeSampleBucket, ProbeSummary, ProbeTrace, ServerBackup, ServerCredential, ServerDisplayIndexWriteBody, ServerGroup,
+  ProbeCapabilities, ProbePath, ProbeRouteDispatch, ProbeRouteHistory, ProbeRouteWrite, ProbeSampleBucket, ProbeSummary, ProbeTrace, ServerBackup, ServerCredential, ServerDisplayIndexWriteBody, ServerGroup,
   ServerGroupRenameWriteBody, ServerImportPreview, ServerImportResult, ServerImportWrite, ServerWriteBody, ScriptCommands, TelemetryAlertRecord, TelemetryDataLossRecord, TrafficPolicy,
   TrafficPolicyHistory, TrafficPolicyWriteBody, TrafficUsage, UpgradePreview, UpgradePreviewWriteBody,
   CycleTransfer, GetPublicMetricsParams, GetPublicServerAvailabilityParams, GetServerTrafficHistoryParams, MonitorHistory, PublicAvailability, PublicMetricPoint,
@@ -112,7 +112,7 @@ export const listProbePaths = (params: ListProbePathsParams = {}) => api.listPro
 export const listProbeSamples = (params: ListProbeSamplesParams = {}) => api.listProbeSamples(params).then(value => list<ProbeSampleBucket>(value))
 export const getProbeTrace = (params: GetProbeTraceParams) => api.getProbeTrace(params).then(value => data<ProbeTrace | null>(value))
 export const getProbeRoute = (params: GetProbeRouteParams) => api.getProbeRoute(params).then(value => data<ProbeRouteHistory | null>(value))
-export const createProbeRoute = (body: ProbeRouteWrite) => api.createProbeRoute(body).then(value => data<ProbeRouteJob>(value))
+export const createProbeRoute = (body: ProbeRouteWrite) => api.createProbeRoute(body).then(value => data<ProbeRouteDispatch>(value))
 export const createCollector = (body: CollectorWriteBody) => api.createCollector(body).then(value => data<CollectorCreated>(value))
 export const updateCollector = (id: string, body: CollectorWriteBody) => api.updateCollector(id, body).then(value => data<CollectorRecord>(value))
 export const updateCollectorScope = (id: string, body: CollectorScopeWriteBody) => api.updateCollectorScope(id, body).then(value => data<CollectorRecord>(value))

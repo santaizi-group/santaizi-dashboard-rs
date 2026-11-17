@@ -2,9 +2,10 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { AppDrawer, AppEmpty } from '@santaizi/ui'
 import type { ProbePath } from '@santaizi/api'
-import { listCollectors, listProbePaths, type CollectorRecord } from '@/api/adminApi'
+import { createProbeRoute, listCollectors, listProbePaths, type CollectorRecord } from '@/api/adminApi'
 import CopyableId from '@/components/CopyableId.vue'
 import ProbePathDialog from '@/components/ProbePathDialog.vue'
 import { formatAdminValue, formatClockTime, formatDateTime, formatProductVersion } from '@/composables/format'
@@ -19,12 +20,15 @@ import {
   uniqueNodeTags,
 } from '@/domain/nodeCatalog'
 import {
+  filterTraceableProbeServerIds,
+  probeGroupProtocolEnabled,
   probeHasNoTarget,
   probeICMPMetric,
   probeMTRMetric,
   probePathKey,
   probeTCPMetric,
   probeTargetText,
+  type ProbeRouteProtocol,
 } from '@/domain/probePath'
 
 const { t, te, locale } = useI18n()
@@ -159,6 +163,36 @@ function openProbe(row: ProbePath) {
   probeDialog.value = true
 }
 
+const traceBusy = ref('')
+
+function groupProtocolOn(row: CollectorRecord, protocol: ProbeRouteProtocol) {
+  return probeGroupProtocolEnabled(row, protocol)
+}
+
+function groupTraceTargets(group: { paths: ProbePath[] }, protocol: ProbeRouteProtocol) {
+  return filterTraceableProbeServerIds(group.paths, protocol)
+}
+
+async function runGroupTrace(group: { collector: CollectorRecord; paths: ProbePath[] }, protocol: ProbeRouteProtocol) {
+  const serverIds = groupTraceTargets(group, protocol)
+  if (!serverIds.length) {
+    ElMessage.warning(t('probeRouteGroupNone'))
+    return
+  }
+  const key = `${group.collector.id}:${protocol}`
+  traceBusy.value = key
+  try {
+    const result = await createProbeRoute({ collector_id: group.collector.id, server_ids: serverIds, protocol })
+    const enqueued = result?.enqueued ?? 0
+    const reused = result?.reused ?? 0
+    ElMessage.success(`${t('probeRouteGroupDone', { n: enqueued })}${reused ? t('probeRouteGroupReused', { n: reused }) : ''}`)
+  } catch (error) {
+    notifyAPIError(error, t as never, te)
+  } finally {
+    traceBusy.value = ''
+  }
+}
+
 async function load(quiet = false) {
   if (inflight) return
   inflight = true
@@ -170,6 +204,15 @@ async function load(quiet = false) {
     ])
     collectors.value = collectorList.data
     probePaths.value = probeList.data
+    if (activeCollector.value) {
+      const latestCollector = collectorList.data.find(row => row.id === activeCollector.value?.id)
+      if (latestCollector) activeCollector.value = latestCollector
+    }
+    if (activeProbe.value) {
+      const currentKey = probePathKey(activeProbe.value)
+      const latestProbe = probeList.data.find(row => probePathKey(row) === currentKey)
+      if (latestProbe) activeProbe.value = latestProbe
+    }
   } catch (error) {
     notifyAPIError(error, t as never, te)
   } finally {
@@ -250,6 +293,24 @@ onUnmounted(() => {
           <span>{{ collectorVersionText(group.collector) }}</span>
         </div>
       </article>
+      <div class="probe-group-actions">
+        <el-button
+          size="small"
+          :disabled="!groupProtocolOn(group.collector, 'icmp') || traceBusy === group.collector.id + ':icmp'"
+          :loading="traceBusy === group.collector.id + ':icmp'"
+          @click="runGroupTrace(group, 'icmp')"
+        >
+          <i class="ri-route-line"></i>{{ t('probeRouteGroupIcmp') }}
+        </el-button>
+        <el-button
+          size="small"
+          :disabled="!groupProtocolOn(group.collector, 'tcp') || traceBusy === group.collector.id + ':tcp'"
+          :loading="traceBusy === group.collector.id + ':tcp'"
+          @click="runGroupTrace(group, 'tcp')"
+        >
+          <i class="ri-route-line"></i>{{ t('probeRouteGroupTcp') }}
+        </el-button>
+      </div>
       <div class="probe-card-grid">
         <AppEmpty v-if="!group.paths.length" class="empty-state" icon="ri-radar-line" :title="t('noProbePathsTitle')" :description="t('noProbePathsHint')" />
         <button

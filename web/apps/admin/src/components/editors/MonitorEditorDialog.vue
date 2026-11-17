@@ -34,6 +34,27 @@ function clampNumber(value: unknown, min: number, max?: number, fallback = min) 
   return Math.min(max, Math.max(min, next))
 }
 
+const latencyRule = {
+  validator: (_rule: unknown, _value: unknown, callback: (error?: Error) => void) => {
+    if (!form.latency_notify) {
+      callback()
+      return
+    }
+    const min = Math.max(0, Number(form.min_latency_ms) || 0)
+    const max = Math.max(0, Number(form.max_latency_ms) || 0)
+    if (min <= 0 && max <= 0) {
+      callback(new Error(t('latencyThresholdRequired')))
+      return
+    }
+    if (min > 0 && max > 0 && min > max) {
+      callback(new Error(t('latencyThresholdOrderInvalid')))
+      return
+    }
+    callback()
+  },
+  trigger: 'blur',
+}
+
 function reset(value?: MonitorRecord) {
   Object.assign(form, {
     id: value?.id || 0, name: value?.name || '', type: value?.type || 'http', target: value?.target || '',
@@ -54,17 +75,28 @@ async function loadOptions() {
   } catch (error) { notifyAPIError(error, t as never, te) }
 }
 async function submit() {
-  // Element Plus 的 `validate()` 校验不过会 **reject**。放在 try 外面会变成
-  // 未处理的 promise rejection，且绕过 finally。这里转成布尔值：
-  // 校验失败静默返回（Element Plus 已在字段上标红，不需要再弹消息），
-  // 只有真正的 API 失败才走 notifyAPIError。
   const formValid = await formRef.value?.validate().then(() => true, () => false)
   if (!formValid) return
+  const minLatency = clampNumber(form.min_latency_ms, 0, undefined, 0)
+  const maxLatency = clampNumber(form.max_latency_ms, 0, undefined, 0)
+  if (form.latency_notify) {
+    if (minLatency <= 0 && maxLatency <= 0) {
+      ElMessage.warning(t('latencyThresholdRequired'))
+      return
+    }
+    if (minLatency > 0 && maxLatency > 0 && minLatency > maxLatency) {
+      ElMessage.warning(t('latencyThresholdOrderInvalid'))
+      return
+    }
+  }
   saving.value = true
   try {
     const { id: _id, ...write } = form
     const payload = {
       ...write,
+      interval_seconds: clampNumber(form.interval_seconds, 5, 86400, 30),
+      min_latency_ms: minLatency,
+      max_latency_ms: maxLatency,
       scope: { mode: scopeMode.value, server_ids: scopeMode.value === 'all' ? [] : [...scopeServers.value] },
     }
     if (form.id) await updateMonitor(form.id, payload)
@@ -90,12 +122,17 @@ watch(() => props.modelValue, value => { if (value) { reset(props.value); void l
         <el-form-item :label="t('showOnServicePage')"><el-switch v-model="form.show_in_service" /></el-form-item>
       </div>
       <div class="editor-section">
-        <div class="editor-section-title"><h3>{{ t('notificationSettings') }}</h3><el-switch v-model="form.notify" /></div>
+        <div class="editor-section-title"><h3>{{ t('notificationSettings') }}</h3></div>
         <div class="editor-grid">
-          <el-form-item :label="t('notificationGroup')"><el-select v-model="form.notification_tag" filterable allow-create default-first-option class="field-full"><el-option v-for="group in groups" :key="group" :label="group" :value="group"/></el-select></el-form-item>
-          <el-form-item :label="t('latencyAlert')"><el-switch v-model="form.latency_notify" /></el-form-item>
-          <el-form-item v-if="form.latency_notify" :label="t('minimumLatencyMs')"><el-input v-model.number="form.min_latency_ms" inputmode="numeric" class="field-full" @blur="form.min_latency_ms = clampNumber(form.min_latency_ms, 0, undefined, 0)" /></el-form-item>
-          <el-form-item v-if="form.latency_notify" :label="t('maximumLatencyMs')"><el-input v-model.number="form.max_latency_ms" inputmode="numeric" class="field-full" @blur="form.max_latency_ms = clampNumber(form.max_latency_ms, 0, undefined, 0)" /></el-form-item>
+          <el-form-item class="span-2" :label="t('notificationGroup')"><el-select v-model="form.notification_tag" filterable allow-create default-first-option class="field-full"><el-option v-for="group in groups" :key="group" :label="group" :value="group"/></el-select></el-form-item>
+        </div>
+        <div class="switch-grid">
+          <label><span>{{ t('failureAlert') }}</span><el-switch v-model="form.notify" /></label>
+          <label><span>{{ t('latencyAlert') }}</span><el-switch v-model="form.latency_notify" /></label>
+        </div>
+        <div v-if="form.latency_notify" class="editor-grid">
+          <el-form-item :label="t('minimumLatencyMs')" prop="min_latency_ms" :rules="[latencyRule]"><el-input v-model.number="form.min_latency_ms" inputmode="numeric" class="field-full" @blur="form.min_latency_ms = clampNumber(form.min_latency_ms, 0, undefined, 0)" /></el-form-item>
+          <el-form-item :label="t('maximumLatencyMs')" prop="max_latency_ms" :rules="[latencyRule]"><el-input v-model.number="form.max_latency_ms" inputmode="numeric" class="field-full" @blur="form.max_latency_ms = clampNumber(form.max_latency_ms, 0, undefined, 0)" /></el-form-item>
         </div>
       </div>
       <div class="editor-section">

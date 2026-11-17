@@ -13,6 +13,9 @@ export interface ProbeRouteWrite {
   /** @minLength 1 */
   collector_id: string;
   /** @minimum 1 */
-  server_id: number;
+  server_id?: number;
+  /** @minItems 1
+   *   @maxItems 200 */
+  server_ids?: number[];
   protocol: ProbeRouteWriteProtocol;
 }

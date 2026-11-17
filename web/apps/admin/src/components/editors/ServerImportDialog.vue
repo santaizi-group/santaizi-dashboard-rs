@@ -16,7 +16,9 @@ const emit = defineEmits<{ 'update:modelValue': [boolean]; applied: [] }>()
 const { t, te } = useI18n()
 const saving = ref(false)
 const actions = reactive<Record<number, ServerImportAction>>({})
-const dirty = computed(() => props.modelValue && props.items.length >= 0)
+const dirty = computed(() =>
+  props.modelValue && props.items.some(row => (actions[row.index] ?? row.suggested_action) !== row.suggested_action),
+)
 
 const changeLabels: Record<string, string> = {
   tag: 'group',
@@ -42,10 +44,13 @@ const matchLabels: Record<string, string> = {
   ambiguous: 'importMatchAmbiguous',
 }
 
-watch(() => props.items, rows => {
+function resetActions(rows: ServerImportPreviewItem[]) {
   for (const key of Object.keys(actions)) delete actions[Number(key)]
   for (const row of rows) actions[row.index] = row.suggested_action
-}, { immediate: true })
+}
+
+watch(() => props.items, resetActions, { immediate: true })
+watch(() => props.modelValue, open => { if (open) resetActions(props.items) })
 
 function allows(row: ServerImportPreviewItem, action: ServerImportAction) {
   return row.allowed_actions.includes(action)

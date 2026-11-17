@@ -98,6 +98,8 @@ import type {
   ObserverAssignmentListResponseResponse,
   ProbeCapabilitiesResponseResponse,
   ProbePathListResponseResponse,
+  ProbeRouteDispatch,
+  ProbeRouteDispatchProtocol,
   ProbeRouteJobResponseResponse,
   ProbeRouteResponseResponse,
   ProbeRouteWrite,

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { CollectorRecord, ServerRecord } from '@santaizi/api'
 import type { ConnectionPath } from '@santaizi/api'
 import { DEFAULT_VIEW } from '@santaizi/geo'
-import { allMarkers, buildTopology, layoutSite, primaryLatencyRows, siteClusterRadius, siteOffsets, visibleLinks } from './topology'
+import { allMarkers, buildTopology, findNodeMarker, layoutSite, markerMatchesLatencyRow, primaryLatencyRows, siteClusterRadius, siteOffsets, visibleLinks } from './topology'
 
 function server(id: number, name: string, extra: { country?: string; note?: Record<string, unknown>; online?: boolean; telemetry?: ServerRecord['telemetry'] } = {}): ServerRecord {
   return {
@@ -282,5 +282,24 @@ describe('probe collectors', () => {
     expect(graph.collectors.map(item => item.id)).toEqual(['c1'])
     expect(graph.collectorsTotal).toBe(1)
     expect(graph.links.some(link => link.fromId === 'p1' || link.toId === 'p1')).toBe(false)
+  })
+
+  it('matches latency rows by unique server ID instead of colliding on duplicate names', () => {
+    const graph = buildTopology({
+      servers: [
+        server(1, 'edge', { country: 'JP' }),
+        server(2, 'edge', { country: 'DE' }),
+        server(3, 'edge'),
+      ],
+      collectors: [],
+      paths: [],
+    })
+    const jpMarker = findNodeMarker(graph.nodes, { id: '1', name: 'edge' })
+    const deMarker = findNodeMarker(graph.nodes, { id: '2', name: 'edge' })
+    const unlocatedMarker = findNodeMarker(graph.nodes, { id: '3', name: 'edge' })
+    expect(jpMarker?.id).not.toBe(deMarker?.id)
+    expect(unlocatedMarker).toBeUndefined()
+    expect(markerMatchesLatencyRow(deMarker!, { id: '2', name: 'edge' })).toBe(true)
+    expect(markerMatchesLatencyRow(deMarker!, { id: '1', name: 'edge' })).toBe(false)
   })
 })

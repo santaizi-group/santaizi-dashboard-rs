@@ -11,7 +11,15 @@ import logoUrl from '@/assets/logo.svg?url'
 import { formatAdminValue, formatLatencyMs } from '@/composables/format'
 import { notifyAPIError } from '@/composables/notify'
 import { missedObserverText, type ObserverSight } from '@/domain/incidents'
-import { buildTopology, primaryLatencyRows, type NodeLatencyRow, type TopologyGraph, type TopologyMarker } from '@/domain/topology'
+import {
+  buildTopology,
+  findNodeMarker,
+  markerMatchesLatencyRow,
+  primaryLatencyRows,
+  type NodeLatencyRow,
+  type TopologyGraph,
+  type TopologyMarker,
+} from '@/domain/topology'
 
 const { t, te, locale } = useI18n()
 const router = useRouter()
@@ -23,6 +31,7 @@ const paths = ref<ConnectionPath[]>([])
 const primaryLocation = ref('')
 const siteTitle = ref('')
 const highlightId = ref('')
+const selectedServerId = ref('')
 const incidentsOpen = ref(false)
 const incidentsLoading = ref(false)
 const incidentRows = ref<IncidentRecord[]>([])
@@ -68,9 +77,6 @@ async function openIncidents() {
   incidentsLoading.value = true
   incidentRows.value = []
   try {
-    // `open` 的契约类型是 boolean（ListIncidentsParams）。传 1 能跑是因为
-    // `ResourceQuery` 的索引签名不拦数字，且后端同时收 "1"/"true"；
-    // 一旦后端收紧成只认 "true"，这里就会静默返回全部事件而不是未结束的。
     const result = await telemetryList('incidents', { page: 1, page_size: 100, open: true })
     incidentRows.value = result.data as IncidentRecord[]
   } catch (error) {
@@ -82,23 +88,35 @@ async function openIncidents() {
 }
 
 function selectMarker(marker: TopologyMarker) {
+  selectedServerId.value = ''
   highlightId.value = marker.id
   if (marker.href) void router.push(marker.href)
 }
 
 function clearHighlight() {
+  selectedServerId.value = ''
   highlightId.value = ''
 }
 
-function selectLatency(name: string) {
-  const marker = graph.value.nodes.find(item => item.names.includes(name))
-  if (!marker) return
-  highlightId.value = highlightId.value === marker.id ? '' : marker.id
+function selectLatency(row: NodeLatencyRow) {
+  const marker = findNodeMarker(graph.value.nodes, row)
+  if (!marker) {
+    highlightId.value = ''
+    selectedServerId.value = selectedServerId.value === row.id ? '' : row.id
+    return
+  }
+  if (selectedServerId.value === row.id) {
+    clearHighlight()
+    return
+  }
+  selectedServerId.value = row.id
+  highlightId.value = marker.id
 }
 
 function isLatencyActive(row: NodeLatencyRow) {
+  if (selectedServerId.value) return row.id === selectedServerId.value
   if (!highlightId.value) return false
-  return graph.value.nodes.some(item => item.id === highlightId.value && item.names.includes(row.name))
+  return graph.value.nodes.some(item => item.id === highlightId.value && markerMatchesLatencyRow(item, row))
 }
 
 async function load() {
@@ -153,7 +171,7 @@ onMounted(load)
             <RouterLink to="/servers?create=1"><i class="ri-add-circle-line"></i><span>{{ t('createServer') }}</span></RouterLink>
             <RouterLink to="/telemetry?create=1"><i class="ri-radar-line"></i><span>{{ t('createCollector') }}</span></RouterLink>
             <RouterLink to="/services?create=1"><i class="ri-heart-pulse-line"></i><span>{{ t('createMonitor') }}</span></RouterLink>
-            <RouterLink to="/api-tokens"><i class="ri-key-2-line"></i><span>{{ t('issueToken') }}</span></RouterLink>
+            <RouterLink to="/api-tokens?create=1"><i class="ri-key-2-line"></i><span>{{ t('issueToken') }}</span></RouterLink>
           </div>
         </div>
       </div>
@@ -192,7 +210,7 @@ onMounted(load)
           <div class="section-title">
             <div><h2>{{ t('nodeLatency') }}</h2></div>
             <div class="latency-panel__actions">
-              <button v-if="highlightId" type="button" class="latency-reset" @click="clearHighlight">
+              <button v-if="highlightId || selectedServerId" type="button" class="latency-reset" @click="clearHighlight">
                 <i class="ri-close-line"></i>{{ t('reset') }}
               </button>
               <RouterLink to="/connections">{{ t('details') }} <i class="ri-arrow-right-line"></i></RouterLink>
@@ -206,7 +224,7 @@ onMounted(load)
               type="button"
               class="latency-row"
               :class="{ 'is-offline': !row.online, 'is-active': isLatencyActive(row) }"
-              @click="selectLatency(row.name)"
+              @click="selectLatency(row)"
             >
               <span>{{ row.name }}</span>
               <strong>{{ row.online ? latencyText(row.rttMs) : t('offline') }}</strong>

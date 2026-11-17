@@ -7,8 +7,8 @@
  *
  * OpenAPI spec version: 2.0.0
  */
-import type { ProbeRouteJob } from './probeRouteJob';
+import type { ProbeRouteDispatch } from './probeRouteDispatch';
 
 export type ProbeRouteJobResponseResponse = {
-  data: ProbeRouteJob;
+  data: ProbeRouteDispatch;
 };

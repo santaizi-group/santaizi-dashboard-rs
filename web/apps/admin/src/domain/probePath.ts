@@ -133,6 +133,10 @@ export type ProbeHopSource = {
   hostname?: string
   geo?: string
   asn?: string
+  country?: string
+  province?: string
+  city?: string
+  owner?: string
   private?: boolean
   avg_ms?: number
   rtt_ms?: number
@@ -167,12 +171,23 @@ function finiteRtt(value: unknown): number | undefined {
   return ms
 }
 
+/**
+ * 旧行与跨版本面板可能只有拆分的地理字段而没有拼好的 `geo`；这里按
+ * 国家 · 省 · 市 · 运营商 的顺序兜底，ASN 交给 `hopGeoLine` 追加。
+ */
+function hopGeoFallback(hop: ProbeHopSource) {
+  return [hop.country, hop.province, hop.city, hop.owner]
+    .map(part => (part || '').trim())
+    .filter(Boolean)
+    .join(' · ')
+}
+
 export function normalizeProbeHops(hops?: ProbeHopSource[] | null): ProbeHopView[] {
   return (hops || []).map((hop) => ({
     ttl: hop.ttl,
     address: (hop.address || '').trim(),
     hostname: (hop.hostname || '').trim(),
-    geo: hop.geo || '',
+    geo: hop.private ? '' : (hop.geo || '').trim() || hopGeoFallback(hop),
     asn: (hop.asn || '').trim(),
     private: Boolean(hop.private),
     rttMs: finiteRtt(hop.rtt_ms ?? hop.avg_ms),
@@ -222,6 +237,32 @@ export function probeRouteChanged(
 }
 
 export type ProbeRouteProtocol = 'icmp' | 'tcp'
+
+export function probeGroupProtocolEnabled(
+  collector: { enable_icmp?: boolean; enable_tcp?: boolean; tcp_ports?: string },
+  protocol: ProbeRouteProtocol,
+): boolean {
+  if (protocol === 'icmp') return collector.enable_icmp !== false
+  if (collector.enable_tcp === false) return false
+  const rawPorts = (collector.tcp_ports || '').trim()
+  if (!rawPorts) return true
+  return rawPorts.split(',').some(port => port.trim().length > 0)
+}
+
+export function filterTraceableProbeServerIds(
+  paths: readonly ProbePath[],
+  protocol: ProbeRouteProtocol,
+): number[] {
+  const ids = new Set<number>()
+  for (const path of paths) {
+    if (probeHasNoTarget(path)) continue
+    if (!path.target?.hostname && !path.target?.ipv4 && !path.target?.ipv6) continue
+    if (protocol === 'icmp' && path.enable_icmp === false) continue
+    if (protocol === 'tcp' && path.enable_tcp === false) continue
+    ids.add(path.server_id)
+  }
+  return [...ids]
+}
 
 export function defaultProbeRouteProtocol(trace?: { icmp?: { hops?: { loss?: number }[] }; tcp?: { hops?: unknown[] } } | null): ProbeRouteProtocol {
   const icmpHops = trace?.icmp?.hops || []

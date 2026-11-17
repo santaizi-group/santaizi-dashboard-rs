@@ -3,6 +3,8 @@ import {
   normalizeProbeHops,
   hopGeoLine,
   formatHopASN,
+  probeGroupProtocolEnabled,
+  filterTraceableProbeServerIds,
   probeHopLossTone,
   probeHopRouteStats,
   probeHopRttShare,
@@ -31,6 +33,23 @@ describe('normalizeProbeHops', () => {
   it('treats empty input as no hops', () => {
     expect(normalizeProbeHops()).toEqual([])
     expect(normalizeProbeHops(null)).toEqual([])
+  })
+
+  it('falls back to country/province/city/owner when geo is missing', () => {
+    expect(normalizeProbeHops([
+      { ttl: 1, address: '10.0.0.6', private: true, country: '私网', owner: 'RFC1918' },
+      { ttl: 2, address: '203.0.113.118', country: '中国', province: '上海', city: '上海', owner: '电信', asn: '4809' },
+      { ttl: 3, address: '192.0.2.1', geo: 'ANYCAST · Cloudflare, Inc.', country: 'ANYCAST', owner: 'Cloudflare, Inc.' },
+    ]).map(hop => hop.geo)).toEqual(['', '中国 · 上海 · 上海 · 电信', 'ANYCAST · Cloudflare, Inc.'])
+  })
+
+  it('keeps asn untouched for hopGeoLine to append', () => {
+    expect(normalizeProbeHops([
+      { ttl: 1, address: '192.0.2.1', asn: ' 13335 ' },
+      { ttl: 2, address: '10.0.0.6', asn: 'RFC1918' },
+    ]).map(hop => hop.asn)).toEqual(['13335', 'RFC1918'])
+    expect(hopGeoLine({ geo: '中国 · 上海 · 电信', asn: '4809' }, '内网')).toBe('中国 · 上海 · 电信 · AS4809')
+    expect(hopGeoLine({ geo: 'ANYCAST · Cloudflare, Inc.', asn: '13335' }, '内网')).toBe('ANYCAST · Cloudflare, Inc. · AS13335')
   })
 })
 
@@ -102,5 +121,26 @@ describe('hopGeoLine', () => {
     expect(hopGeoLine({ geo: '中国 · AS4134', asn: '4134' }, '内网')).toBe('中国 · AS4134')
     expect(hopGeoLine({ private: true, asn: '4134' }, '内网')).toBe('内网')
     expect(formatHopASN('as4134')).toBe('AS4134')
+  })
+})
+
+describe('group route trace helpers', () => {
+  it('treats empty tcp_ports as enabled since backend defaults to 22,443', () => {
+    expect(probeGroupProtocolEnabled({ enable_tcp: true, tcp_ports: '' }, 'tcp')).toBe(true)
+    expect(probeGroupProtocolEnabled({ enable_tcp: undefined, tcp_ports: undefined }, 'tcp')).toBe(true)
+    expect(probeGroupProtocolEnabled({ enable_tcp: false, tcp_ports: '' }, 'tcp')).toBe(false)
+    expect(probeGroupProtocolEnabled({ enable_icmp: true }, 'icmp')).toBe(true)
+    expect(probeGroupProtocolEnabled({ enable_icmp: false }, 'icmp')).toBe(false)
+  })
+
+  it('skips paths without target or with protocol disabled on the host', () => {
+    const paths = [
+      { server_id: 1, server_name: 'a', display_index: 0, collector_id: 'c1', collector_name: 'c1', reachable: true, has_trace: false, target: { source: 'override' as const, ipv4: '1.1.1.1' }, enable_icmp: true, enable_tcp: true },
+      { server_id: 2, server_name: 'b', display_index: 0, collector_id: 'c1', collector_name: 'c1', reachable: false, has_trace: false, target: { source: 'none' as const }, enable_icmp: true, enable_tcp: true },
+      { server_id: 3, server_name: 'c', display_index: 0, collector_id: 'c1', collector_name: 'c1', reachable: true, has_trace: false, target: { source: 'host_ip' as const, ipv4: '8.8.8.8' }, enable_icmp: false, enable_tcp: true },
+      { server_id: 4, server_name: 'd', display_index: 0, collector_id: 'c1', collector_name: 'c1', reachable: true, has_trace: false, target: { source: 'host_ip' as const, ipv6: '2001:db8::1' }, enable_icmp: true, enable_tcp: false },
+    ]
+    expect(filterTraceableProbeServerIds(paths, 'icmp')).toEqual([1, 4])
+    expect(filterTraceableProbeServerIds(paths, 'tcp')).toEqual([1, 3])
   })
 })

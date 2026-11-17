@@ -78,7 +78,11 @@ export function parsePublicNote(raw: string): { form: PublicNoteForm; base: Unkn
   const form = emptyPublicNote()
   if (!raw.trim()) return { form, base: {}, error: '' }
   try {
-    const base = object(JSON.parse(raw))
+    const parsedJson: unknown = JSON.parse(raw)
+    if (!parsedJson || typeof parsedJson !== 'object' || Array.isArray(parsedJson)) {
+      return { form, base: {}, error: 'JSON root must be an object' }
+    }
+    const base = parsedJson as UnknownObject
     const billing = object(base.billingDataMod)
     form.billing = {
       startDate: text(billing.startDate),

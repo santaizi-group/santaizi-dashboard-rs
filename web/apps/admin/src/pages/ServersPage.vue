@@ -4,7 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { AppDialog, AppDrawer, AppEmpty, osLabel } from '@santaizi/ui'
-import type { ConnectionPath, ProbePath, ServerBackup, ServerImportPreviewItem, TrafficPolicyHistory, TrafficSummary } from '@santaizi/api'
+import { isHostOnline, type ConnectionPath, type ProbePath, type ResourceQuery, type ServerBackup, type ServerImportPreviewItem, type TrafficPolicyHistory, type TrafficSummary } from '@santaizi/api'
 import ServerEditorDialog from '@/components/editors/ServerEditorDialog.vue'
 import ServerGroupManagerDialog from '@/components/editors/ServerGroupManagerDialog.vue'
 import ServerImportDialog from '@/components/editors/ServerImportDialog.vue'
@@ -13,7 +13,7 @@ import UpgradeAgentDialog from '@/components/UpgradeAgentDialog.vue'
 import ProbePathDialog from '@/components/ProbePathDialog.vue'
 import TrafficHistoryPanel from '@/components/TrafficHistoryPanel.vue'
 import CopyableText from '@/components/CopyableText.vue'
-import { batchDeleteServers, batchUpdateServerGroup, deleteOfflineHistory, deleteServer, exportServers, getServerInstallPreview, getServerTrafficHistory, listConnectionPaths, listOfflineHistory, listProbePaths, listServerAvailability, listServers, previewServerImport, resetServerAvailability, resetServerSecret, updateServerDisplayIndex, type ResourceRecord, type ServerRecord } from '@/api/adminApi'
+import { batchDeleteServers, batchUpdateServerGroup, deleteOfflineHistory, deleteServer, exportServers, getServerInstallPreview, getServerTrafficHistory, listConnectionPaths, listOfflineHistory, listProbePaths, listServerAvailability, listServerGroups, listServers, previewServerImport, resetServerAvailability, resetServerSecret, updateServerDisplayIndex, type ResourceRecord, type ServerRecord } from '@/api/adminApi'
 import { formatAdminValue, formatBytes } from '@/composables/format'
 import { notifyAPIError } from '@/composables/notify'
 import { copyText } from '@/composables/clipboard'
@@ -39,8 +39,30 @@ const route = useRoute()
 const loading = ref(false), editor = ref(false), installDialog = ref(false), upgradeDialog = ref(false), groupManager = ref(false), importer = ref(false)
 const items = ref<ServerRecord[]>([]), selected = ref<ServerRecord[]>([]), editing = ref<ServerRecord>(), installServer = ref<ServerRecord>(), installSecret = ref(''), upgradeServer = ref<ServerRecord>()
 const importFile = ref<HTMLInputElement>(), importDocument = ref<ServerBackup>(), importItems = ref<ServerImportPreviewItem[]>([]), exporting = ref(false)
+const serverGroups = ref<string[]>([])
 const total = ref(0)
-const query = reactive({ page: 1, page_size: readStoredPageSize(route.path), q: '', sort: 'display_index', order: 'desc' as const })
+const query = reactive({
+  page: 1,
+  page_size: readStoredPageSize(route.path),
+  q: typeof route.query.q === 'string' ? route.query.q : '',
+  tag: '',
+  status: '' as '' | 'online' | 'offline',
+  sort: 'display_index',
+  order: 'desc' as 'asc' | 'desc',
+})
+const batchGroupDialog = ref(false)
+const batchGroupSaving = ref(false)
+const batchGroupInitial = ref('')
+const batchGroupValue = ref('')
+const batchGroupDirty = computed(() => batchGroupDialog.value && batchGroupValue.value !== batchGroupInitial.value)
+const groupFilterOptions = computed(() => {
+  const names = new Set<string>()
+  for (const name of serverGroups.value) {
+    const trimmed = name.trim()
+    if (trimmed && trimmed !== 'default') names.add(trimmed)
+  }
+  return ['default', ...[...names].sort((a, b) => a.localeCompare(b))]
+})
 const historyDrawer = ref(false), historyLoading = ref(false), historyServer = ref<ServerRecord>(), historyTab = ref('availability'), history = ref<ResourceRecord[]>([]), availability = ref<ResourceRecord[]>([]), connectionPaths = ref<ConnectionPath[]>([]), probePaths = ref<ProbePath[]>([]), trafficHistories = ref<TrafficPolicyHistory[]>([])
 const probeDialog = ref(false)
 const activeProbe = ref<ProbePath>()
@@ -56,6 +78,15 @@ let hoverMedia: MediaQueryList | undefined
 
 function onHoverMediaChange() {
   hoverCapable.value = !!hoverMedia?.matches
+}
+
+async function loadGroups() {
+  try {
+    const result = await listServerGroups()
+    serverGroups.value = result.data.map(item => item.name)
+  } catch (error) {
+    notifyAPIError(error, t as never, te)
+  }
 }
 
 async function exportAll() {
@@ -113,11 +144,48 @@ async function onImportFile(event: Event) {
   }
 }
 
+function matchesFilter(server: ServerRecord): boolean {
+  if (query.tag) {
+    const normalizedTag = (server.tag || '').trim() || 'default'
+    if (normalizedTag !== query.tag) return false
+  }
+  if (query.status === 'online' && !isHostOnline(server)) return false
+  if (query.status === 'offline' && isHostOnline(server)) return false
+  return true
+}
+
+function buildServerQuery(page = query.page, pageSize = query.page_size): ResourceQuery {
+  const params: ResourceQuery = {
+    page,
+    page_size: pageSize,
+    q: query.q,
+    sort: query.sort,
+    order: query.order,
+  }
+  if (query.tag) {
+    params.tag = query.tag
+    params.group = query.tag
+  }
+  if (query.status) {
+    params.status = query.status
+    params.online = query.status === 'online'
+  }
+  return params
+}
+
+async function fetchAllMatchingForClientFallback(): Promise<ServerRecord[]> {
+  const pageSize = 100
+  const all: ServerRecord[] = []
+  for (let page = 1; page <= 50; page++) {
+    const res = await listServers(buildServerQuery(page, pageSize))
+    all.push(...res.data)
+    const serverTotal = res.meta.total ?? all.length
+    if (all.length >= serverTotal || res.data.length < pageSize) break
+  }
+  return all.filter(matchesFilter)
+}
+
 /// 请求代际：每次 `load()` 自增。
-///
-/// 没有它时，慢的旧响应会在新的之后落地（连点搜索、保存后刷新、
-/// 翻页），表格于是显示第 1 页的数据而分页器写着第 2 页。
-/// 回调一律先比对代际，过期的一律当作没发生。
 let loadGeneration = 0
 
 async function load() {
@@ -126,11 +194,28 @@ async function load() {
   const current = loadGeneration
   loading.value = true
   try {
-    const result = await listServers(query)
+    const result = await listServers(buildServerQuery())
     if (current !== loadGeneration) return
-    items.value = result.data
-    total.value = result.meta.total || result.data.length
-    sortDraft.value = Object.fromEntries(result.data.map(server => [server.id, String(server.display_index)]))
+    let nextItems = result.data
+    let nextTotal = result.meta.total ?? result.data.length
+    if ((query.tag || query.status) && result.data.some(row => !matchesFilter(row))) {
+      const filteredAll = (result.meta.total ?? result.data.length) <= result.data.length
+        ? result.data.filter(matchesFilter)
+        : await fetchAllMatchingForClientFallback()
+      if (current !== loadGeneration) return
+      nextTotal = filteredAll.length
+      const start = (query.page - 1) * query.page_size
+      nextItems = filteredAll.slice(start, start + query.page_size)
+    }
+    if (nextItems.length === 0 && query.page > 1 && nextTotal > 0) {
+      query.page -= 1
+      return await load()
+    }
+    items.value = nextItems
+    total.value = nextTotal
+    const visibleIds = new Set(nextItems.map(server => server.id))
+    selected.value = selected.value.filter(server => visibleIds.has(server.id))
+    sortDraft.value = Object.fromEntries(nextItems.map(server => [server.id, String(server.display_index)]))
   } catch (error) {
     if (current !== loadGeneration) return
     notifyAPIError(error, t as never, te)
@@ -138,6 +223,19 @@ async function load() {
     if (current === loadGeneration) loading.value = false
   }
 }
+
+function onSortChange(payload: { prop?: string; order?: 'ascending' | 'descending' | null }) {
+  if (!payload.prop || !payload.order) {
+    query.sort = 'display_index'
+    query.order = 'desc'
+  } else {
+    query.sort = payload.prop
+    query.order = payload.order === 'ascending' ? 'asc' : 'desc'
+  }
+  query.page = 1
+  void load()
+}
+
 function open(item?: ServerRecord) { editing.value = item; editor.value = true }
 function publicSummary(server: ServerRecord) {
   const parsed = parsePublicNote(server.public_note ? JSON.stringify(server.public_note) : '')
@@ -158,9 +256,64 @@ function platformText(server: ServerRecord) {
   if (!label) return '—'
   return version ? `${label} ${version}` : label
 }
-async function removeOne(server: ServerRecord) { await ElMessageBox.confirm(t('confirmDelete'), t('dangerousAction'), { type: 'warning' }); try { await deleteServer(server.id); ElMessage.success(t('deleteSuccess')); await load() } catch (error) { notifyAPIError(error, t as never, te) } }
-async function groupSelected() { try { const { value } = await ElMessageBox.prompt(t('group'), t('batchGroup'), { inputValue: selected.value[0]?.tag || '' }); await batchUpdateServerGroup(selected.value.map(server => server.id), value); await load() } catch { /* user cancelled */ } }
-async function deleteSelected() { await ElMessageBox.confirm(t('confirmDelete'), t('dangerousAction'), { type: 'warning' }); try { await batchDeleteServers(selected.value.map(server => server.id)); selected.value = []; await load(); ElMessage.success(t('deleteSuccess')) } catch (error) { notifyAPIError(error, t as never, te) } }
+
+async function removeOne(server: ServerRecord) {
+  try {
+    await ElMessageBox.confirm(t('confirmDelete'), t('dangerousAction'), { type: 'warning' })
+  } catch {
+    return
+  }
+  try {
+    await deleteServer(server.id)
+    ElMessage.success(t('deleteSuccess'))
+    await Promise.all([load(), loadGroups()])
+  } catch (error) {
+    notifyAPIError(error, t as never, te)
+  }
+}
+
+function groupSelected() {
+  if (!selected.value.length) return
+  const initial = selected.value[0]?.tag?.trim() || 'default'
+  batchGroupInitial.value = initial
+  batchGroupValue.value = initial
+  batchGroupDialog.value = true
+}
+
+async function submitBatchGroup() {
+  if (!selected.value.length) return
+  batchGroupSaving.value = true
+  try {
+    const raw = String(batchGroupValue.value ?? '').trim()
+    const target = raw === 'default' ? '' : raw
+    await batchUpdateServerGroup(selected.value.map(server => server.id), target)
+    batchGroupInitial.value = batchGroupValue.value
+    batchGroupDialog.value = false
+    ElMessage.success(t('saveSuccess'))
+    await Promise.all([load(), loadGroups()])
+  } catch (error) {
+    notifyAPIError(error, t as never, te)
+  } finally {
+    batchGroupSaving.value = false
+  }
+}
+
+async function deleteSelected() {
+  try {
+    await ElMessageBox.confirm(t('confirmDelete'), t('dangerousAction'), { type: 'warning' })
+  } catch {
+    return
+  }
+  try {
+    await batchDeleteServers(selected.value.map(server => server.id))
+    selected.value = []
+    await Promise.all([load(), loadGroups()])
+    ElMessage.success(t('deleteSuccess'))
+  } catch (error) {
+    notifyAPIError(error, t as never, te)
+  }
+}
+
 function status(server: ServerRecord) { return hostListTone(server) }
 function coverageText(server: ServerRecord) {
   const coverage = server.telemetry?.coverage
@@ -225,7 +378,6 @@ async function copyDefaultInstall(server: ServerRecord) {
   copyingInstall.value = server.id
   try {
     const preview = await getServerInstallPreview(server.id, defaultInstallPreviewBody())
-    // 预取失败走 notifyAPIError；复制失败的兜底在 copyText 内部。
     await copyText(preview.command, t)
   } catch (error) {
     notifyAPIError(error, t as never, te)
@@ -233,9 +385,40 @@ async function copyDefaultInstall(server: ServerRecord) {
     copyingInstall.value = undefined
   }
 }
-async function resetSecret(server: ServerRecord) { await ElMessageBox.confirm(t('confirmResetSecret'), t('confirm'), { type: 'warning' }); try { const result = await resetServerSecret(server.id); showInstall(server, result.secret) } catch (error) { notifyAPIError(error, t as never, te) } }
-async function resetAvailabilityHistory(server: ServerRecord) { await ElMessageBox.confirm(t('confirmResetAvailability'), t('confirm'), { type: 'warning' }); try { await resetServerAvailability(server.id); await load(); ElMessage.success(t('saveSuccess')) } catch (error) { notifyAPIError(error, t as never, te) } }
-async function saved(server: ServerRecord, created: boolean) { await load(); if (created) showInstall(server, server.secret || '') }
+async function resetSecret(server: ServerRecord) {
+  try {
+    await ElMessageBox.confirm(t('confirmResetSecret'), t('confirm'), { type: 'warning' })
+  } catch {
+    return
+  }
+  try {
+    const result = await resetServerSecret(server.id)
+    showInstall(server, result.secret)
+  } catch (error) {
+    notifyAPIError(error, t as never, te)
+  }
+}
+async function resetAvailabilityHistory(server: ServerRecord) {
+  try {
+    await ElMessageBox.confirm(t('confirmResetAvailability'), t('confirm'), { type: 'warning' })
+  } catch {
+    return
+  }
+  try {
+    await resetServerAvailability(server.id)
+    await load()
+    ElMessage.success(t('saveSuccess'))
+  } catch (error) {
+    notifyAPIError(error, t as never, te)
+  }
+}
+async function saved(server: ServerRecord, created: boolean) {
+  await Promise.all([load(), loadGroups()])
+  if (created) showInstall(server, server.secret || '')
+}
+function onGroupsChanged() {
+  void Promise.all([load(), loadGroups()])
+}
 async function loadAvailabilityHistory(server: ServerRecord) {
   const to = new Date()
   const from = new Date(to.getTime() - availabilityHours.value * 3600 * 1000)
@@ -328,7 +511,20 @@ function percentText(value: number | null) {
   if (value == null) return '—'
   return `${new Intl.NumberFormat(locale.value, { maximumFractionDigits: 1 }).format(value)}%`
 }
-async function removeHistory(row: ResourceRecord) { await ElMessageBox.confirm(t('confirmDelete'), t('dangerousAction'), { type: 'warning' }); await deleteOfflineHistory(Number(row.id)); await showHistory(historyServer.value!) }
+async function removeHistory(row: ResourceRecord) {
+  try {
+    await ElMessageBox.confirm(t('confirmDelete'), t('dangerousAction'), { type: 'warning' })
+  } catch {
+    return
+  }
+  try {
+    await deleteOfflineHistory(Number(row.id))
+    ElMessage.success(t('deleteSuccess'))
+    if (historyServer.value) await showHistory(historyServer.value, historyTab.value)
+  } catch (error) {
+    notifyAPIError(error, t as never, te)
+  }
+}
 
 async function commitDisplayIndex(server: ServerRecord) {
   if (sortSaving.value[server.id]) return
@@ -358,7 +554,7 @@ onMounted(async () => {
   hoverMedia = window.matchMedia('(hover: hover) and (pointer: fine)')
   onHoverMediaChange()
   hoverMedia.addEventListener('change', onHoverMediaChange)
-  await load()
+  await Promise.all([load(), loadGroups()])
   if (route.query.create === '1') open()
 })
 onUnmounted(() => { hoverMedia?.removeEventListener('change', onHoverMediaChange) })
@@ -369,8 +565,15 @@ onUnmounted(() => { hoverMedia?.removeEventListener('change', onHoverMediaChange
   <div class="page-head"><h1>{{ t('servers') }}</h1><el-button type="primary" @click="open()"><i class="ri-add-line"></i>{{ t('createServer') }}</el-button></div>
   <section class="surface table-card">
     <div class="toolbar">
-      <el-input v-model="query.q" class="search-input" clearable :placeholder="t('search')" @keyup.enter="query.page=1;load()"><template #prefix><i class="ri-search-line"></i></template></el-input>
+      <el-input v-model="query.q" class="search-input" clearable :placeholder="t('search')" @keyup.enter="query.page=1;load()" @clear="query.page=1;load()"><template #prefix><i class="ri-search-line"></i></template></el-input>
       <el-button @click="query.page=1;load()"><i class="ri-search-line"></i>{{ t('submitSearch') }}</el-button>
+      <el-select v-model="query.tag" class="toolbar-filter" clearable :placeholder="t('allGroups')" @change="query.page=1;load()">
+        <el-option v-for="group in groupFilterOptions" :key="group" :label="group" :value="group" />
+      </el-select>
+      <el-select v-model="query.status" class="toolbar-filter" clearable :placeholder="t('allStatus')" @change="query.page=1;load()">
+        <el-option :label="t('online')" value="online" />
+        <el-option :label="t('offline')" value="offline" />
+      </el-select>
       <el-button @click="groupManager=true"><i class="ri-folder-settings-line"></i>{{ t('manageGroups') }}</el-button>
       <template v-if="selected.length">
         <el-button @click="groupSelected"><i class="ri-folder-transfer-line"></i>{{ t('batchGroup') }}</el-button>
@@ -380,17 +583,25 @@ onUnmounted(() => { hoverMedia?.removeEventListener('change', onHoverMediaChange
       <input ref="importFile" class="sr-only" type="file" accept="application/json,.json" @change="onImportFile">
       <el-button @click="pickImport"><i class="ri-upload-line"></i>{{ t('importServers') }}</el-button>
       <el-button :loading="exporting" @click="exportAll"><i class="ri-download-line"></i>{{ t('exportServers') }}</el-button>
-      <el-button @click="load"><i class="ri-refresh-line"></i>{{ t('refresh') }}</el-button>
+      <el-button @click="onGroupsChanged"><i class="ri-refresh-line"></i>{{ t('refresh') }}</el-button>
     </div>
     <div class="servers-table-wrap desktop-only">
-    <el-table v-loading="loading" height="100%" :data="items" row-key="id" @selection-change="selected=$event">
+    <el-table
+      v-loading="loading"
+      height="100%"
+      :data="items"
+      row-key="id"
+      :default-sort="{ prop: 'display_index', order: 'descending' }"
+      @selection-change="selected=$event"
+      @sort-change="onSortChange"
+    >
       <el-table-column type="selection" width="46"/>
       <el-table-column class-name="col-status" label-class-name="col-status" width="44" align="center">
         <template #default="{row}">
           <span class="status-dot" :class="status(row)"></span>
         </template>
       </el-table-column>
-      <el-table-column prop="name" :label="t('name')" min-width="200">
+      <el-table-column prop="name" :label="t('name')" min-width="200" sortable="custom">
         <template #default="{row}">
           <div class="server-name">
             <strong>{{ row.name }}</strong>
@@ -414,7 +625,7 @@ onUnmounted(() => { hoverMedia?.removeEventListener('change', onHoverMediaChange
       <el-table-column prop="tag" :label="t('group')" width="140">
         <template #default="{row}"><el-tag effect="plain">{{ row.tag || 'default' }}</el-tag></template>
       </el-table-column>
-      <el-table-column :label="t('displayIndex')" width="140">
+      <el-table-column prop="display_index" :label="t('displayIndex')" width="140" sortable="custom">
         <template #default="{row}">
           <el-input
             v-model="sortDraft[row.id]"
@@ -458,7 +669,7 @@ onUnmounted(() => { hoverMedia?.removeEventListener('change', onHoverMediaChange
           <span v-else class="muted">—</span>
         </template>
       </el-table-column>
-      <el-table-column prop="last_active" :label="t('lastSeen')" width="190">
+      <el-table-column prop="last_active" :label="t('lastSeen')" width="190" sortable="custom">
         <template #default="{row}">{{ display(row.last_active,'last_active') }}</template>
       </el-table-column>
       <el-table-column :label="t('actions')" width="108" fixed="right">
@@ -569,10 +780,23 @@ onUnmounted(() => { hoverMedia?.removeEventListener('change', onHoverMediaChange
     <div class="pagination"><el-pagination v-model:current-page="query.page" v-model:page-size="query.page_size" :page-sizes="PAGE_SIZES" layout="total, sizes, prev, pager, next" :total="total" @change="load"/></div>
   </section>
   <ServerEditorDialog v-model="editor" :value="editing" @saved="saved"/>
-  <ServerGroupManagerDialog v-model="groupManager" @changed="load"/>
-  <ServerImportDialog v-model="importer" :document="importDocument" :items="importItems" @applied="load"/>
+  <ServerGroupManagerDialog v-model="groupManager" @changed="onGroupsChanged"/>
+  <ServerImportDialog v-model="importer" :document="importDocument" :items="importItems" @applied="onGroupsChanged"/>
   <InstallAgentDialog v-model="installDialog" :server="installServer" :secret="installSecret"/>
   <UpgradeAgentDialog v-model="upgradeDialog" :server="upgradeServer"/>
+  <AppDialog v-model="batchGroupDialog" :title="t('batchGroup')" mode="edit" :dirty="batchGroupDirty" :submitting="batchGroupSaving" width="min(440px, 94vw)">
+    <el-form label-position="top" @submit.prevent="submitBatchGroup">
+      <el-form-item :label="t('group')">
+        <el-select v-model="batchGroupValue" filterable allow-create default-first-option clearable class="field-full" :placeholder="t('PleaseSelect')">
+          <el-option v-for="group in groupFilterOptions" :key="group" :label="group" :value="group" />
+        </el-select>
+      </el-form-item>
+    </el-form>
+    <template #footer="{ close }">
+      <el-button :disabled="batchGroupSaving" @click="close()">{{ t('cancel') }}</el-button>
+      <el-button type="primary" :loading="batchGroupSaving" @click="submitBatchGroup">{{ t('save') }}</el-button>
+    </template>
+  </AppDialog>
   <AppDialog v-model="noteDialog" :title="`${t('note')} · ${noteServer?.name || ''}`" mode="view" width="min(560px,92vw)">
     <p class="admin-note-body">{{ noteServer?.note }}</p>
   </AppDialog>

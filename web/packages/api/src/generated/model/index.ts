@@ -214,6 +214,8 @@ export * from './probeMTRHop';
 export * from './probeMTRProtocol';
 export * from './probePath';
 export * from './probePathListResponseResponse';
+export * from './probeRouteDispatch';
+export * from './probeRouteDispatchProtocol';
 export * from './probeRouteHistory';
 export * from './probeRouteHop';
 export * from './probeRouteJob';

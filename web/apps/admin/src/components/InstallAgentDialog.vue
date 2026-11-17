@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 import { AppDialog } from '@santaizi/ui'
 import { getProbeCapabilities, getServerCredential, getServerInstallPreview, type ServerRecord } from '@/api/adminApi'
 import type { InstallPreviewWrite } from '@santaizi/api'
-import { useEditorSnapshot } from '@/composables/editorSnapshot'
 import { notifyAPIError } from '@/composables/notify'
 import { copyText } from '@/composables/clipboard'
 import { DEFAULT_CLEAN_INSTALL, DEFAULT_INSTALL_IMPLEMENTATION, DEFAULT_INSTALL_PLATFORM, DEFAULT_INSTALL_PROFILE, INSTALL_PRESETS, type InstallProfile } from '@/domain/installAgent'
@@ -26,14 +25,13 @@ const metadata = ref<ProbeCapabilitiesMetadata>({ required: [], optional: [], pr
 const capabilities = reactive<MonitoringOptions>({ ...INSTALL_PRESETS[DEFAULT_INSTALL_PROFILE] })
 const ipReportConfig = reactive({ interface: '', country_code: '', prefer_ipv6: false })
 const nicPresets = ['eth0', 'eth1', 'ens33', 'enp0s3', 'wlan0']
-const snapshotValue = computed(() => ({
+const previewParams = computed(() => ({
   implementation: implementation.value,
   profile: profile.value,
   cleanInstall: cleanInstall.value,
   capabilities: { ...capabilities },
   ipReportConfig: { ...ipReportConfig },
 }))
-const { dirty, capture } = useEditorSnapshot(snapshotValue, computed(() => props.modelValue))
 const capabilityRows = computed(() => [
   ['cpu', 'ri-cpu-line'], ['memory', 'ri-database-2-line'], ['disk', 'ri-hard-drive-3-line'], ['network', 'ri-exchange-line'],
   ['connections', 'ri-links-line'], ['processes', 'ri-stack-line'], ['temperature', 'ri-temp-hot-line'], ['gpu', 'ri-cpu-line'],
@@ -91,8 +89,6 @@ async function open() {
     notifyAPIError(error, t as never, te)
   } finally {
     loading.value = false
-    await nextTick()
-    capture()
   }
 }
 async function copy() {
@@ -101,10 +97,7 @@ async function copy() {
     return
   }
   await refreshPreview()
-  // 复制失败（明文 HTTP / 权限被拒）在 copyText 内部消化成提示，
-  // 不会冒成未处理 rejection。
   await copyText(command.value, t)
-  capture()
 }
 async function copySecret() {
   await copyText(secret.value, t)
@@ -120,14 +113,14 @@ function selectIPFamily(value: string | number | boolean) {
   ipReportConfig.prefer_ipv6 = value === 'ipv6'
 }
 watch(() => props.modelValue, value => { if (value) void open() })
-watch([platform, snapshotValue], () => {
+watch([platform, previewParams], () => {
   command.value = ''
-  if (props.modelValue && !loading.value) void refreshPreview()
+  if (props.modelValue && !loading.value) void refreshPreview().catch(error => notifyAPIError(error, t as never, te))
 }, { deep: true })
 </script>
 
 <template>
-  <AppDialog :model-value="modelValue" :title="`${t('installAgent')} · ${server?.name || ''}`" mode="edit" :dirty="dirty" :submitting="loading" width="min(960px, 97vw)" @update:model-value="emit('update:modelValue', $event)">
+  <AppDialog :model-value="modelValue" :title="`${t('installAgent')} · ${server?.name || ''}`" mode="view" width="min(960px, 97vw)" @update:model-value="emit('update:modelValue', $event)">
     <div v-loading="loading">
       <el-form label-position="top">
         <el-form-item :label="t('secret')">
@@ -176,7 +169,7 @@ watch([platform, snapshotValue], () => {
       <el-input :model-value="command" readonly type="textarea" :rows="6" class="mono" />
     </div>
     <template #footer="{ close }">
-      <el-button :disabled="loading" @click="close()">{{ t('close') }}</el-button>
+      <el-button @click="close()">{{ t('close') }}</el-button>
       <el-button type="primary" :disabled="loading || (cleanInstall && !cleanConfirmed)" @click="copy"><i class="ri-file-copy-line"></i>{{ t('copyCommand') }}</el-button>
     </template>
   </AppDialog>

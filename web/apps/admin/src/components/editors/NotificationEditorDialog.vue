@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ElMessage, type FormInstance } from 'element-plus'
+import { ElMessage, ElMessageBox, type FormInstance } from 'element-plus'
 import { AppDialog } from '@santaizi/ui'
-import { createNotification, updateNotification } from '@/api/adminApi'
+import { createNotification, listNotificationGroups, updateNotification } from '@/api/adminApi'
 import { useEditorSnapshot } from '@/composables/editorSnapshot'
 import { notifyAPIError } from '@/composables/notify'
 import {
@@ -28,6 +28,7 @@ const formRef = ref<FormInstance>()
 const saving = ref(false)
 const activePreset = ref<NotificationPresetId | ''>('')
 const headers = ref<KeyValueRow[]>([])
+const groups = ref<string[]>(['default'])
 const credentials = reactive<Partial<Record<NotificationCredentialKey, string>>>({})
 const form = reactive<NotificationChannelRecord>({
   id: 0,
@@ -39,6 +40,11 @@ const form = reactive<NotificationChannelRecord>({
   headers: [],
   body: '',
   verify_tls: true,
+})
+const groupOptions = computed(() => {
+  const values = new Set<string>(['default', ...groups.value])
+  if (form.tag?.trim()) values.add(form.tag.trim())
+  return [...values]
 })
 const snapshotValue = computed(() => ({
   form,
@@ -56,6 +62,15 @@ const activePresetDef = computed(() =>
 function clearCredentials() {
   for (const key of Object.keys(credentials) as NotificationCredentialKey[]) {
     delete credentials[key]
+  }
+}
+
+async function loadGroups() {
+  try {
+    const list = await listNotificationGroups()
+    groups.value = list.length ? list : ['default']
+  } catch (error) {
+    notifyAPIError(error, t as never, te)
   }
 }
 
@@ -87,9 +102,40 @@ function reset(value?: NotificationChannelRecord) {
   nextTick(capture)
 }
 
-function applyPreset(id: NotificationPresetId) {
+function hasCustomContentToConfirm(): boolean {
+  if (guided.value && activePresetDef.value) {
+    return activePresetDef.value.fields.some((field) => {
+      const val = (credentials[field.key] ?? '').trim()
+      const def = (field.defaultValue ?? '').trim()
+      return val !== '' && val !== def
+    })
+  }
+  const currentPreset = activePresetDef.value
+  const defaultPatch = currentPreset
+    ? composeNotificationFromPreset(currentPreset, emptyCredentialValues(currentPreset))
+    : { url: '', body: '' }
+  const url = form.url.trim()
+  const body = form.body.trim()
+  const hasUrl = url !== '' && url !== defaultPatch.url.trim() && url !== 'https://example.com/webhook'
+  const hasBody = body !== '' && body !== defaultPatch.body.trim()
+  return hasUrl || hasBody
+}
+
+async function applyPreset(id: NotificationPresetId) {
+  if (activePreset.value === id) return
   const preset = NOTIFICATION_PRESETS.find(item => item.id === id)
   if (!preset) return
+  if (hasCustomContentToConfirm()) {
+    try {
+      await ElMessageBox.confirm(t('confirmOverwritePreset'), t('confirm'), {
+        type: 'warning',
+        confirmButtonText: t('confirm'),
+        cancelButtonText: t('cancel'),
+      })
+    } catch {
+      return
+    }
+  }
   clearCredentials()
   Object.assign(credentials, emptyCredentialValues(preset))
   const patch = applyNotificationPreset(preset, form.name, key => t(key), credentials)
@@ -121,10 +167,6 @@ async function submit() {
     headers.value = patch.headers
   }
 
-  // Element Plus 的 `validate()` 校验不过会 **reject**。放在 try 外面会变成
-  // 未处理的 promise rejection，且绕过 finally。这里转成布尔值：
-  // 校验失败静默返回（Element Plus 已在字段上标红，不需要再弹消息），
-  // 只有真正的 API 失败才走 notifyAPIError。
   const formValid = await formRef.value?.validate().then(() => true, () => false)
   if (!formValid) return
   if (guided.value && !form.url.trim()) {
@@ -137,6 +179,7 @@ async function submit() {
     const { id: _id, ...write } = form
     const payload = {
       ...write,
+      tag: form.tag.trim() || 'default',
       headers: headers.value
         .filter(item => item.key.trim())
         .map(item => ({ key: item.key.trim(), value: item.value })),
@@ -157,7 +200,10 @@ async function submit() {
 watch(
   () => props.modelValue,
   value => {
-    if (value) reset(props.value)
+    if (value) {
+      reset(props.value)
+      void loadGroups()
+    }
   },
 )
 </script>
@@ -192,7 +238,9 @@ watch(
           <el-input v-model="form.name" />
         </el-form-item>
         <el-form-item :label="t('notificationGroup')">
-          <el-input v-model="form.tag" />
+          <el-select v-model="form.tag" filterable allow-create default-first-option class="field-full">
+            <el-option v-for="group in groupOptions" :key="group" :label="group" :value="group" />
+          </el-select>
         </el-form-item>
 
         <template v-if="guided && activePresetDef">

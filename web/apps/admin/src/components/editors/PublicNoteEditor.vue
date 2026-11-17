@@ -2,6 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
+import LocationPicker from '@/components/LocationPicker.vue'
 import {
   emptyPublicNote,
   filterBillingCycleSuggestions,
@@ -10,8 +11,8 @@ import {
 } from '@/domain/publicNote'
 import type { PublicNoteForm } from '@/types/admin'
 
-const props = defineProps<{ modelValue: string }>()
-const emit = defineEmits<{ 'update:modelValue': [string] }>()
+const props = defineProps<{ modelValue: string; rawInvalid?: boolean }>()
+const emit = defineEmits<{ 'update:modelValue': [string]; 'update:rawInvalid': [boolean] }>()
 const { t } = useI18n()
 const active = ref('billing')
 const base = ref<Record<string, unknown>>({})
@@ -19,7 +20,13 @@ const form = reactive<PublicNoteForm>(emptyPublicNote())
 const raw = ref('')
 const rawError = ref('')
 let internal = false
+let lastEmitted: string | null = null
 const preview = computed(() => serializePublicNote(form, base.value) || '{}')
+
+function setRawError(error: string) {
+  rawError.value = error
+  emit('update:rawInvalid', Boolean(error))
+}
 
 function queryBillingCycles(query: string, cb: (items: Array<{ value: string }>) => void) {
   cb(filterBillingCycleSuggestions(query))
@@ -27,30 +34,82 @@ function queryBillingCycles(query: string, cb: (items: Array<{ value: string }>)
 
 function load(value: string) {
   const parsed = parsePublicNote(value)
-  Object.assign(form, parsed.form)
-  base.value = parsed.base
-  raw.value = value || '{}'
-  rawError.value = parsed.error
-}
-function emitStructured() {
-  if (internal) return
-  const value = serializePublicNote(form, base.value)
-  raw.value = value || '{}'
-  emit('update:modelValue', value)
-}
-function applyRaw() {
-  const parsed = parsePublicNote(raw.value)
-  if (parsed.error) { rawError.value = parsed.error; return }
   internal = true
   Object.assign(form, parsed.form)
   base.value = parsed.base
   internal = false
-  rawError.value = ''
-  emit('update:modelValue', serializePublicNote(form, base.value))
+  raw.value = value || '{}'
+  setRawError(parsed.error)
+}
+
+function emitStructured() {
+  if (internal) return
+  const value = serializePublicNote(form, base.value)
+  raw.value = value || '{}'
+  setRawError('')
+  lastEmitted = value
+  emit('update:modelValue', value)
+}
+
+function onRawInput() {
+  const parsed = parsePublicNote(raw.value)
+  if (parsed.error) {
+    setRawError(parsed.error)
+    return
+  }
+  internal = true
+  Object.assign(form, parsed.form)
+  base.value = parsed.base
+  internal = false
+  setRawError('')
+  const next = serializePublicNote(form, base.value)
+  lastEmitted = next
+  emit('update:modelValue', next)
+}
+
+function applyRaw() {
+  const parsed = parsePublicNote(raw.value)
+  if (parsed.error) {
+    setRawError(parsed.error)
+    return
+  }
+  internal = true
+  Object.assign(form, parsed.form)
+  base.value = parsed.base
+  internal = false
+  setRawError('')
+  const next = serializePublicNote(form, base.value)
+  raw.value = next || '{}'
+  lastEmitted = next
+  emit('update:modelValue', next)
   ElMessage.success(t('jsonApplied'))
 }
-watch(() => props.modelValue, value => { if (value !== serializePublicNote(form, base.value)) load(value) }, { immediate: true })
+
+function validateBeforeSave(): boolean {
+  const parsed = parsePublicNote(raw.value)
+  if (parsed.error) {
+    setRawError(parsed.error)
+    active.value = 'advanced'
+    return false
+  }
+  internal = true
+  Object.assign(form, parsed.form)
+  base.value = parsed.base
+  internal = false
+  setRawError('')
+  const next = serializePublicNote(form, base.value)
+  lastEmitted = next
+  emit('update:modelValue', next)
+  return true
+}
+
+watch(() => props.modelValue, (value) => {
+  if (value === lastEmitted) return
+  if (value !== serializePublicNote(form, base.value) || !raw.value) load(value)
+}, { immediate: true })
 watch(form, emitStructured, { deep: true })
+
+defineExpose({ validateBeforeSave })
 </script>
 
 <template>
@@ -93,7 +152,7 @@ watch(form, emitStructured, { deep: true })
     </el-tab-pane>
     <el-tab-pane :label="t('presentationInfo')" name="presentation">
       <div class="editor-grid">
-        <el-form-item :label="t('locationCode')"><el-input v-model="form.presentation.location" placeholder="CN" /></el-form-item>
+        <el-form-item :label="t('locationCode')"><LocationPicker v-model="form.presentation.location" /></el-form-item>
         <el-form-item :label="t('flagCode')"><el-input v-model="form.presentation.flag" placeholder="cn" /></el-form-item>
         <el-form-item class="span-2" :label="t('purchaseLink')"><el-input v-model="form.presentation.orderLink" /></el-form-item>
         <el-form-item :label="t('purchaseButtonText')"><el-input v-model="form.presentation.buyBtnText" /></el-form-item>
@@ -107,7 +166,7 @@ watch(form, emitStructured, { deep: true })
     </el-tab-pane>
     <el-tab-pane :label="t('advancedJSON')" name="advanced">
       <el-alert v-if="rawError" :title="t('invalidJSON')" :description="rawError" type="error" show-icon :closable="false" />
-      <el-input v-model="raw" type="textarea" :rows="10" class="mono json-editor" />
+      <el-input v-model="raw" type="textarea" :rows="10" class="mono json-editor" @input="onRawInput" />
       <el-button type="primary" plain @click="applyRaw"><i class="ri-check-line"></i>{{ t('applyJSON') }}</el-button>
     </el-tab-pane>
   </el-tabs>

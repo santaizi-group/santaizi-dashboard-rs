@@ -15,6 +15,8 @@ const props = defineProps<{ modelValue: boolean; value?: ServerRecord }>()
 const emit = defineEmits<{ 'update:modelValue': [boolean]; saved: [ServerRecord, boolean] }>()
 const { t, te } = useI18n()
 const formRef = ref<FormInstance>()
+const publicNoteRef = ref<InstanceType<typeof PublicNoteEditor>>()
+const publicNoteRawInvalid = ref(false)
 const activeTab = ref('basic')
 const saving = ref(false)
 const loading = ref(false)
@@ -23,7 +25,7 @@ const serverGroups = ref<string[]>([])
 const policies = ref<TrafficPolicyRecord[]>([])
 const form = reactive({ id: 0, name: '', tag: '', note: '', public_note: '', monitoring_options: {} as Record<string, boolean>, display_index: 0, hide_for_guest: false, probe_target: '', probe_tcp_ports: '', probe_enable_icmp: true, probe_enable_tcp: true, probe_enable_mtr: true })
 const reported = reactive({ ipv4: '', ipv6: '' })
-const snapshotValue = computed(() => ({ form, policies: policies.value }))
+const snapshotValue = computed(() => ({ form, policies: policies.value, publicNoteRawInvalid: publicNoteRawInvalid.value }))
 const { dirty, capture } = useEditorSnapshot(snapshotValue, computed(() => props.modelValue))
 const groupOptions = computed(() => {
   const values = new Set(serverGroups.value)
@@ -36,12 +38,14 @@ async function reset(value?: ServerRecord) {
     id: value?.id || 0, name: value?.name || '', tag: value?.tag || '', note: value?.note || '',
     public_note: value?.public_note ? JSON.stringify(value.public_note, null, 2) : '', monitoring_options: { ...(value?.monitoring_options || {}) },
     display_index: value?.display_index || 0, hide_for_guest: value?.hide_for_guest ?? false,
-        probe_target: value?.probe_target || '',
+    probe_target: value?.probe_target || '',
     probe_tcp_ports: value?.probe_tcp_ports || '',
     probe_enable_icmp: value?.probe_enable_icmp ?? true,
     probe_enable_tcp: value?.probe_enable_tcp ?? true,
     probe_enable_mtr: value?.probe_enable_mtr ?? true,
   })
+  publicNoteRawInvalid.value = false
+  policies.value = []
   Object.assign(reported, hostAddresses(value?.host))
   activeTab.value = 'basic'; loading.value = true
   try {
@@ -66,7 +70,12 @@ async function submit() {
   // 只有真正的 API 失败才走 notifyAPIError。
   const formValid = await formRef.value?.validate().then(() => true, () => false)
   if (!formValid) return
-  if (hasIncompletePolicy()) { activeTab.value = 'traffic'; ElMessage.error(t('trafficPolicyIncomplete')); return }
+  if (publicNoteRef.value && !publicNoteRef.value.validateBeforeSave()) {
+    activeTab.value = 'public-note'
+    ElMessage.warning(t('invalidJSON'))
+    return
+  }
+  if (hasIncompletePolicy()) { activeTab.value = 'traffic'; ElMessage.warning(t('trafficPolicyIncomplete')); return }
   saving.value = true
   try {
     const { id, public_note, ...rest } = form
@@ -108,7 +117,7 @@ watch(() => props.modelValue, value => { if (value) void reset(props.value) })
               <el-form-item class="span-2" :label="t('note')"><el-input v-model="form.note" type="textarea" :rows="10" maxlength="4000" show-word-limit /></el-form-item>
             </div>
           </el-tab-pane>
-          <el-tab-pane :label="t('publicNote')" name="public-note"><PublicNoteEditor v-model="form.public_note" /></el-tab-pane>
+          <el-tab-pane :label="t('publicNote')" name="public-note"><PublicNoteEditor ref="publicNoteRef" v-model="form.public_note" v-model:raw-invalid="publicNoteRawInvalid" /></el-tab-pane>
           <el-tab-pane :label="t('trafficPolicies')" name="traffic"><TrafficPoliciesEditor v-model="policies" :notification-groups="notificationGroups" /></el-tab-pane>
         </el-tabs>
       </el-form>

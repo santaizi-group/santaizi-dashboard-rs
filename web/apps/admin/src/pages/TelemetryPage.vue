@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus'
 import type {
   AgentReliabilityRecord, AgentSink, IncidentRecord, IncidentRevisionRecord,
   ObserverAssignmentRecord, ObserverEvidenceItem, TelemetryAlertRecord, TelemetryDataLossRecord,
@@ -93,11 +93,18 @@ async function editorSaved(registrationToken: string, created?: CollectorRecord)
 }
 
 async function act(item: CollectorRecord, action: string) {
+  if (action === 'revoke' && item.revoked) return
   if (action === 'install') {
     showInstall(item)
     return
   }
-  if (action !== 'view-token') await ElMessageBox.confirm(t('confirmAction'), t('confirm'), { type: action === 'delete' || action === 'revoke' ? 'warning' : 'info' })
+  if (action !== 'view-token') {
+    try {
+      await ElMessageBox.confirm(t('confirmAction'), t('confirm'), { type: action === 'delete' || action === 'revoke' ? 'warning' : 'info' })
+    } catch {
+      return
+    }
+  }
   actionBusy.value = item.id
   try {
     if (action === 'delete') await deleteCollector(item.id)
@@ -121,8 +128,6 @@ async function act(item: CollectorRecord, action: string) {
 }
 
 async function copyToken() {
-  // 裸调 clipboard 在明文 HTTP / 权限被拒时会变成未处理 rejection：
-  // 控制台一条红字，界面零反馈。失败兜底见 composables/clipboard。
   await copyText(token.value, t)
 }
 
@@ -179,8 +184,11 @@ onMounted(async () => {
 
 <template>
   <div class="page-head">
-    <div><h1>{{ t('telemetry') }}</h1></div>
-    <el-button v-if="active==='collectors'" type="primary" @click="open()"><i class="ri-add-line"></i>{{ t('createCollector') }}</el-button>
+    <h1>{{ t('telemetry') }}</h1>
+    <div class="page-actions">
+      <el-button @click="load"><i class="ri-refresh-line"></i>{{ t('refresh') }}</el-button>
+      <el-button v-if="active==='collectors'" type="primary" @click="open()"><i class="ri-add-line"></i>{{ t('createCollector') }}</el-button>
+    </div>
   </div>
   <section class="surface telemetry-shell">
     <el-tabs v-model="active" @tab-change="onTabChange">
@@ -199,10 +207,13 @@ onMounted(async () => {
             <span class="status-dot" :class="row.revoked?'offline':row.status||'unknown'"></span>
           </template>
         </el-table-column>
-        <el-table-column prop="name" :label="t('name')" min-width="180">
+        <el-table-column prop="name" :label="t('name')" min-width="200">
           <template #default="{row}">
             <div class="server-name">
-              <strong>{{ row.name }}</strong>
+              <div class="collector-name-row">
+                <strong>{{ row.name }}</strong>
+                <el-tag v-if="row.revoked" size="small" type="danger" effect="plain">{{ t('revoked') }}</el-tag>
+              </div>
               <CopyableId :value="row.id" />
             </div>
           </template>
@@ -246,7 +257,7 @@ onMounted(async () => {
                   <el-dropdown-item @click="act(row,'install')"><i class="ri-download-cloud-2-line"></i>{{ t('installCollector') }}</el-dropdown-item>
                   <el-dropdown-item @click="act(row,'view-token')"><i class="ri-key-2-line"></i>{{ t('viewToken') }}</el-dropdown-item>
                   <el-dropdown-item @click="act(row,'rotate-token')"><i class="ri-loop-left-line"></i>{{ t('rotateToken') }}</el-dropdown-item>
-                  <el-dropdown-item @click="act(row,'revoke')"><i class="ri-forbid-line"></i>{{ t('revoke') }}</el-dropdown-item>
+                  <el-dropdown-item :disabled="Boolean(row.revoked)" @click="act(row,'revoke')"><i class="ri-forbid-line"></i>{{ t('revoke') }}</el-dropdown-item>
                   <el-dropdown-item divided @click="act(row,'delete')"><i class="ri-delete-bin-line"></i>{{ t('delete') }}</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
@@ -262,7 +273,10 @@ onMounted(async () => {
             <div class="mobile-card-head">
               <span class="mobile-card-status"><span class="status-dot" :class="row.revoked?'offline':row.status||'unknown'"></span></span>
               <div class="mobile-card-title">
-                <strong>{{ row.name }}</strong>
+                <div class="collector-name-row">
+                  <strong>{{ row.name }}</strong>
+                  <el-tag v-if="row.revoked" size="small" type="danger" effect="plain">{{ t('revoked') }}</el-tag>
+                </div>
                 <CopyableId :value="row.id" />
               </div>
               <div class="mobile-card-actions">
@@ -274,7 +288,7 @@ onMounted(async () => {
                       <el-dropdown-item @click="act(row,'install')"><i class="ri-download-cloud-2-line"></i>{{ t('installCollector') }}</el-dropdown-item>
                       <el-dropdown-item @click="act(row,'view-token')"><i class="ri-key-2-line"></i>{{ t('viewToken') }}</el-dropdown-item>
                       <el-dropdown-item @click="act(row,'rotate-token')"><i class="ri-loop-left-line"></i>{{ t('rotateToken') }}</el-dropdown-item>
-                      <el-dropdown-item @click="act(row,'revoke')"><i class="ri-forbid-line"></i>{{ t('revoke') }}</el-dropdown-item>
+                      <el-dropdown-item :disabled="Boolean(row.revoked)" @click="act(row,'revoke')"><i class="ri-forbid-line"></i>{{ t('revoke') }}</el-dropdown-item>
                       <el-dropdown-item divided @click="act(row,'delete')"><i class="ri-delete-bin-line"></i>{{ t('delete') }}</el-dropdown-item>
                     </el-dropdown-menu>
                   </template>
@@ -595,3 +609,21 @@ onMounted(async () => {
     </dl>
   </AppDrawer>
 </template>
+
+<style scoped>
+.collector-name-row {
+  display: flex;
+  align-items: center;
+  gap: var(--icon-text-gap);
+  min-width: 0;
+}
+.collector-name-row strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.collector-name-row .el-tag {
+  flex: 0 0 auto;
+}
+</style>

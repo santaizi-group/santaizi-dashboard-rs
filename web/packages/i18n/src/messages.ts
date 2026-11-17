@@ -25,7 +25,7 @@ const zhCN = {
   collector: '从端', collectors: '从端', collectorKind: '类型', collectorKindObserver: '观测型', collectorKindProbe: '探测型',
   probeTarget: '探测地址', probeInterval: '探测间隔（秒）', mtrInterval: 'MTR 间隔（秒）', mtrProbes: 'MTR 每跳次数', routeInterval: '路由间隔', routeKeep: '路由保留次数', routeIntervalHour: '1 小时', routeIntervalDay: '1 天', routeIntervalWeek: '1 周', tcpPorts: 'TCP 端口',
   defaultTcpPorts: '默认 TCP 端口', probeIPFamilies: '地址族', invalidProbeIPFamily: '请至少选择 IPv4 或 IPv6',
-  enableICMP: 'ICMP', enableTCP: 'TCP', enableMTR: 'MTR', failThreshold: '连续失败次数', probeTimeout: '超时', probeTrace: 'MTR', probeRouteTrace: '路由', probeRouteRun: '追踪', probeRouteEmpty: '点追踪查看跳点', hop: '跳', loss: '丢包', icmp: 'ICMP', tcp: 'TCP', hopPrivate: '内网',
+  enableICMP: 'ICMP', enableTCP: 'TCP', enableMTR: 'MTR', failThreshold: '连续失败次数', probeTimeout: '超时', probeTrace: 'MTR', probeRouteTrace: '路由', probeRouteRun: '追踪', probeRouteEmpty: '点追踪查看跳点', probeRouteGroupIcmp: 'ICMP 追踪', probeRouteGroupTcp: 'TCP 追踪', probeRouteGroupDone: '已加入 {n} 个追踪任务', probeRouteGroupReused: '（{n} 个进行中）', probeRouteGroupNone: '当前没有可追踪的目标', hop: '跳', loss: '丢包', icmp: 'ICMP', tcp: 'TCP', hopPrivate: '内网',
   hopDestination: '目的地', hopReached: '已到达', hopUnreached: '未到达', hopRouteChanged: '路由已变化', hopCount: '{n} 跳',
   probePaths: '探测路径', probeRoute: '路径', probeRecords: '记录', probeReachable: '可达', probeNoTarget: '无目标', allProbes: '全部探测从端', allProbeStatus: '全部探测',
   noProbesTitle: '还没有探测型从端', noProbesHint: '添加探测型从端后即可观察探测结果', noProbePathsTitle: '还没有探测路径', noProbePathsHint: '探测从端上线后将显示各主机探测结果',
@@ -258,7 +258,7 @@ const enUS = {
   collectorKind: 'Type', collectorKindObserver: 'Observer type', collectorKindProbe: 'Probe type',
   probeTarget: 'Probe address', probeInterval: 'Probe interval (seconds)', mtrInterval: 'MTR interval (seconds)', mtrProbes: 'MTR probes per hop', routeInterval: 'Route interval', routeKeep: 'Route history count', routeIntervalHour: '1 hour', routeIntervalDay: '1 day', routeIntervalWeek: '1 week', tcpPorts: 'TCP ports',
   defaultTcpPorts: 'Default TCP ports', probeIPFamilies: 'IP family', invalidProbeIPFamily: 'Select IPv4 or IPv6',
-  enableICMP: 'ICMP', enableTCP: 'TCP', enableMTR: 'MTR', failThreshold: 'Failure threshold', probeTimeout: 'Timeout', probeTrace: 'MTR', probeRouteTrace: 'Route', probeRouteRun: 'Trace', probeRouteEmpty: 'Tap Trace to capture hops', hop: 'Hop', loss: 'Loss', icmp: 'ICMP', tcp: 'TCP', hopPrivate: 'Private',
+  enableICMP: 'ICMP', enableTCP: 'TCP', enableMTR: 'MTR', failThreshold: 'Failure threshold', probeTimeout: 'Timeout', probeTrace: 'MTR', probeRouteTrace: 'Route', probeRouteRun: 'Trace', probeRouteEmpty: 'Tap Trace to capture hops', probeRouteGroupIcmp: 'ICMP trace', probeRouteGroupTcp: 'TCP trace', probeRouteGroupDone: 'Queued {n} traces', probeRouteGroupReused: '({n} already running)', probeRouteGroupNone: 'No traceable targets', hop: 'Hop', loss: 'Loss', icmp: 'ICMP', tcp: 'TCP', hopPrivate: 'Private',
   hopDestination: 'Destination', hopReached: 'Reached', hopUnreached: 'Unreached', hopRouteChanged: 'Route changed', hopCount: '{n} hops',
   probePaths: 'Probe paths', probeRoute: 'Path', probeRecords: 'Records', probeReachable: 'Reachable', probeNoTarget: 'No target', allProbes: 'All probe collectors', allProbeStatus: 'All probe status',
   noProbesTitle: 'No probe collectors yet', noProbesHint: 'Add a probe collector to watch ICMP and TCP results', noProbePathsTitle: 'No probe paths yet', noProbePathsHint: 'Paths appear after probe collectors come online',
@@ -459,6 +459,11 @@ const editorZhCN = {
   botSectionUptime: '可用率', botSectionProbes: '探针观察', botSectionAlerts: '连通异常', botReportChats: '推送会话', botWithCharts: '附带图表',
   botRunNow: '立即发送', botLastRun: '上次发送', botLastStatus: '上次结果', botReportSent: '报告已发送',
   weekdaySun: '星期日', weekdayMon: '星期一', weekdayTue: '星期二', weekdayWed: '星期三', weekdayThu: '星期四', weekdayFri: '星期五', weekdaySat: '星期六',
+  alertAboveThreshold: '高于此值告警', alertBelowThreshold: '低于此值告警', alertThresholdOrderInvalid: '「低于此值告警」不能大于「高于此值告警」',
+  offlineThresholdRange: '须在 10–86400 秒之间', checkIntervalRange: '须不小于 5 秒且不超过离线阈值', mergeGapRange: '须在 0–3600 秒之间', retentionDaysRange: '须在 1–3650 天之间',
+  undoClearPassword: '撤销清除', passwordPendingClear: '保存后将清除查看密码；输入新密码则改为更新',
+  failureAlert: '故障通知', latencyThresholdRequired: '开启延迟告警时，最低或最高延迟至少填写一项大于 0', latencyThresholdOrderInvalid: '最低延迟不能大于最高延迟',
+  confirmOverwritePreset: '切换预设将覆盖当前填写的请求配置，确认继续吗？', allStatus: '全部状态',
 }
 
 const editorZhTW = {
@@ -507,6 +512,11 @@ const editorZhTW = {
   botSectionUptime: '可用率', botSectionProbes: '探針觀察', botSectionAlerts: '連通異常', botReportChats: '推送會話', botWithCharts: '附帶圖表',
   botRunNow: '立即發送', botLastRun: '上次發送', botLastStatus: '上次結果', botReportSent: '報告已發送',
   weekdaySun: '星期日', weekdayMon: '星期一', weekdayTue: '星期二', weekdayWed: '星期三', weekdayThu: '星期四', weekdayFri: '星期五', weekdaySat: '星期六',
+  alertAboveThreshold: '高於此值告警', alertBelowThreshold: '低於此值告警', alertThresholdOrderInvalid: '「低於此值告警」不能大於「高於此值告警」',
+  offlineThresholdRange: '須在 10–86400 秒之間', checkIntervalRange: '須不小於 5 秒且不超過離線門檻', mergeGapRange: '須在 0–3600 秒之間', retentionDaysRange: '須在 1–3650 天之間',
+  undoClearPassword: '撤銷清除', passwordPendingClear: '儲存後將清除查看密碼；輸入新密碼則改為更新',
+  failureAlert: '故障通知', latencyThresholdRequired: '開啟延遲警報時，最低或最高延遲至少填寫一項大於 0', latencyThresholdOrderInvalid: '最低延遲不能大於最高延遲',
+  confirmOverwritePreset: '切換預設將覆蓋目前填寫的請求設定，確定繼續嗎？', allStatus: '全部狀態',
 }
 
 const editorEnUS = {
@@ -553,6 +563,11 @@ const editorEnUS = {
   botSectionUptime: 'Availability', botSectionProbes: 'Probe observation', botSectionAlerts: 'Connectivity issues', botReportChats: 'Destination chats', botWithCharts: 'Attach charts',
   botRunNow: 'Send now', botLastRun: 'Last sent', botLastStatus: 'Last result', botReportSent: 'Report sent',
   weekdaySun: 'Sunday', weekdayMon: 'Monday', weekdayTue: 'Tuesday', weekdayWed: 'Wednesday', weekdayThu: 'Thursday', weekdayFri: 'Friday', weekdaySat: 'Saturday',
+  alertAboveThreshold: 'Alert above', alertBelowThreshold: 'Alert below', alertThresholdOrderInvalid: 'Alert below cannot exceed Alert above',
+  offlineThresholdRange: 'Must be between 10 and 86400 seconds', checkIntervalRange: 'Must be at least 5s and at most the offline threshold', mergeGapRange: 'Must be between 0 and 3600 seconds', retentionDaysRange: 'Must be between 1 and 3650 days',
+  undoClearPassword: 'Keep password', passwordPendingClear: 'Will be cleared on save; enter a new password to replace instead',
+  failureAlert: 'Failure alert', latencyThresholdRequired: 'Enter a minimum or maximum latency greater than 0', latencyThresholdOrderInvalid: 'Minimum latency cannot exceed maximum latency',
+  confirmOverwritePreset: 'Switching presets will overwrite the current request configuration. Continue?', allStatus: 'All status',
 }
 
 const editorEsES = {
@@ -599,6 +614,11 @@ const editorEsES = {
   botSectionUptime: 'Disponibilidad', botSectionProbes: 'Observación de sondas', botSectionAlerts: 'Problemas de conectividad', botReportChats: 'Chats de destino', botWithCharts: 'Adjuntar gráficos',
   botRunNow: 'Enviar ahora', botLastRun: 'Último envío', botLastStatus: 'Último resultado', botReportSent: 'Informe enviado',
   weekdaySun: 'Domingo', weekdayMon: 'Lunes', weekdayTue: 'Martes', weekdayWed: 'Miércoles', weekdayThu: 'Jueves', weekdayFri: 'Viernes', weekdaySat: 'Sábado',
+  alertAboveThreshold: 'Alertar por encima de', alertBelowThreshold: 'Alertar por debajo de', alertThresholdOrderInvalid: 'El umbral inferior no puede superar al superior',
+  offlineThresholdRange: 'Debe estar entre 10 y 86400 segundos', checkIntervalRange: 'Debe ser al menos 5 s y no superar el umbral de desconexión', mergeGapRange: 'Debe estar entre 0 y 3600 segundos', retentionDaysRange: 'Debe estar entre 1 y 3650 días',
+  undoClearPassword: 'Conservar contraseña', passwordPendingClear: 'Se borrará al guardar; introduce una nueva contraseña para reemplazarla',
+  failureAlert: 'Alerta de fallo', latencyThresholdRequired: 'Introduce una latencia mínima o máxima mayor que 0', latencyThresholdOrderInvalid: 'La latencia mínima no puede superar a la máxima',
+  confirmOverwritePreset: 'Cambiar el preajuste sobrescribirá la configuración actual. ¿Continuar?', allStatus: 'Todos los estados',
 }
 
 const commonZhTW = {
@@ -612,7 +632,7 @@ const commonZhTW = {
   collectorKind: '類型', collectorKindObserver: '觀測型', collectorKindProbe: '探測型',
   probeTarget: '探測位址', probeInterval: '探測間隔（秒）', mtrInterval: 'MTR 間隔（秒）', mtrProbes: 'MTR 每跳次數', routeInterval: '路由間隔', routeKeep: '路由保留次數', routeIntervalHour: '1 小時', routeIntervalDay: '1 天', routeIntervalWeek: '1 週', tcpPorts: 'TCP 連接埠',
   defaultTcpPorts: '預設 TCP 連接埠', probeIPFamilies: '位址族', invalidProbeIPFamily: '請至少選擇 IPv4 或 IPv6',
-  enableICMP: 'ICMP', enableTCP: 'TCP', enableMTR: 'MTR', failThreshold: '連續失敗次數', probeTimeout: '逾時', probeTrace: 'MTR', probeRouteTrace: '路由', probeRouteRun: '追蹤', probeRouteEmpty: '點追蹤查看跳點', hop: '跳', loss: '丟包', icmp: 'ICMP', tcp: 'TCP', hopPrivate: '內網',
+  enableICMP: 'ICMP', enableTCP: 'TCP', enableMTR: 'MTR', failThreshold: '連續失敗次數', probeTimeout: '逾時', probeTrace: 'MTR', probeRouteTrace: '路由', probeRouteRun: '追蹤', probeRouteEmpty: '點追蹤查看跳點', probeRouteGroupIcmp: 'ICMP 追蹤', probeRouteGroupTcp: 'TCP 追蹤', probeRouteGroupDone: '已加入 {n} 個追蹤任務', probeRouteGroupReused: '（{n} 個進行中）', probeRouteGroupNone: '目前沒有可追蹤的目標', hop: '跳', loss: '丟包', icmp: 'ICMP', tcp: 'TCP', hopPrivate: '內網',
   hopDestination: '目的地', hopReached: '已到達', hopUnreached: '未到達', hopRouteChanged: '路由已變化', hopCount: '{n} 跳',
   probePaths: '探測路徑', probeRoute: '路徑', probeRecords: '記錄', probeReachable: '可達', probeNoTarget: '無目標', allProbes: '全部探測從端', allProbeStatus: '全部探測',
   noProbesTitle: '還沒有探測型從端', noProbesHint: '新增探測型從端後即可觀察探測結果', noProbePathsTitle: '還沒有探測路徑', noProbePathsHint: '探測從端上線後將顯示各主機探測結果',
@@ -634,7 +654,7 @@ const commonZhTW = {
   name: '名稱', nameservers: '自訂 DNS', nat: '內網穿透', networkSpeed: '網路速率', noMergeTarget: '沒有可合併的目標分組', noObservation: '無觀測', noServerGroups: '暫無分組，可在編輯伺服器時建立', note: '備註', notificationGroup: '通知群組', notifyOffline: '傳送離線通知',   notifyRecovery: '傳送恢復通知', observerAssignments: '觀測點', observers: '觀測點', offlineHistory: '離線歷史', offlineSettings: '離線與可用性', offlineThreshold: '離線門檻（秒）', openNavigation: '開啟導覽', outages: '中斷', pageNotFound: '頁面不存在或已移動。', password: '密碼', passwordConfigured: '已設定；留空不會修改',
   pendingEvents: '待傳送事件', platform: '系統', primaryColor: '品牌主色', provider: '服務商', publicNote: '公開備註', quickActions: '快速操作', rangeLastHours: '最近 {hours} 小時', reconnecting: '正在重新連接即時資料', refresh: '重新整理', reliabilitySummary: '探測可靠性', nodeLatency: '節點延遲', renameGroup: '重新命名分組',
   requestBody: '請求本文', requestHeaders: '請求標頭', requestMethod: '請求方法', requestType: '請求類型', requestURL: '請求位址', required: '此欄位為必填', resetAvailability: '重設可用性歷史', resetSecret: '重設密鑰',
-  retentionDays: '保留天數', revision: '修訂版本', revoke: '撤銷', rotateToken: '輪換 Token', safeCSSRules: "禁止 {'@'}import、遠端 url()、expression 與可執行內容。", saveSuccess: '儲存成功',
+  retentionDays: '保留天數', revision: '修訂版本', revoke: '撤銷', revoked: '已撤銷', rotateToken: '輪換 Token', safeCSSRules: "禁止 {'@'}import、遠端 url()、expression 與可執行內容。", saveSuccess: '儲存成功',
   scope: '觀測範圍', scopeAll: '全部伺服器', scopeExceptSelected: '除所選外全部伺服器', scopeGroup: '伺服器分組', scopeSelectedServers: '僅所選伺服器', scopeServer: '指定伺服器', scopeTag: '標籤', search: '搜尋',
   secret: '連線密鑰', server: '伺服器', serverCount: '伺服器數', serverName: '伺服器名稱', serviceAvailability: '30 天可用性', showAvailabilityGuest: '向訪客顯示可用性', site: '站點', siteTitle: '站點標題', skipContent: '跳到主要內容',
   spoolSize: '暫存大小', startedAt: '開始時間', customRange: '自訂時間範圍', apply: '套用', status: '狀態', statusNavigation: '公開狀態導覽', statusNetwork: '網路', statusServices: '服務狀態', system: '跟隨系統', target: '目標', telemetryNotifications: '探測通知', plainIPInNotification: '通知中顯示完整 IP',
@@ -656,7 +676,7 @@ const commonEsES = {
   collectorKind: 'Tipo', collectorKindObserver: 'Tipo observador', collectorKindProbe: 'Tipo sonda',
   probeTarget: 'Dirección de sonda', probeInterval: 'Intervalo de sonda (s)', mtrInterval: 'Intervalo MTR (s)', mtrProbes: 'MTR por salto', routeInterval: 'Intervalo de ruta', routeKeep: 'Historial de rutas', routeIntervalHour: '1 hora', routeIntervalDay: '1 día', routeIntervalWeek: '1 semana', tcpPorts: 'Puertos TCP',
   defaultTcpPorts: 'Puertos TCP predeterminados', probeIPFamilies: 'Familia IP', invalidProbeIPFamily: 'Selecciona IPv4 o IPv6',
-  enableICMP: 'ICMP', enableTCP: 'TCP', enableMTR: 'MTR', failThreshold: 'Fallos consecutivos', probeTimeout: 'Tiempo agotado', probeTrace: 'MTR', probeRouteTrace: 'Ruta', probeRouteRun: 'Trazar', probeRouteEmpty: 'Pulse Trazar para ver saltos', hop: 'Salto', loss: 'Pérdida', icmp: 'ICMP', tcp: 'TCP', hopPrivate: 'Privada',
+  enableICMP: 'ICMP', enableTCP: 'TCP', enableMTR: 'MTR', failThreshold: 'Fallos consecutivos', probeTimeout: 'Tiempo agotado', probeTrace: 'MTR', probeRouteTrace: 'Ruta', probeRouteRun: 'Trazar', probeRouteEmpty: 'Pulse Trazar para ver saltos', probeRouteGroupIcmp: 'Trazado ICMP', probeRouteGroupTcp: 'Trazado TCP', probeRouteGroupDone: '{n} trazados en cola', probeRouteGroupReused: '({n} ya en curso)', probeRouteGroupNone: 'Sin objetivos para trazar', hop: 'Salto', loss: 'Pérdida', icmp: 'ICMP', tcp: 'TCP', hopPrivate: 'Privada',
   hopDestination: 'Destino', hopReached: 'Alcanzado', hopUnreached: 'No alcanzado', hopRouteChanged: 'Ruta cambiada', hopCount: '{n} saltos',
   probePaths: 'Rutas de sonda', probeRoute: 'Ruta', probeRecords: 'Registros', probeReachable: 'Alcanzable', probeNoTarget: 'Sin destino', allProbes: 'Todos los recolectores sonda', allProbeStatus: 'Todo el sondeo',
   noProbesTitle: 'Aún no hay recolectores sonda', noProbesHint: 'Añade un recolector sonda para ver ICMP y TCP', noProbePathsTitle: 'Aún no hay rutas de sonda', noProbePathsHint: 'Las rutas aparecen cuando los recolectores sonda están en línea',
@@ -678,7 +698,7 @@ const commonEsES = {
   notifyRecovery: 'Notificar recuperación', noObservation: 'Sin observación', observerAssignments: 'Observadores', observers: 'Observadores', offlineHistory: 'Historial sin conexión', offlineSettings: 'Desconexión y disponibilidad', offlineThreshold: 'Umbral de desconexión (s)', openNavigation: 'Abrir navegación', outages: 'Cortes',
   pageNotFound: 'La página no existe o se ha movido.', passwordConfigured: 'Configurada; dejar en blanco no la cambia', pendingEvents: 'Eventos pendientes', platform: 'Sistema', primaryColor: 'Color de marca', provider: 'Proveedor', publicNote: 'Nota pública',
   quickActions: 'Acciones rápidas', rangeLastHours: 'Últimas {hours} h', reconnecting: 'Reconectando datos en tiempo real', refresh: 'Actualizar', reliabilitySummary: 'Fiabilidad del sondeo', nodeLatency: 'Latencia de nodos', renameGroup: 'Renombrar grupo', requestBody: 'Cuerpo', requestHeaders: 'Cabeceras', requestMethod: 'Método', requestType: 'Tipo de cuerpo', requestURL: 'URL de solicitud',
-  required: 'Este campo es obligatorio', resetAvailability: 'Restablecer historial de disponibilidad', resetSecret: 'Restablecer clave', retentionDays: 'Días de retención', revision: 'Revisión', revoke: 'Revocar', rotateToken: 'Rotar token',
+  required: 'Este campo es obligatorio', resetAvailability: 'Restablecer historial de disponibilidad', resetSecret: 'Restablecer clave', retentionDays: 'Días de retención', revision: 'Revisión', revoke: 'Revocar', revoked: 'Revocado', rotateToken: 'Rotar token',
   safeCSSRules: "Se rechazan {'@'}import, url() remotas, expression y contenido ejecutable.", saveSuccess: 'Guardado', scope: 'Ámbito', scopeAll: 'Todos los servidores', scopeExceptSelected: 'Todos salvo los seleccionados', scopeGroup: 'Grupo de servidores',
   scopeSelectedServers: 'Solo servidores seleccionados', scopeServer: 'Servidor específico', scopeTag: 'Etiqueta', secret: 'Clave de conexión', server: 'Servidor', serverCount: 'Servidores', serverName: 'Nombre del servidor', serviceAvailability: 'Disponibilidad de 30 días',
   showAvailabilityGuest: 'Mostrar disponibilidad a visitantes', site: 'Sitio', siteTitle: 'Título del sitio', skipContent: 'Saltar al contenido principal', spoolSize: 'Tamaño de la cola', startedAt: 'Inicio', customRange: 'Rango personalizado', apply: 'Aplicar', status: 'Estado', statusNavigation: 'Navegación pública',

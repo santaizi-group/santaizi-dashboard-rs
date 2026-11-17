@@ -19,6 +19,14 @@ function normalizeRouteInterval(value: unknown): CollectorWriteRouteIntervalSeco
   return (routeIntervals as readonly number[]).includes(n) ? n as CollectorWriteRouteIntervalSeconds : 86400
 }
 
+function clampNumber(value: unknown, min: number, max?: number, fallback = min) {
+  const next = Number(value)
+  if (!Number.isFinite(next)) return fallback
+  const rounded = Math.round(next)
+  if (max === undefined) return Math.max(min, rounded)
+  return Math.min(max, Math.max(min, rounded))
+}
+
 const props = defineProps<{ modelValue: boolean; value?: CollectorRecord }>()
 const emit = defineEmits<{ 'update:modelValue': [boolean]; saved: [string, CollectorRecord?] }>()
 const { t, te } = useI18n()
@@ -57,8 +65,18 @@ const form = reactive({
 })
 const snapshotValue = computed(() => ({ form, selectedServerIds: selectedServerIds.value }))
 const { dirty, capture } = useEditorSnapshot(snapshotValue, computed(() => props.modelValue))
-const groups = computed(() => [...new Set(servers.value.map(server => server.tag).filter(Boolean))].sort())
-const tags = groups
+const groups = computed(() => {
+  const names = new Set<string>()
+  for (const server of servers.value) {
+    const tag = server.tag?.trim()
+    if (tag && tag !== 'default') names.add(tag)
+  }
+  for (const scope of form.scopes) {
+    const val = scope.value?.trim()
+    if (scope.type === 'group' && val && val !== 'default') names.add(val)
+  }
+  return ['default', ...[...names].sort((a, b) => a.localeCompare(b))]
+})
 const transferData = computed(() => servers.value.map(server => ({ key: String(server.id), label: server.name })))
 const firstServerScopeIndex = computed(() => form.scopes.findIndex(scope => scope.type === 'server'))
 const isProbe = computed(() => form.kind === 'probe')
@@ -77,11 +95,40 @@ function portRule(required: boolean) {
   }
 }
 
+const latencyRule = {
+  validator: (_rule: unknown, _value: unknown, callback: (error?: Error) => void) => {
+    if (!isProbe.value || !form.latency_notify) {
+      callback()
+      return
+    }
+    const min = Math.max(0, Number(form.min_latency_ms) || 0)
+    const max = Math.max(0, Number(form.max_latency_ms) || 0)
+    if (min <= 0 && max <= 0) {
+      callback(new Error(t('latencyThresholdRequired')))
+      return
+    }
+    if (min > 0 && max > 0 && min > max) {
+      callback(new Error(t('latencyThresholdOrderInvalid')))
+      return
+    }
+    callback()
+  },
+  trigger: 'blur',
+}
+
 function collapseScopesForUi(scopes: CollectorScope[]): { ui: CollectorScope[]; serverIds: string[] } {
   const serverIds = scopes.filter(scope => scope.type === 'server').map(scope => scope.value.trim()).filter(Boolean)
-  const others: CollectorScope[] = scopes
-    .filter(scope => scope.type !== 'server')
-    .map(scope => ({ type: scope.type, value: scope.value }))
+  const seen = new Set<string>()
+  const others: CollectorScope[] = []
+  for (const scope of scopes) {
+    if (scope.type === 'server') continue
+    const normalizedType: CollectorScope['type'] = scope.type === 'tag' ? 'group' : scope.type
+    const normalizedValue = normalizedType === 'all' ? '' : scope.value
+    const key = `${normalizedType}:${normalizedValue}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    others.push({ type: normalizedType, value: normalizedValue })
+  }
   if (scopes.some(scope => scope.type === 'server')) {
     return { ui: [...others, { type: 'server', value: '' }], serverIds }
   }
@@ -92,7 +139,10 @@ function buildScopesForSubmit(): CollectorScope[] {
   if (form.scopes.some(scope => scope.type === 'all')) return [{ type: 'all', value: '' }]
   const others: CollectorScope[] = form.scopes
     .filter(scope => scope.type !== 'server')
-    .map(scope => ({ type: scope.type, value: scope.value.trim() }))
+    .map(scope => ({
+      type: scope.type === 'tag' ? 'group' : scope.type,
+      value: scope.value.trim(),
+    }))
   const serverScopes: CollectorScope[] = selectedServerIds.value.map(id => ({ type: 'server', value: id }))
   return [...others, ...serverScopes]
 }
@@ -148,11 +198,11 @@ async function reset(value?: CollectorRecord) {
     tls: value?.tls ?? true,
     insecure_tls: value?.insecure_tls ?? false,
     location: value?.location || '',
-    probe_interval_seconds: value?.probe_interval_seconds || 30,
-    mtr_interval_seconds: value?.mtr_interval_seconds || 300,
-    mtr_probes: value?.mtr_probes || 10,
+    probe_interval_seconds: clampNumber(value?.probe_interval_seconds || 30, 5, 86400, 30),
+    mtr_interval_seconds: clampNumber(value?.mtr_interval_seconds || 300, 30, 86400, 300),
+    mtr_probes: clampNumber(value?.mtr_probes || 10, 1, 30, 10),
     route_interval_seconds: normalizeRouteInterval(value?.route_interval_seconds),
-    route_keep: value?.route_keep || 10,
+    route_keep: clampNumber(value?.route_keep || 10, 1, 50, 10),
     tcp_ports: value?.tcp_ports || '22,443',
     enable_icmp: value?.enable_icmp ?? true,
     enable_tcp: value?.enable_tcp ?? true,
@@ -164,26 +214,22 @@ async function reset(value?: CollectorRecord) {
     notify: value?.notify ?? false,
     notification_tag: value?.notification_tag || 'default',
     latency_notify: value?.latency_notify ?? false,
-    min_latency_ms: value?.min_latency_ms || 0,
-    max_latency_ms: value?.max_latency_ms || 0,
-    fail_threshold: value?.fail_threshold || 3,
+    min_latency_ms: clampNumber(value?.min_latency_ms || 0, 0, undefined, 0),
+    max_latency_ms: clampNumber(value?.max_latency_ms || 0, 0, undefined, 0),
+    fail_threshold: clampNumber(value?.fail_threshold || 3, 1, 20, 3),
     scopes: collapsed.ui,
   })
   selectedServerIds.value = collapsed.serverIds
   try {
-    const [serverResult, groups] = await Promise.all([listAllServers(), listNotificationGroups()])
+    const [serverResult, notifGroups] = await Promise.all([listAllServers(), listNotificationGroups()])
     servers.value = serverResult.data
-    notificationGroups.value = groups.length ? groups : ['default']
+    notificationGroups.value = notifGroups.length ? notifGroups : ['default']
   } catch (error) { notifyAPIError(error, t as never, te) }
   await nextTick()
   capture()
 }
 
 async function submit() {
-  // Element Plus 的 `validate()` 校验不过会 **reject**。放在 try 外面会变成
-  // 未处理的 promise rejection，且绕过 finally。这里转成布尔值：
-  // 校验失败静默返回（Element Plus 已在字段上标红，不需要再弹消息），
-  // 只有真正的 API 失败才走 notifyAPIError。
   const formValid = await formRef.value?.validate().then(() => true, () => false)
   if (!formValid) return
   if (isProbe.value && !form.ip_families.length) {
@@ -197,12 +243,24 @@ async function submit() {
     ElMessage.warning(t('invalidCollectorScope'))
     return
   }
+  const minLatency = clampNumber(form.min_latency_ms, 0, undefined, 0)
+  const maxLatency = clampNumber(form.max_latency_ms, 0, undefined, 0)
+  if (isProbe.value && form.latency_notify) {
+    if (minLatency <= 0 && maxLatency <= 0) {
+      ElMessage.warning(t('latencyThresholdRequired'))
+      return
+    }
+    if (minLatency > 0 && maxLatency > 0 && minLatency > maxLatency) {
+      ElMessage.warning(t('latencyThresholdOrderInvalid'))
+      return
+    }
+  }
   const probeFields = {
-    probe_interval_seconds: Number(form.probe_interval_seconds) || 30,
-    mtr_interval_seconds: Number(form.mtr_interval_seconds) || 300,
-    mtr_probes: Number(form.mtr_probes) || 10,
+    probe_interval_seconds: clampNumber(form.probe_interval_seconds, 5, 86400, 30),
+    mtr_interval_seconds: clampNumber(form.mtr_interval_seconds, 30, 86400, 300),
+    mtr_probes: clampNumber(form.mtr_probes, 1, 30, 10),
     route_interval_seconds: normalizeRouteInterval(form.route_interval_seconds),
-    route_keep: Number(form.route_keep) || 10,
+    route_keep: clampNumber(form.route_keep, 1, 50, 10),
     tcp_ports: form.tcp_ports.trim() || '22,443',
     enable_icmp: form.enable_icmp,
     enable_tcp: form.enable_tcp,
@@ -212,9 +270,9 @@ async function submit() {
     notify: form.notify,
     notification_tag: form.notification_tag,
     latency_notify: form.latency_notify,
-    min_latency_ms: Number(form.min_latency_ms) || 0,
-    max_latency_ms: Number(form.max_latency_ms) || 0,
-    fail_threshold: Number(form.fail_threshold) || 3,
+    min_latency_ms: minLatency,
+    max_latency_ms: maxLatency,
+    fail_threshold: clampNumber(form.fail_threshold, 1, 20, 3),
   }
   let payload: Parameters<typeof createCollector>[0]
   if (isProbe.value) {
@@ -285,9 +343,9 @@ watch(() => props.modelValue, value => { if (value) void reset(props.value) })
         </template>
         <el-form-item :label="t('location')"><LocationPicker v-model="form.location" /></el-form-item>
         <template v-if="isProbe">
-          <el-form-item :label="t('probeInterval')"><el-input v-model.number="form.probe_interval_seconds" inputmode="numeric" /></el-form-item>
-          <el-form-item :label="t('mtrInterval')"><el-input v-model.number="form.mtr_interval_seconds" inputmode="numeric" /></el-form-item>
-          <el-form-item :label="t('mtrProbes')"><el-input v-model.number="form.mtr_probes" inputmode="numeric" /></el-form-item>
+          <el-form-item :label="t('probeInterval')"><el-input v-model.number="form.probe_interval_seconds" inputmode="numeric" @blur="form.probe_interval_seconds = clampNumber(form.probe_interval_seconds, 5, 86400, 30)" /></el-form-item>
+          <el-form-item :label="t('mtrInterval')"><el-input v-model.number="form.mtr_interval_seconds" inputmode="numeric" @blur="form.mtr_interval_seconds = clampNumber(form.mtr_interval_seconds, 30, 86400, 300)" /></el-form-item>
+          <el-form-item :label="t('mtrProbes')"><el-input v-model.number="form.mtr_probes" inputmode="numeric" @blur="form.mtr_probes = clampNumber(form.mtr_probes, 1, 30, 10)" /></el-form-item>
           <el-form-item :label="t('routeInterval')">
             <el-select v-model="form.route_interval_seconds">
               <el-option :label="t('routeIntervalHour')" :value="3600" />
@@ -295,7 +353,7 @@ watch(() => props.modelValue, value => { if (value) void reset(props.value) })
               <el-option :label="t('routeIntervalWeek')" :value="604800" />
             </el-select>
           </el-form-item>
-          <el-form-item :label="t('routeKeep')"><el-input v-model.number="form.route_keep" inputmode="numeric" /></el-form-item>
+          <el-form-item :label="t('routeKeep')"><el-input v-model.number="form.route_keep" inputmode="numeric" @blur="form.route_keep = clampNumber(form.route_keep, 1, 50, 10)" /></el-form-item>
           <el-form-item :label="t('defaultTcpPorts')"><el-input v-model="form.tcp_ports" /></el-form-item>
           <el-form-item :label="t('probeIPFamilies')" prop="ip_families" :rules="[{ required: true, type: 'array', min: 1, message: t('invalidProbeIPFamily') }]">
             <el-select v-model="form.ip_families" multiple>
@@ -303,9 +361,9 @@ watch(() => props.modelValue, value => { if (value) void reset(props.value) })
               <el-option label="IPv6" value="ipv6" />
             </el-select>
           </el-form-item>
-          <el-form-item :label="t('failThreshold')"><el-input v-model.number="form.fail_threshold" inputmode="numeric" /></el-form-item>
+          <el-form-item :label="t('failThreshold')"><el-input v-model.number="form.fail_threshold" inputmode="numeric" @blur="form.fail_threshold = clampNumber(form.fail_threshold, 1, 20, 3)" /></el-form-item>
           <el-form-item :label="t('notificationGroup')">
-            <el-select v-model="form.notification_tag" filterable allow-create>
+            <el-select v-model="form.notification_tag" filterable allow-create default-first-option>
               <el-option v-for="group in notificationGroups" :key="group" :label="group" :value="group" />
             </el-select>
           </el-form-item>
@@ -320,8 +378,12 @@ watch(() => props.modelValue, value => { if (value) void reset(props.value) })
         <label><span>{{ t('EnableLatencyNotification') }}</span><el-switch v-model="form.latency_notify" /></label>
       </div>
       <div v-if="isProbe && form.latency_notify" class="editor-grid">
-        <el-form-item :label="t('MinLatency')"><el-input v-model.number="form.min_latency_ms" inputmode="numeric" /></el-form-item>
-        <el-form-item :label="t('MaxLatency')"><el-input v-model.number="form.max_latency_ms" inputmode="numeric" /></el-form-item>
+        <el-form-item :label="t('MinLatency')" prop="min_latency_ms" :rules="[latencyRule]">
+          <el-input v-model.number="form.min_latency_ms" inputmode="numeric" @blur="form.min_latency_ms = clampNumber(form.min_latency_ms, 0, undefined, 0)" />
+        </el-form-item>
+        <el-form-item :label="t('MaxLatency')" prop="max_latency_ms" :rules="[latencyRule]">
+          <el-input v-model.number="form.max_latency_ms" inputmode="numeric" @blur="form.max_latency_ms = clampNumber(form.max_latency_ms, 0, undefined, 0)" />
+        </el-form-item>
       </div>
       <div class="editor-section">
         <div class="editor-section-title"><h3>{{ t('scope') }}</h3><el-button @click="addScope"><i class="ri-add-line"></i>{{ t('addScope') }}</el-button></div>
@@ -332,11 +394,9 @@ watch(() => props.modelValue, value => { if (value) void reset(props.value) })
                 <el-option :label="t('scopeAll')" value="all"/>
                 <el-option :label="t('scopeServer')" value="server"/>
                 <el-option :label="t('scopeGroup')" value="group"/>
-                <el-option :label="t('scopeTag')" value="tag"/>
               </el-select>
               <span v-if="scope.type === 'server'" class="scope-all-value">{{ selectedServerIds.length ? `${t('selectedServers')} · ${selectedServerIds.length}` : t('PleaseSelect') }}</span>
-              <el-select v-else-if="scope.type === 'group'" v-model="scope.value" filterable allow-create><el-option v-for="group in groups" :key="group" :label="group" :value="group"/></el-select>
-              <el-select v-else-if="scope.type === 'tag'" v-model="scope.value" filterable allow-create><el-option v-for="tag in tags" :key="tag" :label="tag" :value="tag"/></el-select>
+              <el-select v-else-if="scope.type === 'group'" v-model="scope.value" filterable allow-create default-first-option><el-option v-for="group in groups" :key="group" :label="group" :value="group"/></el-select>
               <span v-else class="scope-all-value">{{ t('allServers') }}</span>
               <el-button circle :disabled="form.scopes.length === 1" :aria-label="t('delete')" @click="removeScope(index)"><i class="ri-delete-bin-6-line"></i></el-button>
             </div>

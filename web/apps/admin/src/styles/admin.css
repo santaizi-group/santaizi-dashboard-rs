@@ -844,6 +844,7 @@ html.dark .topology-globe__canvas { filter: none; }
   font-variant-numeric: tabular-nums;
 }
 .probe-group { padding: 12px 16px 16px; display: grid; gap: 12px; }
+.probe-group-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
 .probe-card-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));

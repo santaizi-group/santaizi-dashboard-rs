@@ -17,6 +17,8 @@ export interface TopologyMarker {
   rttMs?: number
   count: number
   names: string[]
+  /** 与 names 对齐的节点唯一 ID（String(server.id)），避免同名节点误命中。 */
+  serverIds?: string[]
   /** 与 names 对齐，供同位置多节点分色。 */
   onlines: boolean[]
 }
@@ -162,7 +164,7 @@ export function buildTopology(input: TopologyInput): TopologyGraph {
         marker: {
           id, kind: 'node', name: server.name, lon: point.lon, lat: point.lat, derived: false,
           status: present ? 'online' : 'offline', href: `/servers?q=${encodeURIComponent(server.name)}`,
-          count: 1, names: [server.name], onlines: [present],
+          count: 1, names: [server.name], serverIds: [String(server.id)], onlines: [present],
         },
       })
       continue
@@ -171,6 +173,7 @@ export function buildTopology(input: TopologyInput): TopologyGraph {
     existing.offline += offline
     existing.marker.count += 1
     existing.marker.names.push(server.name)
+    existing.marker.serverIds?.push(String(server.id))
     existing.marker.onlines.push(present)
     existing.marker.status = mixStatus(existing.online, existing.offline)
     existing.marker.name = existing.marker.count === 2
@@ -444,6 +447,27 @@ export interface NodeLatencyRow {
   name: string
   online: boolean
   rttMs?: number
+}
+
+export function findNodeMarker(
+  nodes: readonly TopologyMarker[],
+  row: Pick<NodeLatencyRow, 'id' | 'name'>,
+): TopologyMarker | undefined {
+  if (row.id) {
+    const byId = nodes.find(item => item.serverIds?.includes(row.id))
+    if (byId) return byId
+    // 若节点图里已经有带 serverIds 的标记但未命中（例如该节点未定位），不再按同名误跳到别的城市。
+    if (nodes.some(item => item.serverIds && item.serverIds.length > 0)) return undefined
+  }
+  return nodes.find(item => item.names.includes(row.name))
+}
+
+export function markerMatchesLatencyRow(
+  marker: TopologyMarker,
+  row: Pick<NodeLatencyRow, 'id' | 'name'>,
+): boolean {
+  if (marker.serverIds?.length) return marker.serverIds.includes(row.id)
+  return marker.names.includes(row.name)
 }
 
 /** 节点相对主面板的链路延迟。主机离线或主端未连接都算离线。 */

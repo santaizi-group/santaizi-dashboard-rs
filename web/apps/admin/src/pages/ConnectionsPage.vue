@@ -215,7 +215,7 @@ function collectorReplicationText(row: CollectorRecord) {
 }
 
 function pathRowKey(row: ConnectionPath) {
-  return `${row.node_uuid}:${row.observer_id}`
+  return `${rowIdentity(row.server_id, row.node_uuid)}:${row.observer_id}`
 }
 
 function observerLabel(path: ConnectionPath) {
@@ -248,9 +248,6 @@ function cellTone(cell: MatrixCell) {
   return cell.connected ? 'is-connected' : 'is-disconnected'
 }
 
-/// 抽屉内时延请求的代际：换 collector / 换页都会自增。
-///
-/// 旧请求晚到会把上一个 collector 的时延写进当前抽屉。
 let collectorLatencyGeneration = 0
 
 async function loadCollectorLatency() {
@@ -274,7 +271,6 @@ async function loadCollectorLatency() {
   }
 }
 
-/// 同上，path 抽屉独立计数。
 let pathLatencyGeneration = 0
 
 async function loadPathLatency() {
@@ -324,6 +320,15 @@ async function load(quiet = false) {
     ])
     collectors.value = collectorList.data
     paths.value = pathList.data
+    if (activeCollector.value) {
+      const latestCollector = collectorList.data.find(row => row.id === activeCollector.value?.id)
+      if (latestCollector) activeCollector.value = latestCollector
+    }
+    if (activePath.value) {
+      const currentKey = pathRowKey(activePath.value)
+      const latestPath = pathList.data.find(row => pathRowKey(row) === currentKey)
+      if (latestPath) activePath.value = latestPath
+    }
   } catch (error) {
     notifyAPIError(error, t as never, te)
   } finally {

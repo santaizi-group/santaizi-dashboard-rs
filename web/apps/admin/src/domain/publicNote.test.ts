@@ -36,6 +36,11 @@ describe('structured public note', () => {
       customData: { location: 'CN' },
     })
   })
+
+  it('rejects non-object JSON roots as invalid', () => {
+    expect(parsePublicNote('[1, 2]').error).toBeTruthy()
+    expect(parsePublicNote('123').error).toBeTruthy()
+  })
 })
 
 describe('billing cycle aliases', () => {

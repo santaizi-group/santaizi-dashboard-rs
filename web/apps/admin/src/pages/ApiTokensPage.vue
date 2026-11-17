@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRoute } from 'vue-router'
+import { ElMessageBox } from 'element-plus'
 import { deleteApiToken, getApiToken, listApiTokens, patchApiToken, type APIToken } from '@santaizi/api'
 import { AppDialog, AppEmpty } from '@santaizi/ui'
 import IssueApiTokenDialog from '@/components/editors/IssueApiTokenDialog.vue'
@@ -10,6 +11,7 @@ import { copyText } from '@/composables/clipboard'
 import { formatDateTime } from '@/composables/format'
 
 const { t, te, locale } = useI18n()
+const route = useRoute()
 const items = ref<APIToken[]>([])
 const loading = ref(false)
 const togglingId = ref<number | null>(null)
@@ -70,7 +72,11 @@ async function toggleEnabled(row: APIToken, enabled: boolean) {
 }
 
 async function remove(row: APIToken) {
-  await ElMessageBox.confirm(t('confirmDelete'), t('dangerousAction'), { type: 'warning' })
+  try {
+    await ElMessageBox.confirm(t('confirmDelete'), t('dangerousAction'), { type: 'warning' })
+  } catch {
+    return
+  }
   try {
     await deleteApiToken(row.id)
     await load()
@@ -93,7 +99,10 @@ function expiresLabel(row: APIToken) {
   return formatDateTime(row.expires_at, locale.value)
 }
 
-onMounted(load)
+onMounted(async () => {
+  await load()
+  if (route.query.create === '1') editor.value = true
+})
 </script>
 
 <template>
