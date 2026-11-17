@@ -26,8 +26,8 @@ use crate::util::time as util_time;
 
 /// state 缓存 TTL（Go `cache.New(5*time.Minute, ...)` 的默认过期）。
 const STATE_TTL: Duration = Duration::from_secs(300);
-/// 登录态 Cookie 寿命（Go `60*60*24`）。
-const SESSION_COOKIE_MAX_AGE: i64 = 60 * 60 * 24;
+/// 登录态 Cookie 寿命（7 天）。
+const SESSION_COOKIE_MAX_AGE: i64 = 7 * 86_400;
 /// 会话令牌有效期：2 个月（Go `time.Now().AddDate(0, 2, 0)`）。
 const SESSION_TTL_NANOS: i64 = 60 * 24 * 3600 * 1_000_000_000;
 /// 随机串长度（Go `utils.GenerateRandomString(32)`）。
@@ -140,33 +140,31 @@ fn provider_endpoints(
             userinfo_url: "https://jihulab.com/api/v4/user".into(),
             scopes: vec!["read_user".into(), "read_api".into()],
         },
-        // Gitea：SDK base URL 规则为 `{endpoint}/api/v1/`，故 userinfo 在其下。
-        ProviderKind::Gitea => ProviderEndpoints {
-            auth_url: format!("{}/login/oauth/authorize", conf.endpoint),
-            token_url: format!("{}/login/oauth/access_token", conf.endpoint),
-            userinfo_url: format!("{}/api/v1/user", conf.endpoint),
-            scopes: vec![],
-        },
-        ProviderKind::Cloudflare => ProviderEndpoints {
-            auth_url: format!(
-                "{}/cdn-cgi/access/sso/oidc/{}/authorization",
-                conf.endpoint, conf.clientid
-            ),
-            token_url: format!(
-                "{}/cdn-cgi/access/sso/oidc/{}/token",
-                conf.endpoint, conf.clientid
-            ),
-            userinfo_url: format!(
-                "{}/cdn-cgi/access/sso/oidc/{}/userinfo",
-                conf.endpoint, conf.clientid
-            ),
-            scopes: vec![
-                "openid".into(),
-                "email".into(),
-                "profile".into(),
-                "groups".into(),
-            ],
-        },
+        // Gitea：SDK base URL 规则为 `{endpoint}/api/v1/`，去除末尾 `/` 防双斜杠 404。
+        ProviderKind::Gitea => {
+            let endpoint = conf.endpoint.trim().trim_end_matches('/');
+            ProviderEndpoints {
+                auth_url: format!("{endpoint}/login/oauth/authorize"),
+                token_url: format!("{endpoint}/login/oauth/access_token"),
+                userinfo_url: format!("{endpoint}/api/v1/user"),
+                scopes: vec![],
+            }
+        }
+        ProviderKind::Cloudflare => {
+            let endpoint = conf.endpoint.trim().trim_end_matches('/');
+            let client_id = conf.clientid.trim();
+            ProviderEndpoints {
+                auth_url: format!("{endpoint}/cdn-cgi/access/sso/oidc/{client_id}/authorization"),
+                token_url: format!("{endpoint}/cdn-cgi/access/sso/oidc/{client_id}/token"),
+                userinfo_url: format!("{endpoint}/cdn-cgi/access/sso/oidc/{client_id}/userinfo"),
+                scopes: vec![
+                    "openid".into(),
+                    "email".into(),
+                    "profile".into(),
+                    "groups".into(),
+                ],
+            }
+        }
         ProviderKind::Mock | ProviderKind::Oidc | ProviderKind::Unknown => return None,
     };
     Some(endpoints)
@@ -248,11 +246,15 @@ fn map_user(kind: ProviderKind, raw: &RawUserInfo) -> Option<OauthProfile> {
     Some(OauthProfile { name, ..profile })
 }
 
-/// 管理员判定：`oauth2.admin` 逗号列表，空项忽略，大小写不敏感
-/// （Go `strings.EqualFold` 循环）。
-fn is_admin_login(login: &str, admin_list: &str) -> bool {
+/// 管理员判定：`oauth2.admin` 逗号列表，每项去除空白、空项忽略，大小写不敏感。
+pub(crate) fn is_admin_login(login: &str, admin_list: &str) -> bool {
+    let login = login.trim();
+    if login.is_empty() {
+        return false;
+    }
     admin_list
         .split(',')
+        .map(str::trim)
         .any(|admin| !admin.is_empty() && login.eq_ignore_ascii_case(admin))
 }
 
@@ -260,6 +262,7 @@ fn is_admin_login(login: &str, admin_list: &str) -> bool {
 fn mock_admin_login(admin_list: &str) -> &str {
     admin_list
         .split(',')
+        .map(str::trim)
         .find(|admin| !admin.is_empty())
         .unwrap_or("dev")
 }
@@ -426,18 +429,16 @@ async fn fetch_user(
     map_user(kind, &raw).ok_or_else(|| anyhow::anyhow!("empty login in userinfo"))
 }
 
-/// 登录收尾：签令牌 → upsert → 种会话 Cookie → 302 `/admin/`
-/// （Go `callback` 尾部 + `oauth2MockLogin` 的公共部分）。
+/// 登录收尾：签候选令牌 → upsert（若原令牌仍长效则复用） → 种会话 Cookie → 302 `/admin/`。
 async fn finish_login(shared: &ApiShared, profile: OauthProfile, secure: bool) -> Response {
     let token = random_string(RANDOM_LEN);
-    let cookie_token = token.clone();
     let expired_nanos = util_time::now_nanos() + SESSION_TTL_NANOS;
     let persisted = crate::rpc::support::blocking_write(&shared.db, move |tx| {
-        crate::repo::users::upsert_oauth_user(tx, &profile, &token, expired_nanos)
+        crate::repo::users::upsert_oauth_user_token(tx, &profile, &token, expired_nanos)
     })
     .await;
     match persisted {
-        Ok(_) => {
+        Ok((_id, cookie_token)) => {
             let mut response = redirect_to("/admin/");
             set_cookie(
                 &mut response,
@@ -665,8 +666,10 @@ mod tests {
     }
 
     #[test]
-    fn admin_matching_is_case_insensitive_and_skips_empty() {
-        assert!(is_admin_login("Dev", "dev,alice"));
+    fn admin_matching_is_case_insensitive_trims_spaces_and_skips_empty() {
+        assert_eq!(SESSION_COOKIE_MAX_AGE, 7 * 86_400);
+        assert!(is_admin_login("Dev", "dev, alice"));
+        assert!(is_admin_login("alice", " dev ,  alice "));
         assert!(is_admin_login("dev", "DEV"));
         assert!(is_admin_login("alice", ",dev,,alice,"));
         assert!(!is_admin_login("bob", "dev,alice"));
@@ -676,8 +679,8 @@ mod tests {
 
     #[test]
     fn mock_admin_login_picks_first_non_empty() {
-        assert_eq!(mock_admin_login("dev,alice"), "dev");
-        assert_eq!(mock_admin_login(",alice"), "alice");
+        assert_eq!(mock_admin_login(" dev , alice "), "dev");
+        assert_eq!(mock_admin_login(", alice"), "alice");
         assert_eq!(mock_admin_login(""), "dev");
     }
 
@@ -717,10 +720,10 @@ mod tests {
         assert!(provider_endpoints(&conf_with("weird", "dev"), ProviderKind::Unknown).is_none());
     }
 
-    /// gitea 端点带配置 endpoint 前缀（与 cloudflare 同一形状）。
+    /// gitea 端点带配置 endpoint 前缀（去除末尾 `/` 防双斜杠）。
     fn gitea_endpoint_check(conf: &Oauth2Config) {
         let mut conf = conf.clone();
-        conf.endpoint = "https://git.example.test".into();
+        conf.endpoint = "https://git.example.test///".into();
         let endpoints = provider_endpoints(&conf, ProviderKind::Gitea).expect("gitea");
         assert_eq!(
             endpoints.auth_url,

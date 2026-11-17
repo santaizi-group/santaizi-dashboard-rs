@@ -20,6 +20,10 @@ use super::auth::{AdminUser, ApiShared, data_json, problem};
 use super::pagination::{offset_of, parse_page};
 use super::presentation;
 
+/// 单次批量入队的服务器上限：与探针观察页一页的目标量同级，超出说明调用方
+/// 传错了范围（例如把全库 id 丢进来），直接 400，不静默截断。
+const MAX_ROUTE_JOBS_PER_CALL: usize = 200;
+
 /// 游标分页信封（Go monitor history / admin availability：meta 只带 next_cursor）。
 fn list_cursor(data: Vec<Value>, next_cursor: String) -> Response {
     let mut meta = json!({});
@@ -480,12 +484,16 @@ async fn create_probe_route(
     AdminUser(_admin): AdminUser,
     body: axum::body::Bytes,
 ) -> Response {
+    // 单目标（`server_id`）与批量（`server_ids`）共用一个入口：批量是探针
+    // 观察页「对整组目标立刻追踪」的下发路径，单目标保留给详情弹窗。
     #[derive(Deserialize)]
     struct Request {
         #[serde(default)]
         collector_id: String,
         #[serde(default)]
         server_id: i64,
+        #[serde(default)]
+        server_ids: Vec<i64>,
         #[serde(default)]
         protocol: String,
     }
@@ -499,27 +507,49 @@ async fn create_probe_route(
             );
         }
     };
+    let protocol = request.protocol.trim().to_ascii_lowercase();
     if request.collector_id.trim().is_empty()
-        || request.server_id <= 0
-        || !matches!(request.protocol.as_str(), "icmp" | "tcp" | "ICMP" | "TCP")
+        || !matches!(protocol.as_str(), "icmp" | "tcp")
+        || (request.server_ids.is_empty() && request.server_id <= 0)
+        || request.server_ids.iter().any(|id| *id <= 0)
+        || request.server_ids.len() > MAX_ROUTE_JOBS_PER_CALL
+        // 两种形态共用一个入口：同时给出 `server_id` 与 `server_ids` 时
+        // 响应形状无法同时满足，直接拒绝而不是静默挑一种。
+        || (!request.server_ids.is_empty() && request.server_id > 0)
     {
         return problem(
             StatusCode::BAD_REQUEST,
             "invalid_probe_route",
-            "collector_id、server_id 与 protocol（icmp/tcp）必填",
+            "collector_id、server_id 或 server_ids 与 protocol（icmp/tcp）必填",
         );
     }
-    let result = blocking_write(&shared.db, move |tx| {
-        insights::enqueue_probe_route_job(
-            tx,
-            &request.collector_id,
-            request.server_id,
-            &request.protocol.to_lowercase(),
-        )
-    })
-    .await;
+    /// 单目标与批量两条写路径的返回形状不同，先归一成一种结果再走同一套
+    /// 错误映射——响应体仍按调用形态分别给 `id` 或 `enqueued`/`reused`。
+    enum Outcome {
+        Single(i64, String, i64),
+        Batch(usize, usize),
+    }
+    let result = if request.server_ids.is_empty() {
+        let collector_id = request.collector_id.clone();
+        let server_id = request.server_id;
+        let protocol = protocol.clone();
+        blocking_write(&shared.db, move |tx| {
+            insights::enqueue_probe_route_job(tx, &collector_id, server_id, &protocol)
+        })
+        .await
+        .map(|inner| inner.map(|(id, protocol, port)| Outcome::Single(id, protocol, port)))
+    } else {
+        let collector_id = request.collector_id.clone();
+        let server_ids = request.server_ids.clone();
+        let protocol = protocol.clone();
+        blocking_write(&shared.db, move |tx| {
+            insights::enqueue_probe_route_jobs(tx, &collector_id, &server_ids, &protocol)
+        })
+        .await
+        .map(|inner| inner.map(|(enqueued, reused)| Outcome::Batch(enqueued, reused)))
+    };
     match result {
-        Ok(Ok((id, protocol, port))) => {
+        Ok(Ok(Outcome::Single(id, protocol, port))) => {
             let mut payload = json!({
                 "id": id,
                 "protocol": protocol,
@@ -533,9 +563,25 @@ async fn create_probe_route(
             *response.status_mut() = StatusCode::ACCEPTED;
             response
         }
+        Ok(Ok(Outcome::Batch(enqueued, reused))) => {
+            let mut response = data_json(json!({
+                "protocol": protocol,
+                "status": "pending",
+                "enqueued": enqueued,
+                "reused": reused,
+                "requested_at": util_time::unix_nanos_to_rfc3339(util_time::now_nanos()),
+            }));
+            *response.status_mut() = StatusCode::ACCEPTED;
+            response
+        }
         Ok(Err(reason)) => {
             let (code, detail) = match reason.as_str() {
-                "not_found" => ("not_found", "探测从端或服务器不存在"),
+                "not_found" => ("not_found", "探测从端不存在"),
+                "server_not_found" => ("not_found", "目标服务器不存在或已删除"),
+                "server_out_of_scope" => (
+                    "invalid_probe_route",
+                    "目标服务器不在该探测从端的观测范围内",
+                ),
                 "invalid_protocol" => ("invalid_probe_route", "protocol 必须是 icmp 或 tcp"),
                 _ => (
                     "probe_route_disabled",
@@ -593,10 +639,17 @@ async fn delete_offline_history(
         return problem(StatusCode::BAD_REQUEST, "invalid_id", "资源 ID 无效");
     }
     let deleted = blocking_write(&shared.db, move |tx| {
-        Ok(tx.execute(
+        let changed = tx.execute(
             "DELETE FROM server_offline_histories WHERE id = ?1",
             [resource_id],
-        )?)
+        )?;
+        if changed > 0 {
+            tx.execute(
+                "UPDATE server_runtimes SET current_offline_id = NULL WHERE current_offline_id = ?1",
+                [resource_id],
+            )?;
+        }
+        Ok(changed)
     })
     .await;
     match deleted {
@@ -655,8 +708,8 @@ async fn cleanup_offline_history(
         }
     };
     let server_id = request.server_id;
-    let deleted = blocking_read(&shared.db, move |conn| {
-        insights::cleanup_offline_history(conn, Some(server_id), before)
+    let deleted = blocking_write(&shared.db, move |tx| {
+        insights::cleanup_offline_history(tx, Some(server_id), before)
     })
     .await;
     match deleted {
@@ -745,10 +798,10 @@ fn parse_rfc3339_param(
             .and_then(|nanos| i64::try_from(nanos).ok())
             .map(Some)
             .ok_or_else(|| {
-                let code: &str = Box::leak(format!("invalid_{key}").into_boxed_str());
+                let code = format!("invalid_{key}");
                 Box::new(problem(
                     StatusCode::BAD_REQUEST,
-                    code,
+                    &code,
                     &format!("{key} 必须是 RFC3339 时间"),
                 ))
             }),
@@ -862,6 +915,10 @@ pub fn routes() -> axum::Router<ApiShared> {
         .route("/api/v2/admin/database/optimize", post(optimize_database))
         .route(
             "/api/v2/admin/monitors/{resourceId}/history",
+            get(monitor_history),
+        )
+        .route(
+            "/api/v2/admin/monitors/{resourceId}/histories",
             get(monitor_history),
         )
         .route(

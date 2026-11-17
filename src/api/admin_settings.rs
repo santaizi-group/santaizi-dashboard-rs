@@ -38,12 +38,43 @@ pub(crate) fn css_is_safe(css: &str) -> bool {
 /// 3. 只放行白名单内的 at-rule，且一律禁掉会发起网络请求的函数。
 ///
 /// 这是主题字段，不是通用 CSS 沙箱：宁可拒掉正常但罕见的写法。
+fn has_ie_behavior_property(normalized: &str) -> bool {
+    let bytes = normalized.as_bytes();
+    let needle = b"behavior";
+    let mut pos = 0usize;
+    while let Some(rel) = normalized[pos..].find("behavior") {
+        let idx = pos + rel;
+        let after = normalized[idx + needle.len()..].trim_start();
+        if after.starts_with(':') {
+            let standalone = if idx == 0 {
+                true
+            } else if idx >= 4 && &bytes[idx - 4..idx] == b"-ms-" {
+                idx == 4
+                    || !matches!(
+                        bytes[idx - 5],
+                        b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_'
+                    )
+            } else {
+                !matches!(bytes[idx - 1], b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_')
+            };
+            if standalone {
+                return true;
+            }
+        }
+        pos = idx + needle.len();
+    }
+    false
+}
+
 fn forbidden_css(css: &str) -> bool {
     let normalized = normalize_css(css);
 
-    // HTML 结构字符：CSS 里没有合法用途（`<style>` 由 textContent 注入，
-    // 但 `</style` 之类的残留仍应拒）。
-    if normalized.contains(['<', '>', '&']) {
+    // 禁止 `<` 防闭合 `</style>` 注入 HTML；放行子代选择器 `>` 与嵌套选择器 `&`。
+    if normalized.contains('<') {
+        return true;
+    }
+
+    if has_ie_behavior_property(&normalized) {
         return true;
     }
 
@@ -54,7 +85,6 @@ fn forbidden_css(css: &str) -> bool {
         "-webkit-image-set(",
         "src(",
         "-moz-binding",
-        "behavior",
         "expression(",
         "javascript:",
         "vbscript:",
@@ -71,9 +101,10 @@ fn forbidden_css(css: &str) -> bool {
 
     // at-rule白名单：其余一律拒（`@import` 上面已挡，这里兜未知新规则）。
     // 条目统一带 `@`：与下面拼出的 `@{name}` 比对，漏一个前缀就等于漏放一类规则。
-    const ALLOWED_AT_RULES: [&str; 8] = [
+    const ALLOWED_AT_RULES: [&str; 9] = [
         "@media",
         "@supports",
+        "@container",
         "@keyframes",
         "@-webkit-keyframes",
         "@-moz-keyframes",
@@ -194,7 +225,36 @@ fn string_value(value: Option<&Value>) -> String {
     }
 }
 
-/// Go `uintValue`：解析失败或缺席保留现值；容忍 `123.0` 形态。
+/// 解析 `proxy_grpc_port`：`null` / `""` 视为 `0`；非法字符串、负数或超出 `u16` 报错。
+fn parse_proxy_grpc_port(raw: &Value) -> Result<u16, ()> {
+    match raw {
+        Value::Null => Ok(0),
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return Ok(0);
+            }
+            let normalized = trimmed.strip_suffix(".0").unwrap_or(trimmed);
+            let port = normalized.parse::<u64>().map_err(|_| ())?;
+            u16::try_from(port).map_err(|_| ())
+        }
+        Value::Number(num) => {
+            if let Some(u) = num.as_u64() {
+                return u16::try_from(u).map_err(|_| ());
+            }
+            if let Some(f) = num.as_f64()
+                && f.is_finite()
+                && f >= 0.0
+                && f.fract() == 0.0
+                && f <= u16::MAX as f64
+            {
+                return Ok(f as u16);
+            }
+            Err(())
+        }
+        _ => Err(()),
+    }
+}
 fn uint_value(value: Option<&Value>, current: u64) -> u64 {
     let Some(value) = value else {
         return current;
@@ -284,27 +344,29 @@ async fn update_settings(
         }
         updated.language = language;
     }
-    if as_bool(get("clear_view_password")) {
+    let new_view_password = get("view_password")
+        .map(|v| string_value(Some(v)))
+        .unwrap_or_default();
+    if !new_view_password.is_empty() {
+        // 传入非空新密码优先设置，即使前端误同时携带 clear_view_password=true。
+        updated.site.view_password = new_view_password;
+    } else if as_bool(get("clear_view_password")) {
         updated.site.view_password = String::new();
-    } else if let Some(password) = get("view_password") {
-        let password = string_value(Some(password));
-        if !password.is_empty() {
-            updated.site.view_password = password;
-        }
     }
     if exists("grpc_host") {
         updated.grpc_host = string_value(get("grpc_host"));
     }
-    if exists("proxy_grpc_port") {
-        let port = uint_value(get("proxy_grpc_port"), updated.proxy_grpc_port as u64);
-        if port > 65535 {
-            return problem(
-                StatusCode::BAD_REQUEST,
-                "invalid_proxy_grpc_port",
-                "公网 gRPC 端口必须在 0–65535 之间，0 表示使用监听端口",
-            );
+    if let Some(raw_port) = get("proxy_grpc_port") {
+        match parse_proxy_grpc_port(raw_port) {
+            Ok(port) => updated.proxy_grpc_port = port,
+            Err(()) => {
+                return problem(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_proxy_grpc_port",
+                    "公网 gRPC 端口必须在 0–65535 之间，0 表示使用监听端口",
+                );
+            }
         }
-        updated.proxy_grpc_port = port as u16;
     }
     if exists("tls") {
         updated.tls = as_bool(get("tls"));
@@ -339,9 +401,12 @@ async fn update_settings(
         updated.offline_history_retention_days,
     );
     if updated.offline_threshold_seconds < 10
+        || updated.offline_threshold_seconds > config::MAX_OFFLINE_THRESHOLD_SECONDS
         || updated.offline_check_interval_seconds < 5
+        || updated.offline_check_interval_seconds > config::MAX_OFFLINE_CHECK_INTERVAL_SECONDS
         || updated.offline_check_interval_seconds > updated.offline_threshold_seconds
         || updated.offline_history_retention_days < 1
+        || updated.offline_history_retention_days > config::MAX_OFFLINE_RETENTION_DAYS
         || updated.offline_merge_gap_seconds > 3600
     {
         return problem(
@@ -500,11 +565,11 @@ fn api_token_dto(row: &api_tokens::ApiTokenRow, include_plain: bool, now_nanos: 
 }
 
 /// `GET /api/v2/admin/api-tokens`。
-async fn list_api_tokens(State(shared): State<ApiShared>, AdminUser(admin): AdminUser) -> Response {
-    let rows = blocking_read(&shared.db, move |conn| {
-        api_tokens::list_by_user(conn, admin.user.id)
-    })
-    .await;
+async fn list_api_tokens(
+    State(shared): State<ApiShared>,
+    AdminUser(_admin): AdminUser,
+) -> Response {
+    let rows = blocking_read(&shared.db, api_tokens::list_all).await;
     match rows {
         Ok(rows) => {
             let now_nanos = util_time::now_nanos();
@@ -684,7 +749,7 @@ async fn get_api_token(
     }
     let include_plain = !admin.is_api;
     let row = blocking_read(&shared.db, move |conn| {
-        api_tokens::get_by_id(conn, admin.user.id, token_id)
+        api_tokens::find_by_id(conn, token_id)
     })
     .await;
     match row {
@@ -704,7 +769,7 @@ async fn get_api_token(
 /// `PATCH /api/v2/admin/api-tokens/{tokenId}`（启停开关）。
 async fn patch_api_token(
     State(shared): State<ApiShared>,
-    AdminUser(admin): AdminUser,
+    AdminUser(_admin): AdminUser,
     Path(token_id): Path<i64>,
     body: axum::body::Bytes,
 ) -> Response {
@@ -732,12 +797,11 @@ async fn patch_api_token(
             "enabled 必填",
         );
     };
-    let user_id = admin.user.id;
     let plain = blocking_write(&shared.db, move |tx| {
-        if !api_tokens::set_enabled(tx, user_id, token_id, enabled)? {
+        if !api_tokens::set_enabled_by_id(tx, token_id, enabled)? {
             return Ok(None);
         }
-        let row = api_tokens::get_by_id(tx, user_id, token_id)?;
+        let row = api_tokens::find_by_id(tx, token_id)?;
         Ok(row.map(|row| secret::decrypt_secret(&row.token_ciphertext).unwrap_or_default()))
     })
     .await;
@@ -745,7 +809,7 @@ async fn patch_api_token(
         Ok(Some(plain)) => {
             shared.tokens.set_enabled(&plain, enabled);
             let row = blocking_read(&shared.db, move |conn| {
-                api_tokens::get_by_id(conn, user_id, token_id)
+                api_tokens::find_by_id(conn, token_id)
             })
             .await;
             match row {
@@ -768,18 +832,17 @@ async fn patch_api_token(
 /// `DELETE /api/v2/admin/api-tokens/{tokenId}`。
 async fn delete_api_token(
     State(shared): State<ApiShared>,
-    AdminUser(admin): AdminUser,
+    AdminUser(_admin): AdminUser,
     Path(token_id): Path<i64>,
 ) -> Response {
     if token_id <= 0 {
         return problem(StatusCode::BAD_REQUEST, "invalid_id", "资源 ID 无效");
     }
-    let user_id = admin.user.id;
     let removed = blocking_write(&shared.db, move |tx| {
-        let Some(row) = api_tokens::get_by_id(tx, user_id, token_id)? else {
+        let Some(row) = api_tokens::find_by_id(tx, token_id)? else {
             return Ok(None);
         };
-        api_tokens::delete(tx, user_id, token_id)?;
+        api_tokens::delete_by_id(tx, token_id)?;
         Ok(Some(
             secret::decrypt_secret(&row.token_ciphertext).unwrap_or_default(),
         ))
@@ -827,7 +890,10 @@ pub fn routes() -> axum::Router<ApiShared> {
 
 #[cfg(test)]
 mod css_tests {
-    use super::{css_is_safe, decode_css_escapes, normalize_css, strip_css_comments};
+    use super::{
+        css_is_safe, decode_css_escapes, normalize_css, parse_proxy_grpc_port, strip_css_comments,
+    };
+    use serde_json::json;
 
     fn safe(css: &str) -> bool {
         css_is_safe(css)
@@ -837,6 +903,9 @@ mod css_tests {
     fn normal_theme_css_is_allowed() {
         for css in [
             ".card { border-radius: 8px; }",
+            ".nav > .item { display: flex; &:hover { opacity: .9 } }",
+            "html { scroll-behavior: smooth; overscroll-behavior: contain; }",
+            "@container (min-width: 480px) { .card { padding: 16px } }",
             "@media (max-width: 720px) { .row { display: none } }",
             "@supports (display: grid) { .grid { display: grid } }",
             "@keyframes pulse { from { opacity: .4 } to { opacity: 1 } }",
@@ -859,6 +928,8 @@ mod css_tests {
             ".a { background: url(http://evil/p.png) }",
             ".a { background: url('//evil/p.png') }",
             ".a { behavior: url(x.htc) }",
+            ".a { behavior: none }",
+            ".a { -ms-behavior: none }",
             ".a { -moz-binding: url(x.xml#a) }",
             ".a { width: expression(alert(1)) }",
             ".a { background: javascript:alert(1) }",
@@ -868,6 +939,19 @@ mod css_tests {
         ] {
             assert!(!safe(css), "应被拒：{css}");
         }
+    }
+
+    #[test]
+    fn proxy_grpc_port_accepts_empty_or_null_and_rejects_garbage() {
+        assert_eq!(parse_proxy_grpc_port(&json!(null)), Ok(0));
+        assert_eq!(parse_proxy_grpc_port(&json!("")), Ok(0));
+        assert_eq!(parse_proxy_grpc_port(&json!("   ")), Ok(0));
+        assert_eq!(parse_proxy_grpc_port(&json!(5555)), Ok(5555));
+        assert_eq!(parse_proxy_grpc_port(&json!("443")), Ok(443));
+        assert_eq!(parse_proxy_grpc_port(&json!("abc")), Err(()));
+        assert_eq!(parse_proxy_grpc_port(&json!(-1)), Err(()));
+        assert_eq!(parse_proxy_grpc_port(&json!("-5")), Err(()));
+        assert_eq!(parse_proxy_grpc_port(&json!(70000)), Err(()));
     }
 
     #[test]

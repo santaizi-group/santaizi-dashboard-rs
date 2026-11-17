@@ -385,12 +385,15 @@ pub async fn serve_http(
     cancel: CancellationToken,
 ) -> crate::Result<()> {
     let app = router(state);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            cancel.cancelled().await;
-        })
-        .await
-        .map_err(|err| anyhow::anyhow!("serve http: {err}"))?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        cancel.cancelled().await;
+    })
+    .await
+    .map_err(|err| anyhow::anyhow!("serve http: {err}"))?;
     tracing::info!("HTTP 服务退出");
     Ok(())
 }

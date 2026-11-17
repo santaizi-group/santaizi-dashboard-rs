@@ -131,17 +131,91 @@ struct ViewPasswordRequest {
     password: String,
 }
 
+/// 单客户端 IP 每分钟允许的查看密码失败次数。
+const VIEW_PASSWORD_IP_MAX_FAILURES: u32 = 5;
+/// 全站兜底每分钟允许的查看密码失败次数（防分布式爆破且避免单一路人锁死全站）。
+const VIEW_PASSWORD_GLOBAL_MAX_FAILURES: u32 = 60;
+const VIEW_PASSWORD_GLOBAL_KEY: &str = "view-password:global";
+
+fn client_ip_from_headers_or_peer(headers: &HeaderMap, peer: Option<std::net::IpAddr>) -> String {
+    for name in ["CF-Connecting-IP", "X-Real-IP", "X-Forwarded-For"] {
+        if let Some(raw) = headers.get(name).and_then(|v| v.to_str().ok())
+            && let Some(first) = raw.split(',').next().map(str::trim)
+            && !first.is_empty()
+        {
+            if let Ok(ip) = first.parse::<std::net::IpAddr>() {
+                return ip.to_string();
+            }
+            if let Ok(sock) = first.parse::<std::net::SocketAddr>() {
+                return sock.ip().to_string();
+            }
+            let clean: String = first
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-'))
+                .take(64)
+                .collect();
+            if !clean.is_empty() {
+                return clean;
+            }
+        }
+    }
+    peer.map(|ip| ip.to_string())
+        .unwrap_or_else(|| "fallback".to_string())
+}
+
+fn cookie_secure(headers: &HeaderMap) -> bool {
+    headers
+        .get("X-Forwarded-Proto")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .next()
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case("https"))
+        })
+        || headers
+            .get("X-Forwarded-Ssl")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("on"))
+}
+
+fn too_many_attempts_response(retry: super::rate_limit::RetryAfter) -> Response {
+    let mut response = problem(
+        StatusCode::TOO_MANY_REQUESTS,
+        "too_many_attempts",
+        "尝试过于频繁，请稍后重试",
+    );
+    if let Ok(value) = header::HeaderValue::from_str(&retry.seconds().to_string()) {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    response
+}
+
 /// `POST /api/v2/public/view-password/session`：校验查看密码并下发
 /// `-vp` Cookie（Go `v2ViewPasswordSession`）。
 ///
-/// 查看密码是站点级单值、无账号可锁，失败不限速等于裸奔的爆破面：
-/// 全局桶按尝试速率压住（密钥只有一个，桶也只需要一个）。
+/// 节流采用「单客户端 IP 5 次/分钟 + 全站兜底 60 次/分钟」双桶：防止单一路人
+/// 连续输错 5 次就把全站合法访客全部锁死，同时压住分布式爆破总速率。
+/// 解锁成功后的新 `-vp` Cookie 会在 `auth::authenticate` 出站层自动联动重签
+/// `-csrf` Cookie，避免下一步写请求 CSRF 失步。
 async fn view_password_session(
     State(shared): State<ApiShared>,
-    body: axum::body::Bytes,
+    request: axum::extract::Request,
 ) -> Response {
-    let request: ViewPasswordRequest = match serde_json::from_slice::<ViewPasswordRequest>(&body) {
-        Ok(request) if !request.password.is_empty() => request,
+    let peer_ip = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip());
+    let headers = request.headers().clone();
+    let Ok(body) = axum::body::to_bytes(request.into_body(), 64 * 1024).await else {
+        return problem(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "password 不能为空",
+        );
+    };
+    let parsed: ViewPasswordRequest = match serde_json::from_slice::<ViewPasswordRequest>(&body) {
+        Ok(req) if !req.password.is_empty() => req,
         _ => {
             return problem(
                 StatusCode::BAD_REQUEST,
@@ -150,37 +224,39 @@ async fn view_password_session(
             );
         }
     };
-    // 节流键与查看密码本身无关：锁的是「这个站点的这道门」。
-    const THROTTLE_KEY: &str = "view-password";
-    if let Err(retry) = shared.throttle.check(THROTTLE_KEY) {
-        let mut response = problem(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too_many_attempts",
-            "尝试过于频繁，请稍后重试",
-        );
-        if let Ok(value) = header::HeaderValue::from_str(&retry.seconds().to_string()) {
-            response.headers_mut().insert(header::RETRY_AFTER, value);
-        }
-        return response;
+    let ip_key = format!(
+        "view-password:ip:{}",
+        client_ip_from_headers_or_peer(&headers, peer_ip)
+    );
+    if let Err(retry) = shared.throttle.check(&ip_key) {
+        return too_many_attempts_response(retry);
     }
-    if request.password != shared.conf().site.view_password {
-        shared.throttle.record_failure(THROTTLE_KEY);
+    if let Err(retry) = shared.throttle.check(VIEW_PASSWORD_GLOBAL_KEY) {
+        return too_many_attempts_response(retry);
+    }
+    if parsed.password != shared.conf().site.view_password {
+        shared
+            .throttle
+            .record_failure_with_limit(&ip_key, VIEW_PASSWORD_IP_MAX_FAILURES);
+        shared
+            .throttle
+            .record_failure_with_limit(VIEW_PASSWORD_GLOBAL_KEY, VIEW_PASSWORD_GLOBAL_MAX_FAILURES);
         return problem(
             StatusCode::FORBIDDEN,
             "invalid_view_password",
             "查看密码不正确",
         );
     }
-    shared.throttle.record_success(THROTTLE_KEY);
+    shared.throttle.record_success(&ip_key);
     let mut response = StatusCode::NO_CONTENT.into_response();
-    let cookie = format!(
-        "{}={}; Path=/; Max-Age={VIEW_PASSWORD_COOKIE_MAX_AGE}; SameSite=Lax; HttpOnly",
-        vp_cookie_name(&shared.cookie_name),
-        view_password_token(&shared.conf().site.view_password)
+    super::auth::set_cookie(
+        &mut response,
+        &vp_cookie_name(&shared.cookie_name),
+        &view_password_token(&shared.conf().site.view_password),
+        VIEW_PASSWORD_COOKIE_MAX_AGE,
+        true,
+        cookie_secure(&headers),
     );
-    if let Ok(value) = header::HeaderValue::from_str(&cookie) {
-        response.headers_mut().append(header::SET_COOKIE, value);
-    }
     response
 }
 
@@ -345,5 +421,22 @@ mod tests {
             safe_asset_url("https://evil.example/x.png", "/static/logo.svg"),
             "/static/logo.svg"
         );
+    }
+
+    #[test]
+    fn client_ip_and_https_cookie_detection() {
+        let mut h = HeaderMap::new();
+        assert_eq!(client_ip_from_headers_or_peer(&h, None), "fallback");
+        h.insert(
+            "X-Forwarded-For",
+            header::HeaderValue::from_static("203.0.113.9, 10.0.0.1"),
+        );
+        assert_eq!(client_ip_from_headers_or_peer(&h, None), "203.0.113.9");
+        assert!(!cookie_secure(&h));
+        h.insert(
+            "X-Forwarded-Proto",
+            header::HeaderValue::from_static("https"),
+        );
+        assert!(cookie_secure(&h));
     }
 }

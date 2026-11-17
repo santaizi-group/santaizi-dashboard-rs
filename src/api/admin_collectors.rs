@@ -91,7 +91,7 @@ struct InstallBody {
     #[serde(default)]
     primary_endpoint: String,
     #[serde(default)]
-    primary_tls: bool,
+    primary_tls: Option<bool>,
     #[serde(default)]
     primary_insecure_tls: bool,
     #[serde(default)]
@@ -396,9 +396,12 @@ async fn rotate_token(
 
 async fn get_token(
     State(shared): State<ApiShared>,
-    AdminUser(_admin): AdminUser,
+    AdminUser(admin): AdminUser,
     Path(id): Path<String>,
 ) -> Response {
+    if let Some(denied) = super::auth::require_write_scope(&admin) {
+        return denied;
+    }
     match blocking_read(&shared.db, move |conn| {
         let Some(row) = collectors::find_admin(conn, &id)? else {
             return Ok(None);
@@ -500,13 +503,15 @@ async fn install_preview(
                 Ok(port) => port,
                 Err(detail) => return invalid("invalid_install_preview", &detail),
             };
+            let default_primary_tls = conf.grpc_tls.enabled || conf.tls;
+            let primary_tls = request.primary_tls.unwrap_or(default_primary_tls);
             let script = conf.install_script.collector.clone();
             let command = build_install_command(
                 &script,
                 &endpoint,
                 &token,
                 grpc_port,
-                request.primary_tls,
+                primary_tls,
                 request.primary_insecure_tls,
             );
             let _ = headers;
@@ -514,9 +519,9 @@ async fn install_preview(
                 "command": command,
                 "primary_endpoint": endpoint,
                 "grpc_port": grpc_port,
-                "primary_tls": request.primary_tls,
+                "primary_tls": primary_tls,
                 "primary_insecure_tls": request.primary_insecure_tls,
-                "default_primary_tls": conf.grpc_tls.enabled,
+                "default_primary_tls": default_primary_tls,
             }))
         }
         Err(err) => database_error(err),
@@ -899,6 +904,15 @@ fn map_write_error(err: anyhow::Error) -> Response {
             invalid("invalid_collector", "观察型从端必须填写地址")
         }
         Some(CollectorReject::NameRequired) => invalid("invalid_collector", "名称不能为空"),
-        None => database_error(err),
+        None => {
+            let msg = format!("{err:#}");
+            if msg.contains("collector not found")
+                || (msg.contains("collector ") && msg.contains(" not found"))
+            {
+                not_found()
+            } else {
+                database_error(err)
+            }
+        }
     }
 }

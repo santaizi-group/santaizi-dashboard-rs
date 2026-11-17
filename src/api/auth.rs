@@ -125,11 +125,11 @@ fn csrf_cookie_name(cookie_name: &str) -> String {
     format!("{cookie_name}-csrf")
 }
 
-/// CSRF 会话标识：会话 Cookie 与查看密码 Cookie 的组合（Go `csrfSessionID`）。
-fn csrf_session_id(headers: &HeaderMap, cookie_name: &str) -> String {
+/// CSRF 会话组成部分：`(auth_cookie, vp_cookie)`。
+fn csrf_session_parts(headers: &HeaderMap, cookie_name: &str) -> (String, String) {
     let auth = cookie_value(headers, cookie_name).unwrap_or_default();
     let vp = cookie_value(headers, &format!("{cookie_name}-vp")).unwrap_or_default();
-    format!("{auth}|{vp}")
+    (auth, vp)
 }
 
 fn csrf_signature(secret: &[u8], session_id: &str, nonce: &str) -> String {
@@ -229,13 +229,76 @@ pub fn list_json_paged(data: serde_json::Value, page: i64, page_size: i64, total
     response
 }
 
+/// 解析响应 `Set-Cookie` 首段名值对；若 `Max-Age <= 0` 则视作清除（空串）。
+fn parse_set_cookie_pair(raw: &str) -> Option<(&str, &str)> {
+    let mut parts = raw.split(';');
+    let (name, value) = parts.next()?.trim().split_once('=')?;
+    for attr in parts {
+        if let Some((k, v)) = attr.trim().split_once('=')
+            && k.trim().eq_ignore_ascii_case("max-age")
+            && v.trim().parse::<i64>().is_ok_and(|age| age <= 0)
+        {
+            return Some((name.trim(), ""));
+        }
+    }
+    Some((name.trim(), value.trim()))
+}
+
+/// 若下游处理器在响应中下发或清除了会话 Cookie / `-vp` Cookie，按新值计算
+/// 出站 CSRF 对应的会话标识，防止查看密码解锁或登录/登出后下一步写请求 CSRF 失步。
+fn response_csrf_session_id(
+    mut auth: String,
+    mut vp: String,
+    resp_headers: &HeaderMap,
+    cookie_name: &str,
+) -> String {
+    let vp_name = format!("{cookie_name}-vp");
+    for header_val in resp_headers.get_all(header::SET_COOKIE) {
+        let Ok(raw) = header_val.to_str() else {
+            continue;
+        };
+        let Some((name, val)) = parse_set_cookie_pair(raw) else {
+            continue;
+        };
+        if name == cookie_name {
+            auth = val.to_string();
+        } else if name == vp_name {
+            vp = val.to_string();
+        }
+    }
+    format!("{auth}|{vp}")
+}
+
+/// 真实 OAuth2 Provider 下要求当前用户登录名仍在 `conf.oauth2.admin` 白名单内；
+/// 未配置 OAuth2 或 `mock` 调试模式（含集成测试直接种子用户）放行。
+fn oauth2_admin_allows(conf: &crate::config::Config, login: &str) -> bool {
+    let kind = conf.oauth2.type_.trim();
+    if kind.is_empty() || kind.eq_ignore_ascii_case("mock") {
+        return true;
+    }
+    super::oauth2::is_admin_login(login, &conf.oauth2.admin)
+}
+
+/// 敏感凭据读取门：只读 API Token（`is_api` 且权限非 `write`）返回 `403 insufficient_token_scope`。
+pub fn require_write_scope(admin: &CurrentUser) -> Option<Response> {
+    if admin.is_api && admin.api_permission.as_deref() != Some("write") {
+        return Some(problem(
+            StatusCode::FORBIDDEN,
+            "insufficient_token_scope",
+            "只读 API Token 不允许读取敏感凭据",
+        ));
+    }
+    None
+}
+
 /// 认证 + CSRF 中间件（Go `r.Use(CSRF, Authorize)` 的合并等价物）。
 pub async fn authenticate(
     axum::extract::State(shared): axum::extract::State<ApiShared>,
     mut request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let session_id = csrf_session_id(request.headers(), &shared.cookie_name);
+    let (in_auth, in_vp) = csrf_session_parts(request.headers(), &shared.cookie_name);
+    let session_id = format!("{in_auth}|{in_vp}");
     let csrf_token = current_csrf_token(request.headers(), &shared, &session_id);
 
     // CSRF：非安全方法且非 Bearer 请求必须提交匹配令牌。
@@ -268,11 +331,18 @@ pub async fn authenticate(
         .insert(CsrfToken(csrf_token.clone()));
 
     let mut response = next.run(request).await;
+    let out_session_id =
+        response_csrf_session_id(in_auth, in_vp, response.headers(), &shared.cookie_name);
+    let out_csrf = if out_session_id == session_id {
+        csrf_token
+    } else {
+        new_csrf_token(&shared.csrf_secret, &out_session_id)
+    };
     // CSRF Cookie 每次刷新（HttpOnly=false，前端可读）。
     set_cookie(
         &mut response,
         &csrf_cookie_name(&shared.cookie_name),
-        &csrf_token,
+        &out_csrf,
         CSRF_TOKEN_AGE_SECS,
         false,
         false,
@@ -283,6 +353,7 @@ pub async fn authenticate(
 /// 会话解析：Cookie 优先，Bearer 次之（Go 顺序：先 Cookie 后 API）。
 async fn resolve_user(shared: &ApiShared, headers: &HeaderMap) -> Option<CurrentUser> {
     let now_nanos = util_time::now_nanos();
+    let conf = shared.conf();
     if let Some(token) = cookie_value(headers, &shared.cookie_name)
         && !token.is_empty()
     {
@@ -292,7 +363,9 @@ async fn resolve_user(shared: &ApiShared, headers: &HeaderMap) -> Option<Current
         .await
         .ok()
         .flatten();
-        if let Some(user) = user {
+        if let Some(user) = user
+            && oauth2_admin_allows(&conf, &user.login)
+        {
             return Some(CurrentUser {
                 user,
                 is_api: false,
@@ -320,6 +393,9 @@ async fn resolve_user(shared: &ApiShared, headers: &HeaderMap) -> Option<Current
     .await
     .ok()
     .flatten()?;
+    if !oauth2_admin_allows(&conf, &user.login) {
+        return None;
+    }
     Some(CurrentUser {
         user,
         is_api: true,
@@ -447,5 +523,75 @@ mod tests {
         assert!(!csrf_token_valid(&forged, &secret, session_id));
         assert!(!csrf_token_valid("no-dot", &secret, session_id));
         assert!(!csrf_token_valid("", &secret, session_id));
+    }
+
+    #[test]
+    fn response_csrf_session_tracks_new_and_cleared_cookies() {
+        let mut resp = HeaderMap::new();
+        resp.append(
+            header::SET_COOKIE,
+            HeaderValue::from_static(
+                "santaizi-dashboard-vp=vp123; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax",
+            ),
+        );
+        assert_eq!(
+            response_csrf_session_id("".into(), "".into(), &resp, "santaizi-dashboard"),
+            "|vp123"
+        );
+        resp.append(
+            header::SET_COOKIE,
+            HeaderValue::from_static(
+                "santaizi-dashboard=stale; Path=/; Max-Age=-1; HttpOnly; SameSite=Lax",
+            ),
+        );
+        assert_eq!(
+            response_csrf_session_id("tok".into(), "vp123".into(), &resp, "santaizi-dashboard"),
+            "|vp123"
+        );
+    }
+
+    #[test]
+    fn oauth2_admin_whitelist_and_write_scope_guard() {
+        let mut conf = crate::config::Config::default();
+        assert!(
+            oauth2_admin_allows(&conf, "anyone"),
+            "未配置 OAuth2 放行种子用户"
+        );
+        conf.oauth2.type_ = "mock".into();
+        conf.oauth2.admin = "dev".into();
+        assert!(oauth2_admin_allows(&conf, "judy"), "mock 模式放行测试用户");
+        conf.oauth2.type_ = "github".into();
+        conf.oauth2.admin = " alice , bob ".into();
+        assert!(oauth2_admin_allows(&conf, "Alice"));
+        assert!(!oauth2_admin_allows(&conf, "mallory"));
+
+        let user = UserRow {
+            id: 1,
+            login: "alice".into(),
+            name: "Alice".into(),
+            avatar_url: String::new(),
+            super_admin: true,
+        };
+        let ro_api = CurrentUser {
+            user: user.clone(),
+            is_api: true,
+            api_permission: Some("read".into()),
+        };
+        assert_eq!(
+            require_write_scope(&ro_api).map(|r| r.status()),
+            Some(StatusCode::FORBIDDEN)
+        );
+        let rw_api = CurrentUser {
+            user: user.clone(),
+            is_api: true,
+            api_permission: Some("write".into()),
+        };
+        assert!(require_write_scope(&rw_api).is_none());
+        let cookie_admin = CurrentUser {
+            user,
+            is_api: false,
+            api_permission: None,
+        };
+        assert!(require_write_scope(&cookie_admin).is_none());
     }
 }

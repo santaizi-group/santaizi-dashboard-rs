@@ -134,7 +134,10 @@ async fn mock_login_signs_session_and_redirects() {
 
     let session_cookie = set_cookie_header(&response, SESSION_COOKIE).expect("session cookie");
     assert!(session_cookie.contains("HttpOnly"), "{session_cookie}");
-    assert!(session_cookie.contains("Max-Age=86400"), "{session_cookie}");
+    assert!(
+        session_cookie.contains("Max-Age=604800"),
+        "{session_cookie}"
+    );
     let token = cookie_value(&response, SESSION_COOKIE).expect("session token");
 
     // 带会话 Cookie 访问会话端点：认出 mock 身份。

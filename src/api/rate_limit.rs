@@ -8,12 +8,14 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// 窗口内允许的失败次数。
+/// 默认单键窗口内允许的失败次数。
 const MAX_FAILURES: u32 = 5;
 /// 计数窗口：超过这个时长的失败记录丢弃（滑动重置）。
 const WINDOW: Duration = Duration::from_secs(60);
 /// 触发后的锁定时长。
 const LOCKOUT: Duration = Duration::from_secs(60);
+/// 桶上限：淘汰过期键，防伪造来源头导致内存无界增长。
+const MAX_TRACKED_BUCKETS: usize = 4096;
 
 #[derive(Debug, Clone, Copy)]
 struct Bucket {
@@ -56,10 +58,32 @@ impl FailureThrottle {
         Ok(())
     }
 
-    /// 记录一次失败；返回本次是否刚触发锁定。
+    /// 记录一次失败（默认阈值 `MAX_FAILURES`）；返回本次是否刚触发锁定。
     pub fn record_failure(&self, key: &str) -> bool {
+        self.record_failure_with_limit(key, MAX_FAILURES)
+    }
+
+    /// 按指定窗口失败上限记录一次失败；返回本次是否刚触发锁定。
+    pub fn record_failure_with_limit(&self, key: &str, max_failures: u32) -> bool {
+        let limit = max_failures.max(1);
         let now = Instant::now();
         let mut buckets = self.buckets.lock().unwrap_or_else(|err| err.into_inner());
+        if !buckets.contains_key(key) && buckets.len() >= MAX_TRACKED_BUCKETS {
+            buckets.retain(|_, b| {
+                b.blocked_until.is_some_and(|until| until > now)
+                    || now.duration_since(b.window_started) <= WINDOW
+            });
+            if buckets.len() >= MAX_TRACKED_BUCKETS {
+                // 仍满时淘汰一个未锁定键，保证容量恒定有界。
+                if let Some(evict) = buckets
+                    .iter()
+                    .find(|(_, b)| b.blocked_until.is_none_or(|until| until <= now))
+                    .map(|(k, _)| k.clone())
+                {
+                    buckets.remove(&evict);
+                }
+            }
+        }
         let bucket = buckets.entry(key.to_string()).or_insert(Bucket {
             failures: 0,
             window_started: now,
@@ -71,7 +95,7 @@ impl FailureThrottle {
             bucket.window_started = now;
         }
         bucket.failures = bucket.failures.saturating_add(1);
-        if bucket.failures >= MAX_FAILURES {
+        if bucket.failures >= limit {
             bucket.blocked_until = Some(now + LOCKOUT);
             // 锁定即清窗：解锁后重新给满额度，而不是一解锁就又锁。
             bucket.failures = 0;

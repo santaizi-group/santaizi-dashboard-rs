@@ -366,13 +366,16 @@ async fn cycle_transfer(
         },
         _ => None,
     };
+    let include_hidden = user.is_some() || super::public::view_password_verified(&headers, &shared);
+    let location = shared.conf().location.clone();
     let now_nanos = util_time::now_nanos();
     let rows = blocking_read(&shared.db, move |conn| {
-        let rows = traffic::list_enabled(conn, server_id)?;
+        let rows = traffic::list_public_enabled(conn, server_id, include_hidden)?;
         // Go 对 Calculate 报错的行静默省略 usage 字段——这里同样按 None 处理。
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let usage = traffic::usage(conn, &row, now_nanos).unwrap_or(None);
+            let usage =
+                traffic::usage_in_location(conn, &row, now_nanos, &location).unwrap_or(None);
             out.push((row, usage));
         }
         Ok(out)
@@ -437,65 +440,90 @@ struct ServiceMonthSeries {
     current_down: i64,
 }
 
-/// 最近 30 个本地日键，顺序 `[29 天前, …, 今天]`（Go `serviceUpDownDelay` 同序）。
-fn recent_local_days(conn: &rusqlite::Connection) -> anyhow::Result<Vec<String>> {
+/// 最近 30 个面板配置时区日键，顺序 `[29 天前, …, 今天]`（不依赖容器系统 `'localtime'`）。
+fn recent_local_days_in_location(now_nanos: i64, location: &str) -> Vec<String> {
+    let (ty, tm, td) = util_time::local_ymd_in_location(now_nanos, location);
+    let today_days = util_time::days_from_civil(ty, tm, td)
+        .unwrap_or_else(|| now_nanos.div_euclid(86_400_000_000_000));
     let mut days = Vec::with_capacity(30);
     for offset in (0..30).rev() {
-        days.push(conn.query_row(
-            "SELECT date('now', 'localtime', ?1)",
-            [format!("-{offset} days")],
-            |row| row.get(0),
-        )?);
+        let day_nanos = (today_days - offset) * 86_400_000_000_000;
+        let (y, m, d) = util_time::ymd_from_nanos(day_nanos);
+        days.push(format!("{y:04}-{m:02}-{d:02}"));
     }
-    Ok(days)
+    days
 }
 
-/// 全部 monitor 的 30 天日聚合 + 当前窗口，各一条查询。
-/// 旧实现对每个 monitor 跑 31 条查询（N+1），monitor 上百时单请求几千次往返。
+/// 全部对外展示 monitor 的 30 天日聚合 + 自适应当前窗口，各一条查询。
+/// 日序列按面板 `location` 偏移切分；`current_up/current_down` 取至少最近
+/// `max(300, duration * 3)` 秒（并保底 900s 内最新样本窗口），避免长间隔监控周期性归零。
 fn service_month_series(
     conn: &rusqlite::Connection,
     days: &[String],
     monitor_ids: &[i64],
+    now_nanos: i64,
+    location: &str,
 ) -> anyhow::Result<std::collections::HashMap<i64, ServiceMonthSeries>> {
-    let window_start = days
+    let window_start_day = days
         .first()
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("empty day window"))?;
+    let now_secs = now_nanos.div_euclid(1_000_000_000);
+    let offset_secs = util_time::offset_seconds_for_location(location, now_secs);
+    let offset_modifier = format!("{offset_secs:+} seconds");
+    // 先用宽松 UTC 下界命中 created_at 索引，再按面板时区日键精确过滤。
+    let utc_floor = util_time::sqlite_to_datetime_text(&util_time::unix_nanos_to_sqlite(
+        now_nanos.saturating_sub(32 * 86_400_000_000_000),
+    ));
     let mut daily: std::collections::HashMap<(i64, String), (i64, i64, f64)> =
         std::collections::HashMap::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT monitor_id, date(created_at, 'localtime'), \
-             COALESCE(SUM(up), 0), COALESCE(SUM(down), 0), COALESCE(AVG(avg_delay), 0) \
-             FROM monitor_histories \
-             WHERE deleted_at IS NULL AND date(created_at, 'localtime') >= ?1 \
-             GROUP BY monitor_id, date(created_at, 'localtime')",
+            "SELECT mh.monitor_id, date(mh.created_at, ?1), \
+             COALESCE(SUM(mh.up), 0), COALESCE(SUM(mh.down), 0), COALESCE(AVG(mh.avg_delay), 0) \
+             FROM monitor_histories mh \
+             INNER JOIN monitors m ON m.id = mh.monitor_id \
+             WHERE mh.deleted_at IS NULL AND m.deleted_at IS NULL \
+               AND COALESCE(m.enable_show_in_service, 0) != 0 \
+               AND mh.created_at >= ?2 \
+               AND date(mh.created_at, ?1) >= ?3 \
+             GROUP BY mh.monitor_id, date(mh.created_at, ?1)",
         )?;
-        let rows = stmt.query_map([&window_start], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                (
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, f64>(4)?,
-                ),
-            ))
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params![&offset_modifier, &utc_floor, &window_start_day],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    (
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, f64>(4)?,
+                    ),
+                ))
+            },
+        )?;
         for row in rows {
             let (id, day, value) = row?;
             daily.insert((id, day), value);
         }
     }
+    let now_dt = util_time::sqlite_to_datetime_text(&util_time::unix_nanos_to_sqlite(now_nanos));
     let mut current: std::collections::HashMap<i64, (i64, i64)> = std::collections::HashMap::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT monitor_id, COALESCE(SUM(up), 0), COALESCE(SUM(down), 0) \
-             FROM monitor_histories \
-             WHERE deleted_at IS NULL AND datetime(created_at) >= datetime('now', '-5 minutes') \
-             GROUP BY monitor_id",
+            "SELECT mh.monitor_id, COALESCE(SUM(mh.up), 0), COALESCE(SUM(mh.down), 0) \
+             FROM monitor_histories mh \
+             INNER JOIN monitors m ON m.id = mh.monitor_id \
+             WHERE mh.deleted_at IS NULL AND m.deleted_at IS NULL \
+               AND COALESCE(m.enable_show_in_service, 0) != 0 \
+               AND datetime(mh.created_at) >= datetime( \
+                   ?1, \
+                   '-' || CAST(MAX(900, COALESCE(m.duration, 30) * 3) AS TEXT) || ' seconds' \
+               ) \
+             GROUP BY mh.monitor_id",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map([&now_dt], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 (row.get::<_, i64>(1)?, row.get::<_, i64>(2)?),
@@ -548,8 +576,8 @@ fn monitor_type_label(value: i64) -> &'static str {
 }
 
 /// `GET /api/v2/public/services`：对外展示的服务监控。
-/// `up` / `down` / `delay` 各 30 个点，按本地日聚合最近 30 天（含未结束的今天）；
-/// `current_*` 取最近约 5 分钟。
+/// `up` / `down` / `delay` 各 30 个点，按面板配置时区日聚合最近 30 天（含未结束的今天）；
+/// `current_*` 按监控间隔自适应取最近窗口。
 async fn public_services(
     State(shared): State<ApiShared>,
     OptionalUser(user): OptionalUser,
@@ -558,6 +586,8 @@ async fn public_services(
     if let Err(response) = require_public_access(&headers, &shared, user.as_ref()) {
         return *response;
     }
+    let location = shared.conf().location.clone();
+    let now_nanos = util_time::now_nanos();
     let result = blocking_read(&shared.db, move |conn| {
         let mut stmt = conn.prepare(
             "SELECT m.id, COALESCE(m.name, ''), COALESCE(m.type, 0), COALESCE(m.target, ''), \
@@ -583,9 +613,9 @@ async fn public_services(
         for row in mapped {
             monitor_rows.push(row?);
         }
-        let days = recent_local_days(conn)?;
+        let days = recent_local_days_in_location(now_nanos, &location);
         let monitor_ids: Vec<i64> = monitor_rows.iter().map(|row| row.0).collect();
-        let series = service_month_series(conn, &days, &monitor_ids)?;
+        let series = service_month_series(conn, &days, &monitor_ids, now_nanos, &location)?;
         for (id, name, monitor_type, target, interval, latency_notify, min_ms, max_ms) in
             monitor_rows
         {
@@ -626,7 +656,7 @@ async fn public_services(
 }
 
 /// `GET /api/v2/public/network/:id`（Go `v2PublicNetwork` → MonitorAPI）：
-/// 近 24h 该服务器的监控延迟序列，按 monitor 分组（created_at 毫秒）。
+/// 近 24h 该服务器的对外监控延迟序列，按 monitor 分组（created_at 毫秒）。
 async fn public_network(
     State(shared): State<ApiShared>,
     OptionalUser(user): OptionalUser,
@@ -647,21 +677,16 @@ async fn public_network(
         Ok(rows) => rows,
         Err(response) => return *response,
     };
-    if !rows.iter().any(|row| row.id == server_id) {
+    let Some(target_server) = rows.iter().find(|row| row.id == server_id) else {
         return problem(StatusCode::NOT_FOUND, "server_not_found", "服务器不存在");
-    }
+    };
+    let server_name = target_server.name.clone();
     let result = blocking_read(&shared.db, move |conn| {
-        let server_name: String = conn
-            .query_row(
-                "SELECT COALESCE(name, '') FROM servers WHERE id = ?1",
-                [server_id],
-                |row| row.get(0),
-            )
-            .unwrap_or_default();
         let mut stmt = conn.prepare(
             "SELECT h.monitor_id, COALESCE(m.name, ''), h.created_at, COALESCE(h.avg_delay, 0) \
-             FROM monitor_histories h LEFT JOIN monitors m ON m.id = h.monitor_id \
-             WHERE h.server_id = ?1 AND h.created_at >= ?2 AND m.deleted_at IS NULL \
+             FROM monitor_histories h INNER JOIN monitors m ON m.id = h.monitor_id \
+             WHERE h.server_id = ?1 AND h.deleted_at IS NULL AND h.created_at >= ?2 \
+               AND m.deleted_at IS NULL AND COALESCE(m.enable_show_in_service, 0) != 0 \
              ORDER BY h.monitor_id ASC, h.created_at ASC",
         )?;
         // `unix_nanos_to_sqlite` 产 `…+00:00`，而 `monitor_histories.created_at` 由
@@ -693,11 +718,11 @@ async fn public_network(
                 _ => series.push((monitor_id, monitor_name, vec![created_ms], vec![avg_delay])),
             }
         }
-        Ok((series, server_name))
+        Ok(series)
     })
     .await;
     match result {
-        Ok((series, server_name)) => {
+        Ok(series) => {
             let items: Vec<Value> = series
                 .into_iter()
                 .map(|(monitor_id, monitor_name, created, delays)| {
@@ -748,4 +773,59 @@ pub fn routes() -> axum::Router<ApiShared> {
             "/api/v2/public/network/{serverId}",
             axum::routing::get(public_network),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::migrate;
+
+    #[test]
+    fn service_series_uses_panel_location_and_adaptive_current_window() {
+        let path = std::env::temp_dir().join(format!(
+            "santaizi-public-extra-series-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let db = migrate::open_primary(&path.to_string_lossy()).unwrap();
+        // 2026-10-16 01:00:00 +08:00 == 2026-10-15 17:00:00Z
+        // UTC 仍是 10-15，东八区已是 10-16。
+        let now = util_time::sqlite_to_unix_nanos("2026-10-16 01:00:00+08:00").unwrap();
+        // 样本在 20 分钟前（2026-10-16 00:40:00+08:00 == 2026-10-15 16:40:00Z）：
+        // 对 600s（10m）间隔的 monitor 而言，固定 -5m 会归零，自适应窗口（max(900, 1800)=1800s）仍命中。
+        let sample_ts = util_time::sqlite_to_datetime_text(&util_time::unix_nanos_to_sqlite(
+            now - 20 * 60 * 1_000_000_000,
+        ));
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO monitors (id, name, type, target, duration, enable_show_in_service) \
+                 VALUES (1, 'long-check', 1, 'https://example.com', 600, 1)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO monitor_histories (monitor_id, server_id, created_at, avg_delay, up, down) \
+                 VALUES (1, 1, ?1, 42.0, 5, 1)",
+                [&sample_ts],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let days_cst = recent_local_days_in_location(now, "Asia/Shanghai");
+        assert_eq!(days_cst.len(), 30);
+        assert_eq!(days_cst.last().map(String::as_str), Some("2026-10-16"));
+
+        let series = db
+            .read(|conn| service_month_series(conn, &days_cst, &[1], now, "Asia/Shanghai"))
+            .unwrap();
+        let s = series.get(&1).unwrap();
+        assert_eq!(
+            s.up.last().copied(),
+            Some(5),
+            "东八区凌晨样本应落入 10-16 当日桶"
+        );
+        assert_eq!(s.current_up, 5, "长间隔监控在自适应窗口内不得归零");
+        assert_eq!(s.current_down, 1);
+        let _ = std::fs::remove_file(&path);
+    }
 }

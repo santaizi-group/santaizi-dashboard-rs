@@ -774,16 +774,55 @@ fn apply_alert_rule_write(
         if !ALERT_TYPES.contains(&condition_type.as_str()) {
             return Err(format!("unsupported alert condition \"{condition_type}\""));
         }
-        if condition_type != "offline" && condition.min.is_none() && condition.max.is_none() {
-            return Err(format!("condition {condition_type} requires min or max"));
+        if let Some(raw_min) = condition.min
+            && (!raw_min.is_finite() || raw_min < 0.0)
+        {
+            return Err(format!(
+                "condition {condition_type} min must be a non-negative number"
+            ));
         }
-        if let (Some(min), Some(max)) = (condition.min, condition.max)
+        if let Some(raw_max) = condition.max
+            && (!raw_max.is_finite() || raw_max < 0.0)
+        {
+            return Err(format!(
+                "condition {condition_type} max must be a non-negative number"
+            ));
+        }
+        // 在哨兵语义中 `min == 0` / `max == 0` 均表示未启用该侧边界；写入前统一归一，
+        // 避免前端只填下限（如 `{ min: 5, max: 0 }`）被误判为 `min > max` 拦截，
+        // 同时拦截两侧均为 0（永远不可能触发的空规则）。
+        let effective_min = if condition_type == "offline" {
+            None
+        } else {
+            condition.min.filter(|v| *v > 0.0)
+        };
+        let effective_max = if condition_type == "offline" {
+            None
+        } else {
+            condition.max.filter(|v| *v > 0.0)
+        };
+        if condition_type != "offline" && effective_min.is_none() && effective_max.is_none() {
+            return Err(format!(
+                "condition {condition_type} requires a positive min or max threshold"
+            ));
+        }
+        if let (Some(min), Some(max)) = (effective_min, effective_max)
             && min > max
         {
             return Err(format!(
                 "condition {condition_type} min must not exceed max"
             ));
         }
+        if condition.duration_seconds > 86_400 {
+            return Err(format!(
+                "condition {condition_type} duration_seconds must not exceed 86400"
+            ));
+        }
+        let duration_seconds = if condition.duration_seconds == 0 {
+            30
+        } else {
+            condition.duration_seconds
+        };
         let mut ignore = serde_json::Map::new();
         let cover = match condition.scope.mode.as_str() {
             "all" => 0i64,
@@ -806,14 +845,14 @@ fn apply_alert_rule_write(
         };
         let mut rule = json!({
             "type": condition_type,
-            "duration": condition.duration_seconds,
+            "duration": duration_seconds,
             "cover": cover,
             "ignore": ignore,
         });
-        if let Some(min) = condition.min {
+        if let Some(min) = effective_min {
             rule["min"] = json!(min);
         }
-        if let Some(max) = condition.max {
+        if let Some(max) = effective_max {
             rule["max"] = json!(max);
         }
         rules.push(rule);
@@ -1407,7 +1446,7 @@ async fn upgrade_preview(
     let command = match platform.as_str() {
         "macos" => format!("curl -fsSL {} | sudo bash", shell_quote(&script)),
         "windows" => format!(
-            "& ([scriptblock]::Create((irm {}))))",
+            "& ([scriptblock]::Create((irm {})))",
             powershell_quote(&script)
         ),
         _ => format!("curl -fsSL {} | bash", shell_quote(&script)),
@@ -1451,7 +1490,7 @@ async fn script_commands(
         let command = match platform {
             "macos" => format!("curl -fsSL {} | sudo bash", shell_quote(script)),
             "windows" => format!(
-                "& ([scriptblock]::Create((irm {}))))",
+                "& ([scriptblock]::Create((irm {})))",
                 powershell_quote(script)
             ),
             _ => format!("curl -fsSL {} | bash", shell_quote(script)),
@@ -1530,4 +1569,98 @@ pub fn routes() -> axum::Router<ApiShared> {
             "/api/v2/admin/servers/{serverId}/upgrade-preview",
             axum::routing::post(upgrade_preview),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rule_write(cond: AlertConditionDto) -> AlertRuleWrite {
+        AlertRuleWrite {
+            name: "测试规则".into(),
+            enabled: true,
+            trigger_mode: "once".into(),
+            notification_tag: "default".into(),
+            conditions: vec![cond],
+        }
+    }
+
+    #[test]
+    fn alert_rule_write_allows_min_only_with_zero_max_and_rejects_dead_zero_thresholds() {
+        let mut row = repo::AlertRuleRow {
+            id: 0,
+            name: String::new(),
+            rules_raw: "[]".into(),
+            enable: Some(0),
+            trigger_mode: repo::ALERT_TRIGGER_ALWAYS,
+            notification_tag: String::new(),
+            created_at_nanos: None,
+            updated_at_nanos: None,
+        };
+        apply_alert_rule_write(
+            &mut row,
+            &rule_write(AlertConditionDto {
+                r#type: "cpu".into(),
+                min: Some(5.0),
+                max: Some(0.0),
+                duration_seconds: 30,
+                scope: ScopeDto {
+                    mode: "all".into(),
+                    server_ids: vec![],
+                },
+            }),
+        )
+        .expect("min > 0 且 max == 0 表示只设下限，必须放行");
+        assert!(row.rules_raw.contains("\"min\":5.0"));
+        assert!(
+            !row.rules_raw.contains("\"max\""),
+            "0 边界不得作为有效 max 落库：{}",
+            row.rules_raw
+        );
+
+        let dead = apply_alert_rule_write(
+            &mut row,
+            &rule_write(AlertConditionDto {
+                r#type: "cpu".into(),
+                min: Some(0.0),
+                max: Some(0.0),
+                duration_seconds: 30,
+                scope: ScopeDto {
+                    mode: "all".into(),
+                    server_ids: vec![],
+                },
+            }),
+        );
+        assert!(dead.is_err(), "min=0 且 max=0 的死规则必须拦截");
+
+        let inverted = apply_alert_rule_write(
+            &mut row,
+            &rule_write(AlertConditionDto {
+                r#type: "cpu".into(),
+                min: Some(80.0),
+                max: Some(50.0),
+                duration_seconds: 30,
+                scope: ScopeDto {
+                    mode: "all".into(),
+                    server_ids: vec![],
+                },
+            }),
+        );
+        assert!(inverted.is_err(), "两侧均 > 0 且 min > max 必须拦截");
+
+        apply_alert_rule_write(
+            &mut row,
+            &rule_write(AlertConditionDto {
+                r#type: "offline".into(),
+                min: Some(0.0),
+                max: Some(0.0),
+                duration_seconds: 60,
+                scope: ScopeDto {
+                    mode: "all".into(),
+                    server_ids: vec![],
+                },
+            }),
+        )
+        .expect("offline 条件无需阈值，必须放行");
+    }
 }

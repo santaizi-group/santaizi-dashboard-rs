@@ -152,6 +152,11 @@ fn write_fields(
     if name.is_empty() {
         return Err(Box::new(invalid_server("name is required")));
     }
+    if name.chars().count() > 255 {
+        return Err(Box::new(invalid_server(
+            "server name must not exceed 255 characters",
+        )));
+    }
     Ok(ServerWriteFields {
         name,
         tag: write.tag.trim().to_string(),
@@ -282,22 +287,50 @@ async fn list_servers(
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let (page, size) = parse_page(&params);
-    // 通配符转义与 `%…%` 包装都在 repo 层（`list_admin`）做，调用方只给原始词。
+    // 通配符转义与 `%…%` 包装都在 repo 层做，调用方只给原始词。
     let q = params
         .get("q")
         .map(String::as_str)
         .unwrap_or("")
         .trim()
         .to_owned();
+    let group_filter = params
+        .get("group")
+        .or_else(|| params.get("tag"))
+        .and_then(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.eq_ignore_ascii_case("all") || trimmed == "*" {
+                None
+            } else if trimmed.is_empty() || trimmed == "__default__" || trimmed == "__ungrouped__" {
+                Some(servers::AdminGroupFilter::Ungrouped)
+            } else {
+                Some(servers::AdminGroupFilter::Named(trimmed.to_string()))
+            }
+        });
+    let status_filter =
+        params
+            .get("status")
+            .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+                "online" => Some(servers::AdminStatusFilter::Online),
+                "offline" => Some(servers::AdminStatusFilter::Offline),
+                _ => None,
+            });
     let sort = params.get("sort").cloned().unwrap_or_default();
     let ascending = params
         .get("order")
         .is_some_and(|value| value.eq_ignore_ascii_case("asc"));
+    let (threshold, location) = {
+        let conf = shared.conf();
+        (conf.offline_threshold_seconds, conf.location.clone())
+    };
     let now_nanos = util_time::now_nanos();
     let result = blocking_read(&shared.db, move |conn| {
-        let (rows, total) = servers::list_admin(
+        let (rows, total) = servers::list_admin_filtered(
             conn,
             &q,
+            group_filter.as_ref(),
+            status_filter,
+            threshold,
             &sort,
             ascending,
             offset_of(page, size),
@@ -305,7 +338,7 @@ async fn list_servers(
             now_nanos,
         )?;
         let ids: Vec<i64> = rows.iter().map(|row| row.public.id).collect();
-        let summaries = traffic_repo::summaries(conn, &ids, now_nanos)?;
+        let summaries = traffic_repo::summaries_in_location(conn, &ids, now_nanos, &location)?;
         Ok((rows, total, summaries))
     })
     .await;
@@ -320,7 +353,6 @@ async fn list_servers(
             );
         }
     };
-    let threshold = shared.conf().offline_threshold_seconds;
     let items: Vec<Value> = rows
         .iter()
         .map(|row| {
@@ -341,17 +373,30 @@ async fn get_server(
     if server_id <= 0 {
         return problem(StatusCode::BAD_REQUEST, "invalid_id", "资源 ID 无效");
     }
+    let (threshold, location) = {
+        let conf = shared.conf();
+        (conf.offline_threshold_seconds, conf.location.clone())
+    };
     let now_nanos = util_time::now_nanos();
     let row = blocking_read(&shared.db, move |conn| {
         let row = servers::admin_server_by_id(conn, server_id, now_nanos)?;
-        let mut summaries = traffic_repo::summaries(conn, &[server_id], now_nanos)?;
-        Ok(row.map(|row| (row, summaries.remove(&server_id).unwrap_or_default())))
+        let mut summaries =
+            traffic_repo::summaries_in_location(conn, &[server_id], now_nanos, &location)?;
+        let policies = traffic_repo::list_for_server(conn, server_id)?;
+        Ok(row.map(|row| {
+            (
+                row,
+                summaries.remove(&server_id).unwrap_or_default(),
+                policies,
+            )
+        }))
     })
     .await;
     match row {
-        Ok(Some((row, summaries))) => {
-            let threshold = shared.conf().offline_threshold_seconds;
-            data_json(server_admin_dto(&row, None, threshold, &summaries))
+        Ok(Some((row, summaries, policies))) => {
+            let mut item = server_admin_dto(&row, None, threshold, &summaries);
+            item["traffic_policies"] = Value::Array(policies.iter().map(policy_dto).collect());
+            data_json(item)
         }
         Ok(None) => problem(StatusCode::NOT_FOUND, "server_not_found", "服务器不存在"),
         Err(err) => {
@@ -441,15 +486,11 @@ async fn update_server(
         Ok(write) => write,
         Err(_) => return invalid_body(),
     };
-    let policies = write
-        .traffic_policies
-        .clone()
-        .map(|list| {
-            list.iter()
-                .map(|item| (item.id, item.to_write()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let policies = write.traffic_policies.clone().map(|list| {
+        list.iter()
+            .map(|item| (item.id, item.to_write()))
+            .collect::<Vec<_>>()
+    });
     let now_nanos = util_time::now_nanos();
     let row = blocking_read(&shared.db, move |conn| {
         servers::admin_server_by_id(conn, server_id, now_nanos)
@@ -476,7 +517,9 @@ async fn update_server(
             servers::update_admin_server(tx, server_id, &fields)? > 0,
             "server missing"
         );
-        if !policies.is_empty() {
+        // `Some(vec![])` 显式清空最后一条流量策略也必须走 `replace_policies`；
+        // 仅当 PATCH 请求省略 `traffic_policies`（`None`）时保留现有策略。
+        if let Some(policies) = policies {
             traffic_repo::replace_policies(tx, server_id, policies)?;
         }
         Ok(())
@@ -522,7 +565,7 @@ fn traffic_write_error(err: &anyhow::Error) -> bool {
         || text.starts_with("cycle unit")
 }
 
-/// 保存成功后的响应：单查回 DTO + 附 traffic_policies（Go `v2SaveServer` 收尾）。
+/// 保存成功后的响应：单查回 DTO + 现算 traffic_summaries + 附 traffic_policies。
 async fn server_response_after_save(
     shared: &ApiShared,
     server_id: i64,
@@ -530,17 +573,26 @@ async fn server_response_after_save(
     secret_plain: Option<&str>,
     status: StatusCode,
 ) -> Response {
+    let (threshold, location) = {
+        let conf = shared.conf();
+        (conf.offline_threshold_seconds, conf.location.clone())
+    };
     let result = blocking_read(&shared.db, move |conn| {
         let row = servers::admin_server_by_id(conn, server_id, now_nanos)?
             .ok_or_else(|| anyhow::anyhow!("server missing"))?;
+        let mut summaries =
+            traffic_repo::summaries_in_location(conn, &[server_id], now_nanos, &location)?;
         let policies = traffic_repo::list_for_server(conn, server_id)?;
-        Ok((row, policies))
+        Ok((
+            row,
+            summaries.remove(&server_id).unwrap_or_default(),
+            policies,
+        ))
     })
     .await;
     match result {
-        Ok((row, policies)) => {
-            let threshold = shared.conf().offline_threshold_seconds;
-            let mut item = server_admin_dto(&row, secret_plain, threshold, &[]);
+        Ok((row, summaries, policies)) => {
+            let mut item = server_admin_dto(&row, secret_plain, threshold, &summaries);
             item["traffic_policies"] = Value::Array(policies.iter().map(policy_dto).collect());
             let mut response = Response::new(
                 serde_json::to_string(&json!({ "data": item }))
@@ -754,7 +806,7 @@ async fn batch_group(
         return invalid_batch();
     }
     let ids = request.ids.clone();
-    let group = request.group;
+    let group = request.group.trim().to_string();
     let now_nanos = util_time::now_nanos();
     let updated = blocking_write(&shared.db, move |tx| {
         // 全部编号占位：ids 占 ?1..?n，组名占 ?n+1（SQLite `?` 按文本序取号）。
@@ -923,9 +975,12 @@ async fn rename_group(
 /// `GET /api/v2/admin/servers/{serverId}/credential`（Go `v2ServerCredential`）。
 async fn server_credential(
     State(shared): State<ApiShared>,
-    AdminUser(_admin): AdminUser,
+    AdminUser(admin): AdminUser,
     Path(server_id): Path<i64>,
 ) -> Response {
+    if let Some(denied) = super::auth::require_write_scope(&admin) {
+        return denied;
+    }
     if server_id <= 0 {
         return problem(StatusCode::BAD_REQUEST, "invalid_id", "资源 ID 无效");
     }
@@ -970,12 +1025,15 @@ async fn list_traffic_policies(
     if server_id <= 0 {
         return problem(StatusCode::BAD_REQUEST, "invalid_id", "资源 ID 无效");
     }
+    let location = shared.conf().location.clone();
     let now_nanos = util_time::now_nanos();
     let rows = blocking_read(&shared.db, move |conn| {
         let rows = traffic_repo::list_for_server(conn, server_id)?;
         let mut items = Vec::with_capacity(rows.len());
         for row in &rows {
-            let usage = traffic_repo::usage(conn, &row.window_row(), now_nanos).unwrap_or(None);
+            let usage =
+                traffic_repo::usage_in_location(conn, &row.window_row(), now_nanos, &location)
+                    .unwrap_or(None);
             items.push((row.clone(), usage));
         }
         Ok(items)
@@ -1191,11 +1249,14 @@ async fn traffic_policy_usage(
     if server_id <= 0 || policy_id <= 0 {
         return policy_id_problem(server_id, policy_id);
     }
+    let location = shared.conf().location.clone();
     let now_nanos = util_time::now_nanos();
     let result = blocking_read(&shared.db, move |conn| {
         let row = traffic_repo::get_policy(conn, server_id, policy_id)?;
         let usage = match &row {
-            Some(row) => traffic_repo::usage(conn, &row.window_row(), now_nanos)?,
+            Some(row) => {
+                traffic_repo::usage_in_location(conn, &row.window_row(), now_nanos, &location)?
+            }
             None => None,
         };
         Ok(row.zip(usage))
@@ -1224,12 +1285,13 @@ async fn server_traffic_history(
     if server_id <= 0 {
         return problem(StatusCode::BAD_REQUEST, "invalid_id", "资源 ID 无效");
     }
+    let location = shared.conf().location.clone();
     let now_nanos = util_time::now_nanos();
     let result = blocking_read(&shared.db, move |conn| {
         if !traffic_repo::server_exists(conn, server_id)? {
             return Ok(None);
         }
-        traffic_repo::histories(conn, server_id, now_nanos).map(Some)
+        traffic_repo::histories_in_location(conn, server_id, now_nanos, &location).map(Some)
     })
     .await;
     let items = match result {
@@ -1382,7 +1444,6 @@ fn normalize_backup(document: &mut BackupDocument) -> Result<(), String> {
     if document.servers.len() > 5000 {
         return Err("backup contains too many servers".into());
     }
-    let mut seen = std::collections::HashSet::new();
     for item in &mut document.servers {
         if let Some(secret) = item
             .secret
@@ -1398,11 +1459,11 @@ fn normalize_backup(document: &mut BackupDocument) -> Result<(), String> {
             item.secret = None;
         }
         item.name = item.name.trim().to_string();
-        if item.name.is_empty() || item.name.len() > 100 {
+        if item.name.is_empty() {
             return Err("server name is required".into());
         }
-        if !seen.insert(item.name.clone()) {
-            return Err("backup contains duplicate server names".into());
+        if item.name.chars().count() > 255 {
+            return Err("server name must not exceed 255 characters".into());
         }
         item.tag = item.tag.trim().to_string();
         item.probe_target = item.probe_target.trim().to_string();
@@ -1461,7 +1522,10 @@ fn policy_incoming_canonical(items: &[TrafficPolicyUpsert]) -> Result<Value, Str
 }
 
 /// `GET /api/v2/admin/servers/export`。
-async fn export_servers(State(shared): State<ApiShared>, AdminUser(_admin): AdminUser) -> Response {
+async fn export_servers(State(shared): State<ApiShared>, AdminUser(admin): AdminUser) -> Response {
+    if let Some(denied) = super::auth::require_write_scope(&admin) {
+        return denied;
+    }
     let now_nanos = util_time::now_nanos();
     let result = blocking_read(&shared.db, move |conn| {
         let (rows, _) = servers::list_admin(conn, "", "", false, 0, i64::MAX, now_nanos)?;
@@ -1674,11 +1738,10 @@ async fn preview_server_import(
     if let Err(detail) = normalize_backup(&mut document) {
         return problem(StatusCode::BAD_REQUEST, "invalid_server_backup", &detail);
     }
-    let names: Vec<String> = document
-        .servers
-        .iter()
-        .map(|item| item.name.clone())
-        .collect();
+    let mut doc_name_counts: HashMap<String, usize> = HashMap::new();
+    for item in &document.servers {
+        *doc_name_counts.entry(item.name.clone()).or_insert(0) += 1;
+    }
     let now_nanos = util_time::now_nanos();
     let result = blocking_read(&shared.db, move |conn| {
         load_backup_snapshot(conn, now_nanos)
@@ -1702,6 +1765,7 @@ async fn preview_server_import(
         .enumerate()
         .map(|(index, item)| {
             let mut warnings: Vec<String> = Vec::new();
+            let dup_in_doc = doc_name_counts.get(&item.name).copied().unwrap_or(0) > 1;
             let name_index = snapshot.by_name.get(&item.name);
             let mut preview = json!({
                 "index": index,
@@ -1709,6 +1773,14 @@ async fn preview_server_import(
                 "changes": [],
                 "warnings": warnings,
             });
+            if dup_in_doc {
+                warnings.push("duplicate_name".into());
+                preview["match"] = json!("ambiguous");
+                preview["suggested_action"] = json!("skip");
+                preview["allowed_actions"] = json!(["skip"]);
+                preview["warnings"] = json!(warnings);
+                return preview;
+            }
             match name_index.map(Vec::as_slice) {
                 None => {
                     preview["match"] = json!("create");
@@ -1754,7 +1826,6 @@ async fn preview_server_import(
             preview
         })
         .collect();
-    let _ = names;
     data_json(json!({ "items": items }))
 }
 
@@ -1807,6 +1878,10 @@ async fn import_servers(
             );
         }
     };
+    let mut doc_name_counts: HashMap<String, usize> = HashMap::new();
+    for item in &request.document.servers {
+        *doc_name_counts.entry(item.name.clone()).or_insert(0) += 1;
+    }
     // 预演 + 动作覆盖校验（Go planServerImport）。
     enum Planned {
         Create(usize),
@@ -1829,24 +1904,29 @@ async fn import_servers(
         }
         used_actions[action.index as usize] = true;
         let item = &request.document.servers[action.index as usize];
-        let allowed: &[&str] = match snapshot.by_name.get(&item.name).map(Vec::as_slice) {
-            None => &["create", "skip"],
-            Some([only]) => {
-                let changes = diff_backup(
-                    item,
-                    &snapshot.rows[*only],
-                    snapshot
-                        .policies
-                        .get(&snapshot.rows[*only].public.id)
-                        .map_or(&[], Vec::as_slice),
-                );
-                if changes.is_empty() {
-                    &["skip"]
-                } else {
-                    &["overwrite", "skip"]
+        let dup_in_doc = doc_name_counts.get(&item.name).copied().unwrap_or(0) > 1;
+        let allowed: &[&str] = if dup_in_doc {
+            &["skip"]
+        } else {
+            match snapshot.by_name.get(&item.name).map(Vec::as_slice) {
+                None => &["create", "skip"],
+                Some([only]) => {
+                    let changes = diff_backup(
+                        item,
+                        &snapshot.rows[*only],
+                        snapshot
+                            .policies
+                            .get(&snapshot.rows[*only].public.id)
+                            .map_or(&[], Vec::as_slice),
+                    );
+                    if changes.is_empty() {
+                        &["skip"]
+                    } else {
+                        &["overwrite", "skip"]
+                    }
                 }
+                Some(_) => &["skip"],
             }
-            Some(_) => &["skip"],
         };
         if !allowed.contains(&action.action.as_str()) {
             return problem(
@@ -2000,5 +2080,47 @@ fn backup_as_write(item: &BackupItem) -> ServerWrite {
         probe_enable_tcp: item.probe_enable_tcp,
         probe_enable_mtr: item.probe_enable_mtr,
         traffic_policies: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_backup_distinguishes_empty_and_overlong_and_allows_duplicates_for_preview() {
+        let mut empty_doc: BackupDocument = serde_json::from_value(json!({
+            "format": "santaizi.servers.v1",
+            "servers": [{ "name": "   " }]
+        }))
+        .unwrap();
+        assert_eq!(
+            normalize_backup(&mut empty_doc).unwrap_err(),
+            "server name is required"
+        );
+
+        let too_long = "a".repeat(256);
+        let mut overlong_doc: BackupDocument = serde_json::from_value(json!({
+            "format": "santaizi.servers.v1",
+            "servers": [{ "name": too_long }]
+        }))
+        .unwrap();
+        assert_eq!(
+            normalize_backup(&mut overlong_doc).unwrap_err(),
+            "server name must not exceed 255 characters"
+        );
+
+        // 150 字符与同名机器均不在 normalize_backup 阶段整包拒绝。
+        let long_ok = "b".repeat(150);
+        let mut dup_doc: BackupDocument = serde_json::from_value(json!({
+            "format": "santaizi.servers.v1",
+            "servers": [
+                { "name": long_ok },
+                { "name": "dup-node" },
+                { "name": "dup-node" }
+            ]
+        }))
+        .unwrap();
+        assert!(normalize_backup(&mut dup_doc).is_ok());
     }
 }
