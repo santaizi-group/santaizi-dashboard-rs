@@ -65,9 +65,19 @@ impl EnrollmentHandler {
             .await;
             match available {
                 Ok(()) => {}
-                // 已绑到别的节点：Go 在此检查控制会话是否在线（Phase 3 运行态），
-                // 当前无在线会话即允许换绑。
-                Err(err) if is_bound_to_other_node(&err) => {}
+                // 已绑到别的节点：若原绑定节点的 Control 流当前在线则拒绝抢绑，
+                // 仅在原节点离线时允许换绑（对齐 Go `enroll.go:66`）。
+                Err(err) if is_bound_to_other_node(&err) => {
+                    if self
+                        .state
+                        .monitor()
+                        .session_node_conflict(server_id, node_uuid)
+                    {
+                        return Err(Status::failed_precondition(
+                            "server is already bound to an active agent",
+                        ));
+                    }
+                }
                 Err(err) => return Err(Status::internal(err.to_string())),
             }
             let changed = blocking_write(self.state.db(), {
@@ -155,5 +165,84 @@ impl proto::santaizi_enrollment_service_server::SantaiziEnrollmentService for En
             false,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use tonic::Code;
+
+    #[tokio::test]
+    async fn enroll_blocks_rebind_when_existing_node_control_session_is_online() {
+        crate::util::tls::install_crypto_provider();
+        let dir = std::env::temp_dir().join(format!(
+            "santaizi-enroll-conflict-{}-{}",
+            std::process::id(),
+            crate::util::time::now_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::migrate::open_primary(dir.join("panel.db").to_str().unwrap()).unwrap();
+        let mut conf = Config::default();
+        conf.telemetry.data_dir = dir.to_string_lossy().into_owned();
+        conf.telemetry.signing_key_path = dir.join("sign.key").to_string_lossy().into_owned();
+        conf.telemetry.secret_key_path = dir.join("secret.key").to_string_lossy().into_owned();
+        let state = AppState::primary(conf, db.clone()).await.unwrap();
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO servers (id, name, secret_ciphertext) VALUES (7, 'node-7', X'01')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let handler = EnrollmentHandler::new(Arc::clone(&state));
+        let node_a = vec![0xAAu8; 16];
+        let node_b = vec![0xBBu8; 16];
+        let key_a = crate::pki::client::generate_key().unwrap();
+        let csr_a =
+            crate::pki::client::create_csr(&key_a, &crate::pki::uri::encode_agent_uri(&node_a))
+                .unwrap();
+        let key_b = crate::pki::client::generate_key().unwrap();
+        let csr_b =
+            crate::pki::client::create_csr(&key_b, &crate::pki::uri::encode_agent_uri(&node_b))
+                .unwrap();
+
+        // 首次绑定 node_a 成功。
+        handler
+            .issue_agent_certificate(7, &node_a, &csr_a, true)
+            .await
+            .unwrap();
+
+        // node_a 建立在线 Control 会话期间，node_b 尝试换绑必须被拒为 FailedPrecondition。
+        let (tx, _rx) = tokio::sync::mpsc::channel(2);
+        state
+            .monitor()
+            .register_session(7, node_a.clone(), vec![], tx);
+        let err = handler
+            .issue_agent_certificate(7, &node_b, &csr_b, true)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert_eq!(err.message(), "server is already bound to an active agent");
+        let bound = db
+            .read(|conn| bindings::server_id_from_node_uuid(conn, &node_a))
+            .unwrap();
+        assert_eq!(bound, Some(7), "原在线绑定不得被覆盖");
+
+        // node_a 离线断流后，node_b 允许正常换绑。
+        state.monitor().unregister_session(7, &node_a);
+        handler
+            .issue_agent_certificate(7, &node_b, &csr_b, true)
+            .await
+            .unwrap();
+        let bound_b = db
+            .read(|conn| bindings::server_id_from_node_uuid(conn, &node_b))
+            .unwrap();
+        assert_eq!(bound_b, Some(7));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

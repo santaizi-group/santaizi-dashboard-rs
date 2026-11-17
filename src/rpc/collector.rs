@@ -249,14 +249,15 @@ impl CollectorHandler {
         .map_err(|err| Status::internal(err.to_string()))?;
         let notifier = self.state.notifier();
         for notice in notices {
-            notifier
-                .send(
-                    &notice.tag,
-                    &notice.message,
-                    Some(notice.mute_label),
-                    Some(notice.server_id),
-                )
-                .await;
+            for label in &notice.unmute_labels {
+                notifier.unmute(&notice.tag, label);
+            }
+            if !notice.message.is_empty() {
+                let mute = (!notice.mute_label.is_empty()).then_some(notice.mute_label);
+                notifier
+                    .send(&notice.tag, &notice.message, mute, Some(notice.server_id))
+                    .await;
+            }
         }
         Self::send_accepted(tx).await
     }
@@ -347,24 +348,71 @@ impl CollectorHandler {
             };
             // 运行态刷新合进一个事务：逐事件一开事务会把批次耗时放大到事件数倍，
             // 在 busy_timeout 内排不上写锁。
-            let events: Vec<proto::TelemetryEvent> = batch
+            // 判活必须使用观测方真实接收钟（`observations.received_at_unix_nano`），
+            // 不能拿主端复制到达时刻当主机心跳，否则延迟复制会把已离线主机短暂拉回在线。
+            let mut observed_map: std::collections::HashMap<Vec<u8>, i64> =
+                std::collections::HashMap::with_capacity(batch.observations.len());
+            for obs in &batch.observations {
+                if obs.received_at_unix_nano > 0
+                    && obs.received_at_unix_nano
+                        <= received_at_nanos.saturating_add(store::CLOCK_SKEW_LIMIT_NANOS)
+                {
+                    observed_map
+                        .entry(obs.event_id.clone())
+                        .and_modify(|ts| *ts = (*ts).max(obs.received_at_unix_nano))
+                        .or_insert(obs.received_at_unix_nano);
+                }
+            }
+            let threshold_nanos =
+                (self.state.conf().offline_threshold_seconds.max(10) as i64) * 1_000_000_000;
+            let events: Vec<(proto::TelemetryEvent, i64)> = batch
                 .events
                 .iter()
-                .filter(|event| {
-                    event.node_uuid.len() == 16
-                        && (received_at_nanos - event.collected_at_unix_nano).abs()
-                            <= store::CLOCK_SKEW_LIMIT_NANOS
+                .filter_map(|event| {
+                    if event.node_uuid.len() != 16 {
+                        return None;
+                    }
+                    let observed_at = observed_map.get(&event.event_id).copied().unwrap_or(0);
+                    let ref_clock = if observed_at > 0 {
+                        observed_at
+                    } else {
+                        received_at_nanos
+                    };
+                    // 用 abs_diff 而非有符号减法取绝对值：极端采集钟会让
+                    // `a - b` 在 Debug 下 panic、Release 下回绕成 i64::MIN
+                    // （其 abs 仍为负），从而绕过整个时钟可信窗。
+                    (ref_clock.abs_diff(event.collected_at_unix_nano)
+                        <= store::CLOCK_SKEW_LIMIT_NANOS as u64)
+                        .then(|| (event.clone(), observed_at))
                 })
-                .cloned()
                 .collect();
-            blocking_write(self.state.db(), move |tx| {
-                for event in &events {
-                    runtime::apply_event_runtime(tx, event, received_at_nanos, offline)?;
+            let ip_changes = blocking_write(self.state.db(), move |tx| {
+                let mut changes = Vec::new();
+                for (event, observed_at) in &events {
+                    let (_, change) = runtime::apply_replicated_event_runtime_with_ip(
+                        tx,
+                        event,
+                        *observed_at,
+                        received_at_nanos,
+                        threshold_nanos,
+                        offline,
+                    )?;
+                    if let Some(change) = change {
+                        changes.push(change);
+                    }
                 }
-                Ok(())
+                Ok(changes)
             })
             .await
             .map_err(|err| Status::internal(err.to_string()))?;
+            if self.state.conf().enable_ip_change_notification && !ip_changes.is_empty() {
+                let notifier = self.state.notifier();
+                for change in ip_changes {
+                    notifier
+                        .notify_ip_change(change.server_id, &change.old_ip, &change.new_ip)
+                        .await;
+                }
+            }
             // 复制 RTT 时延样本：与 Go `UpsertCollectorRuntime` 尾部一致，
             // 仅 runtime 帧携带 RTT 时落桶。
             if let Some(runtime) = &batch.runtime {
@@ -450,8 +498,24 @@ fn to_u64(value: i64) -> u64 {
     value.clamp(0, i64::MAX) as u64
 }
 
-/// 注册失败节流键（进程级单桶）。
+/// 注册失败节流键前缀（结合来源 IP 隔离，无地址时回退全局键）。
 const REGISTRATION_THROTTLE_KEY: &str = "collector-registration";
+
+fn registration_throttle_key(remote_addr: Option<std::net::SocketAddr>) -> String {
+    match remote_addr {
+        Some(addr) => {
+            let ip = match addr.ip() {
+                std::net::IpAddr::V6(v6) => v6
+                    .to_ipv4_mapped()
+                    .map(std::net::IpAddr::V4)
+                    .unwrap_or(std::net::IpAddr::V6(v6)),
+                other => other,
+            };
+            format!("{REGISTRATION_THROTTLE_KEY}:{ip}")
+        }
+        None => REGISTRATION_THROTTLE_KEY.to_string(),
+    }
+}
 
 /// 注册节流器：进程内唯一，随 handler 复用。
 fn registration_throttle() -> &'static crate::api::rate_limit::FailureThrottle {
@@ -468,6 +532,7 @@ impl proto::santaizi_collector_service_server::SantaiziCollectorService for Coll
         &self,
         request: Request<proto::RegisterCollectorRequest>,
     ) -> StdResult<Response<proto::RegisterCollectorResponse>, Status> {
+        let remote_addr = request.remote_addr();
         let req = request.get_ref();
         // 注册令牌是长期凭据，明文走非 TLS 连接等于把它直接暴露给同网段。
         // 与 `Enroll` 同一准入门槛（见 `rpc/enroll.rs`）。
@@ -476,10 +541,10 @@ impl proto::santaizi_collector_service_server::SantaiziCollectorService for Coll
                 "collector registration requires TLS",
             ));
         }
-        // 注册令牌是长期共享秘密：与查看密码同型，必须限流才不会被离线爆破。
-        // 进程级单桶——秘密只有一个，按 IP 计数对换 IP 爆破形同虚设。
+        // 注册令牌按来源 IP 限流（无地址回退全局键），避免单台错配从端锁死其他正常从端注册。
         let throttle = registration_throttle();
-        if let Err(retry) = throttle.check(REGISTRATION_THROTTLE_KEY) {
+        let throttle_key = registration_throttle_key(remote_addr);
+        if let Err(retry) = throttle.check(&throttle_key) {
             return Err(Status::resource_exhausted(format!(
                 "too many failed registration attempts; retry in {}s",
                 retry.seconds()
@@ -487,11 +552,11 @@ impl proto::santaizi_collector_service_server::SantaiziCollectorService for Coll
         }
         let collector = match self.find_collector_by_token(&req.registration_token).await {
             Ok(collector) => {
-                throttle.record_success(REGISTRATION_THROTTLE_KEY);
+                throttle.record_success(&throttle_key);
                 collector
             }
             Err(status) => {
-                throttle.record_failure(REGISTRATION_THROTTLE_KEY);
+                throttle.record_failure(&throttle_key);
                 return Err(status);
             }
         };
@@ -622,5 +687,32 @@ impl proto::santaizi_replication_service_server::SantaiziReplicationService for 
             }
         });
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registration_throttle_key_isolates_remote_ips_and_normalizes_mapped_v6() {
+        assert_eq!(registration_throttle_key(None), "collector-registration");
+        let a = "203.0.113.10:50000".parse().unwrap();
+        let a_mapped = "[::ffff:203.0.113.10]:50001".parse().unwrap();
+        let b = "198.51.100.20:50000".parse().unwrap();
+        assert_eq!(
+            registration_throttle_key(Some(a)),
+            "collector-registration:203.0.113.10"
+        );
+        assert_eq!(
+            registration_throttle_key(Some(a_mapped)),
+            registration_throttle_key(Some(a)),
+            "IPv4-mapped IPv6 与同地址 IPv4 共享限流键"
+        );
+        assert_ne!(
+            registration_throttle_key(Some(a)),
+            registration_throttle_key(Some(b)),
+            "不同来源 IP 独立计数，错配从端不锁死其他从端"
+        );
     }
 }

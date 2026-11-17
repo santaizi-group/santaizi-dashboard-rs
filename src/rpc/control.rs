@@ -251,22 +251,10 @@ impl ControlHandler {
                 message = stream.message() => match message? {
                     Some(request) => match request.body {
                         Some(proto::agent_control_request::Body::ProbeResult(result)) => {
-                            // 反查 pending；命中且窗口满 30 样本则落历史 + 延迟告警。
-                            if let Some((monitor_id, sample_server, sample_delay, avg_delay, up, down)) =
-                                self.state.monitor().handle_result(server_id, &result)
-                            {
-                                self.state
-                                    .monitor()
-                                    .finalize_window(
-                                        monitor_id,
-                                        sample_server,
-                                        sample_delay,
-                                        avg_delay,
-                                        up,
-                                        down,
-                                    )
-                                    .await;
-                            }
+                            let monitor = self.state.monitor();
+                            tokio::spawn(async move {
+                                monitor.process_probe_result(server_id, &result).await;
+                            });
                         }
                         Some(proto::agent_control_request::Body::NatOpenResult(_)) => {
                             tracing::trace!(server_id, "nat open result ignored: NAT is not supported");

@@ -86,7 +86,7 @@ impl IngestHandler {
             .map_err(|err| Status::invalid_argument(err.to_string()))
     }
 
-    /// `ApplyV2Event`：fresh events 逐条刷运行态。
+    /// `ApplyV2Event`：fresh events 逐条刷运行态，并在 IP 变更时按配置触发通知。
     async fn apply_event_runtime(
         &self,
         event: &proto::TelemetryEvent,
@@ -94,11 +94,18 @@ impl IngestHandler {
     ) -> StdResult<(), Status> {
         let event = event.clone();
         let offline = OfflineHistoryPolicy::from_conf(&self.state.conf());
-        blocking_write(self.state.db(), move |tx| {
-            runtime::apply_event_runtime(tx, &event, received_at_nanos, offline).map(|_| ())
+        let (_, ip_change) = blocking_write(self.state.db(), move |tx| {
+            runtime::apply_event_runtime_with_ip(tx, &event, received_at_nanos, offline)
         })
         .await
-        .map_err(|err| Status::internal(err.to_string()))
+        .map_err(|err| Status::internal(err.to_string()))?;
+        if let Some(change) = ip_change {
+            self.state
+                .notifier()
+                .notify_ip_change(change.server_id, &change.old_ip, &change.new_ip)
+                .await;
+        }
+        Ok(())
     }
 
     /// `ApplyRealtimeSnapshot`：节点必须匹配 hello，超窗快照丢弃。

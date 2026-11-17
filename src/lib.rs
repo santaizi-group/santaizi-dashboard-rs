@@ -88,6 +88,22 @@ fn spawn_background_workers(
     db_path: &str,
 ) -> tokio::sync::watch::Sender<bool> {
     let (shutdown, worker_shutdown) = tokio::sync::watch::channel(false);
+    // 先修复运行态骨架与离线历史，确保后续 OfflineDetector 与 alert_sentinel 的启动预热
+    // （`seed_episodes` / `seed_initial_memory`）读到一致的 `server_runtimes.status`。
+    if let Err(err) = state.db().write(|tx| {
+        telemetry::housekeeping::init_server_runtimes(tx)?;
+        if state.conf().enable_offline_history {
+            let threshold = state.conf().offline_threshold_seconds.max(10);
+            telemetry::housekeeping::reconcile_offline_histories(
+                tx,
+                threshold,
+                crate::util::time::now_nanos(),
+            )?;
+        }
+        Ok(())
+    }) {
+        tracing::warn!("运行态骨架与离线历史修复失败: {err:#}");
+    }
     let engine = std::sync::Arc::new(availability::engine::Engine::new(
         state.db().clone(),
         state.conf().telemetry.availability_bucket_seconds,
@@ -133,20 +149,6 @@ fn spawn_background_workers(
         tokio::spawn(worker.run(worker_shutdown.clone()));
     } else {
         tracing::info!("rollup 未启用，跳过 STATE 聚合");
-    }
-    if let Err(err) = state.db().write(|tx| {
-        telemetry::housekeeping::init_server_runtimes(tx)?;
-        if state.conf().enable_offline_history {
-            let threshold = state.conf().offline_threshold_seconds.max(10);
-            telemetry::housekeeping::reconcile_offline_histories(
-                tx,
-                threshold,
-                crate::util::time::now_nanos(),
-            )?;
-        }
-        Ok(())
-    }) {
-        tracing::warn!("运行态骨架与离线历史修复失败: {err:#}");
     }
     tokio::spawn(telemetry::housekeeping::run_offline_retention(
         state.db().clone(),

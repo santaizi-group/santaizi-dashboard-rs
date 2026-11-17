@@ -475,6 +475,16 @@ fn parse_attempt_hops(hops_raw: &Value) -> Option<TraceResult> {
     Some(result)
 }
 
+/// `whois` 里的 ASN：ipinfo 对没有 ASN 的地址把保留段写进 whois
+/// （`RFC1918` / `RFC6598`），对可查询地址写 `AS41335`。保留段不得
+/// 当成 ASN 写进样本，否则弹窗会在内网跳上挂一个假 AS 号。
+fn whois_asn(value: Option<&Value>) -> Option<String> {
+    let raw = json_scalar(value)?;
+    let digits = raw.strip_prefix("AS").or_else(|| raw.strip_prefix("as"))?;
+    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+        .then(|| format!("AS{digits}"))
+}
+
 fn apply_geo(hop: &mut Hop, geo: Option<&Value>) {
     let Some(geo) = geo else {
         return;
@@ -482,6 +492,7 @@ fn apply_geo(hop: &mut Hop, geo: Option<&Value>) {
     if hop.asn.is_empty() {
         hop.asn = json_scalar(geo.get("asnumber"))
             .or_else(|| json_scalar(geo.get("asn")))
+            .or_else(|| whois_asn(geo.get("whois")))
             .unwrap_or_default();
     }
     if hop.country.is_empty() {
@@ -729,6 +740,38 @@ mod tests {
         assert_eq!(parsed.hops[0].country, "CN");
         assert!((parsed.hops[0].rtt_ms - 12.5).abs() < 0.01);
         assert_eq!(parsed.hops[0].loss, 0.0);
+    }
+
+    /// ipinfo 形态：ASN 在 `asnumber`，与默认数据源同键。
+    #[test]
+    fn parses_ipinfo_asnumber() {
+        let raw = br#"{"Hops":[[{"Success":true,"Address":{"IP":"192.0.2.1"},"TTL":2,
+            "RTT":12000000,"Geo":{"asnumber":"13335","country":"ANYCAST","owner":" Cloudflare, Inc."}}]]}"#;
+        let parsed = parse_json(raw).unwrap();
+        assert_eq!(parsed.hops[0].asn, "13335");
+    }
+
+    /// ipinfo 把保留地址写进 `whois`：只有 `AS<数字>` 才算 ASN，
+    /// `RFC1918` 之类不能在内网跳上造出一个假 AS 号。
+    #[test]
+    fn whois_as_number_only_counts_for_asn() {
+        let raw = br#"{"Hops":[
+            [{"Success":true,"Address":{"IP":"10.0.0.6"},"TTL":1,"RTT":1000,
+              "Geo":{"asnumber":"","whois":"RFC1918"}}],
+            [{"Success":true,"Address":{"IP":"198.51.100.19"},"TTL":2,"RTT":2000,
+              "Geo":{"whois":"AS41335"}}]]}"#;
+        let parsed = parse_json(raw).unwrap();
+        assert_eq!(parsed.hops[0].asn, "", "RFC 保留段不是 ASN");
+        assert_eq!(parsed.hops[1].asn, "AS41335");
+    }
+
+    /// `asnumber` 有值时 `whois` 不覆盖。
+    #[test]
+    fn asnumber_wins_over_whois() {
+        let raw = br#"{"Hops":[[{"Success":true,"Address":{"IP":"192.0.2.1"},"TTL":1,
+            "RTT":1,"Geo":{"asnumber":"13335","whois":"AS41335"}}]]}"#;
+        let parsed = parse_json(raw).unwrap();
+        assert_eq!(parsed.hops[0].asn, "13335");
     }
 }
 

@@ -7,11 +7,9 @@
 //! `status_authorization` 查询从端运行态。Register / Sync / RenewCollector
 //! 是从端→主端方向，这里不实现（tonic trait 无默认体，显式 unimplemented）。
 //!
-//! 与 Go 的一处实现偏差：Go 的 `ClientCAsProvider` 在每次 TLS 握手动态提供
-//! Agent CA 池；tonic 的 `ServerTlsConfig` 只接受静态池，这里在 server 启动
-//! 时读取主端已下发的 `agent-ca.crt` 快照。注册完成前从端无 Agent CA，而
-//! 彼时也没有探针能被指派到它，功能不受影响；运行中轮换 Agent CA 需重启
-//! 从端生效（Go 无需重启）。
+//! 与 Go 的实现对齐：tonic 的 `ServerTlsConfig` 接收静态 CA 池，因此通过监听
+//! `Runtime` 的 `agent-ca.crt` watch 通道，在首次注册落盘或运行期轮换 Agent CA
+//! 时热重建 tonic `Server` 实例（复用同一个 `TcpListener` 分发连接），无需人工重启从端。
 
 use std::result::Result as StdResult;
 use std::sync::Arc;
@@ -337,7 +335,8 @@ const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// `ServeCollectorRPC`：从端 agent 服务监听。`force_agent_ingest` 对应 Go
 /// `SetForceAgentIngest(GRPCTLS.Enabled)`：TLS 开启时 Ingest 必须带 agent
-/// 证书。`cancel` 触发即优雅退出。
+/// 证书。监听 `Runtime` 的 `agent-ca.crt` 变化并在无中断复用 `TcpListener` 的前提下
+/// 热重建 tonic `Server` 实例；`cancel` 触发即优雅退出。
 pub async fn serve_collector_agent(
     runtime: Arc<Runtime>,
     listener: tokio::net::TcpListener,
@@ -351,15 +350,144 @@ pub async fn serve_collector_agent(
         force_agent_ingest: conf.grpc_tls.enabled,
     };
     let grace_secs = (conf.telemetry.credential_grace_days.clamp(0, 3650) * 86_400) as i64;
+    let listen_addr = listener.local_addr()?;
+
+    if !conf.grpc_tls.enabled {
+        let handler = AgentServiceHandler::new(Arc::clone(&runtime), grace_secs);
+        let telemetry =
+            proto::santaizi_telemetry_service_server::SantaiziTelemetryServiceServer::new(
+                handler.clone(),
+            );
+        let collector =
+            proto::santaizi_collector_service_server::SantaiziCollectorServiceServer::new(handler);
+        let (_health_reporter, health_service) = tonic_health::server::health_reporter();
+
+        tracing::info!(
+            listen = %listen_addr,
+            tls = false,
+            "collector agent 服务启动"
+        );
+        Server::builder()
+            .http2_keepalive_interval(Some(KEEPALIVE_INTERVAL))
+            .http2_keepalive_timeout(Some(KEEPALIVE_TIMEOUT))
+            .layer(auth::DeviceAuthLayer::new(policy))
+            .add_service(telemetry)
+            .add_service(collector)
+            .add_service(health_service)
+            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async move {
+                cancel.cancelled().await;
+            })
+            .await
+            .map_err(|err| anyhow::anyhow!("serve collector agent: {err}"))?;
+        tracing::info!("collector agent 服务退出");
+        return Ok(());
+    }
+
+    let mut ca_rx = runtime.subscribe_agent_ca();
+    // 先标记已见快照再读取磁盘 TLS 配置：即便并发更新发生在两者之间，下一轮 changed() 也会立即捕获。
+    let _ = ca_rx.borrow_and_update();
+    let initial_tls = collector_agent_tls_config(&runtime, conf)?;
+    let (mut conn_tx, mut gen_cancel, mut gen_task) = spawn_collector_agent_generation(
+        Arc::clone(&runtime),
+        policy.clone(),
+        grace_secs,
+        initial_tls,
+    )?;
+
+    tracing::info!(
+        listen = %listen_addr,
+        tls = true,
+        "collector agent 服务启动"
+    );
+    let mut retiring: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                drop(conn_tx);
+                gen_cancel.cancel();
+                break;
+            }
+            changed = ca_rx.changed() => {
+                if changed.is_err() {
+                    continue;
+                }
+                match collector_agent_tls_config(&runtime, conf) {
+                    Ok(next_tls) => match spawn_collector_agent_generation(
+                        Arc::clone(&runtime),
+                        policy.clone(),
+                        grace_secs,
+                        next_tls,
+                    ) {
+                        Ok((next_tx, next_cancel, next_task)) => {
+                            tracing::info!(
+                                listen = %listen_addr,
+                                "agent-ca.crt 已更新，热重建 collector agent TLS 服务"
+                            );
+                            let old_tx = std::mem::replace(&mut conn_tx, next_tx);
+                            let old_cancel = std::mem::replace(&mut gen_cancel, next_cancel);
+                            let mut old_task = std::mem::replace(&mut gen_task, next_task);
+                            drop(old_tx);
+                            old_cancel.cancel();
+                            retiring.retain(|handle| !handle.is_finished());
+                            retiring.push(tokio::spawn(async move {
+                                if tokio::time::timeout(Duration::from_secs(5), &mut old_task)
+                                    .await
+                                    .is_err()
+                                {
+                                    old_task.abort();
+                                }
+                            }));
+                        }
+                        Err(err) => {
+                            tracing::warn!("热重建 collector agent TLS 实例失败，保留当前实例: {err:#}");
+                        }
+                    },
+                    Err(err) => {
+                        tracing::warn!("重载 collector agent TLS 配置失败，保留当前实例: {err:#}");
+                    }
+                }
+            }
+            accepted = listener.accept() => {
+                match accepted {
+                    Ok((stream, _peer)) => {
+                        let _ = conn_tx.send(Ok(stream)).await;
+                    }
+                    Err(err) => {
+                        tracing::warn!("collector agent accept error: {err}");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            }
+        }
+    }
+    if tokio::time::timeout(Duration::from_secs(5), &mut gen_task)
+        .await
+        .is_err()
+    {
+        gen_task.abort();
+    }
+    for handle in retiring {
+        let _ = handle.await;
+    }
+    tracing::info!("collector agent 服务退出");
+    Ok(())
+}
+
+type ConnSender = mpsc::Sender<std::io::Result<tokio::net::TcpStream>>;
+
+fn spawn_collector_agent_generation(
+    runtime: Arc<Runtime>,
+    policy: auth::DeviceAuthPolicy,
+    grace_secs: i64,
+    tls_config: ServerTlsConfig,
+) -> anyhow::Result<(ConnSender, CancellationToken, tokio::task::JoinHandle<()>)> {
     let mut builder = Server::builder()
         .http2_keepalive_interval(Some(KEEPALIVE_INTERVAL))
         .http2_keepalive_timeout(Some(KEEPALIVE_TIMEOUT))
-        .layer(auth::DeviceAuthLayer::new(policy));
-    if conf.grpc_tls.enabled {
-        builder = builder.tls_config(collector_agent_tls_config(&runtime, conf)?)?;
-    }
+        .layer(auth::DeviceAuthLayer::new(policy))
+        .tls_config(tls_config)?;
 
-    let handler = AgentServiceHandler::new(Arc::clone(&runtime), grace_secs);
+    let handler = AgentServiceHandler::new(runtime, grace_secs);
     let telemetry = proto::santaizi_telemetry_service_server::SantaiziTelemetryServiceServer::new(
         handler.clone(),
     );
@@ -367,22 +495,23 @@ pub async fn serve_collector_agent(
         proto::santaizi_collector_service_server::SantaiziCollectorServiceServer::new(handler);
     let (_health_reporter, health_service) = tonic_health::server::health_reporter();
 
-    tracing::info!(
-        listen = %listener.local_addr()?,
-        tls = conf.grpc_tls.enabled,
-        "collector agent 服务启动"
-    );
-    builder
-        .add_service(telemetry)
-        .add_service(collector)
-        .add_service(health_service)
-        .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async move {
-            cancel.cancelled().await;
-        })
-        .await
-        .map_err(|err| anyhow::anyhow!("serve collector agent: {err}"))?;
-    tracing::info!("collector agent 服务退出");
-    Ok(())
+    let (conn_tx, conn_rx) = mpsc::channel::<std::io::Result<tokio::net::TcpStream>>(64);
+    let gen_cancel = CancellationToken::new();
+    let shutdown_token = gen_cancel.clone();
+    let task = tokio::spawn(async move {
+        if let Err(err) = builder
+            .add_service(telemetry)
+            .add_service(collector)
+            .add_service(health_service)
+            .serve_with_incoming_shutdown(ReceiverStream::new(conn_rx), async move {
+                shutdown_token.cancelled().await;
+            })
+            .await
+        {
+            tracing::warn!("collector agent TLS generation exited with error: {err}");
+        }
+    });
+    Ok((conn_tx, gen_cancel, task))
 }
 
 /// `collectorServerOptions` 的 TLS 部分：服务端证书 + 客户端 CA 池
@@ -413,4 +542,197 @@ fn collector_agent_tls_config(runtime: &Runtime, conf: &Config) -> anyhow::Resul
         config = config.client_ca_root(Certificate::from_pem(ca_pem));
     }
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::CollectorModeConfig;
+    use rcgen::CertifiedKey;
+    use time::OffsetDateTime;
+    use tonic::Code;
+    use tonic::transport::{ClientTlsConfig, Endpoint};
+
+    #[tokio::test]
+    async fn hot_reloads_agent_ca_without_restarting_listener() {
+        crate::util::tls::install_crypto_provider();
+        let dir = std::env::temp_dir().join(format!(
+            "santaizi-collector-ca-reload-{}-{}",
+            std::process::id(),
+            util_time::now_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 生成自签服务端证书（SAN: localhost）与主端 PKI Bundle（含 Agent CA）。
+        let CertifiedKey { cert, signing_key } =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let server_cert_pem = cert.pem();
+        let server_key_pem = signing_key.serialize_pem();
+        let cert_path = dir.join("server.crt");
+        let key_path = dir.join("server.key");
+        std::fs::write(&cert_path, &server_cert_pem).unwrap();
+        std::fs::write(&key_path, &server_key_pem).unwrap();
+
+        let pki_bundle =
+            crate::pki::load_or_create(&dir.join("primary-pki").to_string_lossy()).unwrap();
+        let signer = crate::telemetry::credential::Signer::load_or_create(
+            &dir.join("telemetry.key").to_string_lossy(),
+        )
+        .unwrap();
+        let node_uuid = vec![0x55u8; 16];
+        let agent_key = crate::pki::client::generate_key().unwrap();
+        let agent_csr = crate::pki::client::create_csr(
+            &agent_key,
+            &crate::pki::uri::encode_agent_uri(&node_uuid),
+        )
+        .unwrap();
+        let (agent_cert_pem, _, _) = crate::pki::sign_agent_csr(
+            &pki_bundle.agent,
+            &agent_csr,
+            &node_uuid,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        let agent_identity = Identity::from_pem(agent_cert_pem, agent_key.serialize_pem());
+
+        let db_path = dir.join("collector.db");
+        let db = crate::db::migrate::open_collector(db_path.to_str().unwrap()).unwrap();
+        // 初始授权缓存不带 agent_ca_certificate_pem，模拟首次启动本地尚无 agent-ca.crt。
+        let collector_uuid = "col-hot-reload".to_string();
+        let auth_cfg = proto::CollectorAuthorizationConfig {
+            config_version: 1,
+            primary_public_key: signer.public_key(),
+            key_id: signer.key_id(),
+            kind: proto::CollectorKind::Observer as i32,
+            assignments: vec![proto::NodeAssignment {
+                node_uuid: node_uuid.clone(),
+                observer_id: collector_uuid.clone(),
+                valid_from_unix_nano: 0,
+                valid_to_unix_nano: 0,
+                generation: 1,
+                config_version: 1,
+            }],
+            ..Default::default()
+        };
+        let now_nanos = util_time::now_nanos();
+        db.write(|tx| store::save_authorization(tx, &collector_uuid, &auth_cfg, now_nanos))
+            .unwrap();
+
+        let cancel = CancellationToken::new();
+        let runtime = Arc::new(
+            Runtime::new(
+                cancel.clone(),
+                db,
+                db_path.to_str().unwrap(),
+                CollectorModeConfig {
+                    primary_endpoint: "127.0.0.1:9".into(),
+                    registration_token: "stc_test".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        assert!(runtime.client_store().load_agent_ca().unwrap().is_empty());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut conf = Config {
+            mode: "collector".into(),
+            ..Default::default()
+        };
+        conf.grpc_tls.enabled = true;
+        conf.grpc_tls.cert_file = cert_path.to_string_lossy().into_owned();
+        conf.grpc_tls.key_file = key_path.to_string_lossy().into_owned();
+
+        let srv_cancel = cancel.clone();
+        let srv_runtime = Arc::clone(&runtime);
+        let srv_task = tokio::spawn(async move {
+            serve_collector_agent(srv_runtime, listener, srv_cancel, &conf)
+                .await
+                .unwrap();
+        });
+
+        let credential = signer
+            .sign(&node_uuid, 1, now_nanos / 1_000_000_000, 3600)
+            .unwrap();
+        let try_ingest = |agent_id: Identity| {
+            let server_cert_pem = server_cert_pem.clone();
+            let collector_uuid = collector_uuid.clone();
+            let node_uuid = node_uuid.clone();
+            let credential = credential.clone();
+            async move {
+                let tls = ClientTlsConfig::new()
+                    .domain_name("localhost")
+                    .ca_certificate(Certificate::from_pem(server_cert_pem))
+                    .identity(agent_id);
+                let ch = Endpoint::from_shared(format!("https://localhost:{port}"))
+                    .unwrap()
+                    .tls_config(tls)
+                    .unwrap()
+                    .connect()
+                    .await
+                    .map_err(|e| Status::unavailable(e.to_string()))?;
+                let mut cli =
+                    proto::santaizi_telemetry_service_client::SantaiziTelemetryServiceClient::new(
+                        ch,
+                    );
+                let (tx, rx) = mpsc::channel(4);
+                tx.send(proto::TelemetryRequest {
+                    body: Some(proto::telemetry_request::Body::Hello(
+                        proto::TelemetryHello {
+                            node_uuid,
+                            endpoint_id: collector_uuid,
+                            assignment_generation: 1,
+                            credential: Some(credential),
+                            protocol_version: "2".into(),
+                            ..Default::default()
+                        },
+                    )),
+                })
+                .await
+                .unwrap();
+                tx.send(proto::TelemetryRequest {
+                    body: Some(proto::telemetry_request::Body::Ping(
+                        proto::TelemetryPing {},
+                    )),
+                })
+                .await
+                .unwrap();
+                let mut stream = cli
+                    .ingest(Request::new(ReceiverStream::new(rx)))
+                    .await?
+                    .into_inner();
+                stream
+                    .message()
+                    .await?
+                    .ok_or_else(|| Status::unavailable("closed"))
+            }
+        };
+
+        // 1) 热重载前：无 agent-ca.crt，服务端未请求客户端证书，Ingest 被 DeviceAuthLayer 拒为 Unauthenticated。
+        let before = try_ingest(agent_identity.clone()).await.unwrap_err();
+        assert_eq!(before.code(), Code::Unauthenticated);
+
+        // 2) Runtime 落盘并广播新的 agent-ca.crt，无需重启 serve_collector_agent 即热重建 TLS 实例。
+        runtime.update_agent_ca(&pki_bundle.agent.cert_pem).unwrap();
+        let mut succeeded = false;
+        for _ in 0..25 {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            if let Ok(resp) = try_ingest(agent_identity.clone()).await
+                && resp.pong.is_some()
+            {
+                succeeded = true;
+                break;
+            }
+        }
+        assert!(
+            succeeded,
+            "热重载 agent-ca.crt 后探针 mTLS Ingest 应自动恢复成功"
+        );
+
+        cancel.cancel();
+        srv_task.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -122,6 +122,8 @@ pub struct Runtime {
     db_path: String,
     config: CollectorModeConfig,
     client_store: client::ClientStore,
+    /// `agent-ca.crt` 最新 PEM 快照广播：首次注册落盘或主端轮换 Agent CA 时唤醒监听端热重载 TLS。
+    agent_ca_watch: tokio::sync::watch::Sender<Vec<u8>>,
     cancel: CancellationToken,
     runtime_resend: Duration,
     /// 进程级复制会话 ID（Go `replicationSession`，每进程 16 随机字节）。
@@ -163,6 +165,8 @@ impl Runtime {
                 let _ = client_store.save_agent_ca(cache.agent_ca_certificate_pem.as_bytes());
             }
         }
+        let initial_agent_ca = client_store.load_agent_ca().unwrap_or_default();
+        let (agent_ca_watch, _) = tokio::sync::watch::channel(initial_agent_ca);
         let mut replication_session = vec![0u8; 16];
         rand::rng().fill_bytes(&mut replication_session);
         Ok(Self {
@@ -170,6 +174,7 @@ impl Runtime {
             db_path: db_path.to_string(),
             config,
             client_store,
+            agent_ca_watch,
             cancel,
             runtime_resend: RUNTIME_RESEND,
             replication_session,
@@ -204,6 +209,28 @@ impl Runtime {
 
     pub fn client_store(&self) -> &client::ClientStore {
         &self.client_store
+    }
+
+    pub fn subscribe_agent_ca(&self) -> tokio::sync::watch::Receiver<Vec<u8>> {
+        self.agent_ca_watch.subscribe()
+    }
+
+    /// 落盘 `agent-ca.crt` 并在内容发生变化（首次生成或轮换）时广播唤醒监听端热重载。
+    pub fn update_agent_ca(&self, pem: &[u8]) -> Result<()> {
+        if pem.is_empty() {
+            return Ok(());
+        }
+        self.client_store.save_agent_ca(pem)?;
+        self.agent_ca_watch.send_if_modified(|current| {
+            if current.as_slice() == pem {
+                false
+            } else {
+                current.clear();
+                current.extend_from_slice(pem);
+                true
+            }
+        });
+        Ok(())
     }
 
     pub fn connected_agents(&self) -> u64 {
@@ -654,9 +681,7 @@ impl Runtime {
                 };
                 self.lock().kind = kind.to_string();
                 if !config.agent_ca_certificate_pem.is_empty() {
-                    let _ = self
-                        .client_store
-                        .save_agent_ca(config.agent_ca_certificate_pem.as_bytes());
+                    let _ = self.update_agent_ca(config.agent_ca_certificate_pem.as_bytes());
                 }
             }
             Some(proto::collector_sync_response::Body::RouteJobs(batch)) => {
@@ -702,9 +727,7 @@ impl Runtime {
         })
         .await?;
         if !response.agent_ca_certificate_pem.is_empty() {
-            let _ = self
-                .client_store
-                .save_agent_ca(response.agent_ca_certificate_pem.as_bytes());
+            let _ = self.update_agent_ca(response.agent_ca_certificate_pem.as_bytes());
         }
         if response.collector_certificate_pem.is_empty() {
             // 旧主端不签 collector 证书：全程走注册令牌（Go `legacyPrimary`）。
@@ -784,9 +807,7 @@ impl Runtime {
         )?;
         self.client_store.save(&bundle)?;
         if !response.agent_ca_certificate_pem.is_empty() {
-            let _ = self
-                .client_store
-                .save_agent_ca(response.agent_ca_certificate_pem.as_bytes());
+            let _ = self.update_agent_ca(response.agent_ca_certificate_pem.as_bytes());
         }
         let mut state = self.lock();
         state.renew_backoff = Duration::ZERO;
